@@ -2,7 +2,7 @@ import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import { createServer } from "node:http";
 
 import type { MeshDb } from "./db.js";
-import { findPeerByToken, touchPeer } from "./peers.js";
+import { authenticateToken } from "./peers.js";
 import { receiveMessage, unreadCount } from "./mail.js";
 
 const BODY_LIMIT = 64 * 1024;
@@ -34,12 +34,6 @@ async function handle(db: MeshDb, req: IncomingMessage, res: ServerResponse): Pr
     return;
   }
 
-  const peer = authenticate(db, req);
-  if (!peer) {
-    json(res, 401, { error: "unauthorized" });
-    return;
-  }
-
   if (req.method === "POST") {
     const body = await readBody(req);
     if (body === null) {
@@ -53,12 +47,25 @@ async function handle(db: MeshDb, req: IncomingMessage, res: ServerResponse): Pr
         json(res, 400, { error: "invalid mail body" });
         return;
       }
-      if (parsed.from !== peer.node_id) {
+      // Authenticate with the claimed sender so pending pairing tokens bind
+      // to the node id in the message.
+      const mailPeer = authenticate(db, req, parsed.from);
+      if (!mailPeer) {
+        json(res, 401, { error: "unauthorized" });
+        return;
+      }
+      if (parsed.from !== mailPeer.node_id) {
         json(res, 401, { error: "from does not match token" });
         return;
       }
       receiveMessage(db, parsed);
       json(res, 200, { ok: true, unread: unreadCount(db) });
+      return;
+    }
+
+    const peer = authenticate(db, req);
+    if (!peer) {
+      json(res, 401, { error: "unauthorized" });
       return;
     }
 
@@ -68,13 +75,18 @@ async function handle(db: MeshDb, req: IncomingMessage, res: ServerResponse): Pr
         json(res, 400, { error: "invalid announce body" });
         return;
       }
-      touchPeer(db, peer.node_id, parsed.addresses);
+      touchAddress(db, peer.node_id, parsed.addresses);
       json(res, 200, { ok: true });
       return;
     }
   }
 
   if (req.method === "GET" && url.pathname === "/status") {
+    const peer = authenticate(db, req);
+    if (!peer) {
+      json(res, 401, { error: "unauthorized" });
+      return;
+    }
     json(res, 200, {
       node_id: peer.node_id,
       unread: unreadCount(db),
@@ -85,14 +97,26 @@ async function handle(db: MeshDb, req: IncomingMessage, res: ServerResponse): Pr
   json(res, 404, { error: "not found" });
 }
 
-function authenticate(db: MeshDb, req: IncomingMessage): { node_id: string } | null {
+function authenticate(
+  db: MeshDb,
+  req: IncomingMessage,
+  from: string | null = null,
+): { node_id: string } | null {
   const header = req.headers.authorization ?? "";
   const match = /^Bearer (.+)$/.exec(header);
   if (!match?.[1]) {
     return null;
   }
-  const peer = findPeerByToken(db, match[1]);
+  const peer = authenticateToken(db, match[1], from);
   return peer ? { node_id: peer.node_id } : null;
+}
+
+function touchAddress(db: MeshDb, nodeId: string, addresses: string[]): void {
+  db.conn.run("UPDATE peers SET addresses = ?, last_seen = ? WHERE node_id = ?", [
+    JSON.stringify(addresses),
+    Date.now(),
+    nodeId,
+  ]);
 }
 
 function readBody(req: IncomingMessage): Promise<string | null> {

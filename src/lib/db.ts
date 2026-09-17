@@ -32,6 +32,10 @@ CREATE TABLE IF NOT EXISTS locks (
   owner_session TEXT NOT NULL,
   expires_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS pending_tokens (
+  token TEXT PRIMARY KEY,
+  created_at INTEGER NOT NULL
+);
 `;
 
 export function openMeshDb(path: string): MeshDb {
