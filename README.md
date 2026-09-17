@@ -51,9 +51,9 @@ mesh_unlock(path="src/api.ts")
 ### Security model
 
 - Every HTTP endpoint requires a per-peer bearer token; nothing is open by default.
-- Loopback peers (same machine) are auto-trusted; remote peers require explicit `mesh_pair` approval.
+- All peers, same machine or remote, pair through `mesh_pair`: one side emits a one-time token, the other completes the pairing with it.
 - mDNS TXT records carry node id + key fingerprint only, never secrets.
-- LAN-only by default; tailnet reachability is opt-in (`"allow_tailnet": true` plugin option).
+- LAN-only by default; tailnet addresses are surfaced by `mesh_status` when `tailscale` runs, for cross-subnet pools (`"allow_tailnet": true` plugin option, planned).
 
 ## Development
 
