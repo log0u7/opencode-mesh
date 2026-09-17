@@ -103,14 +103,6 @@ export function findPeerByToken(db: MeshDb, token: string): Peer | null {
   return row ? rowToPeer(row) : null;
 }
 
-export function touchPeer(db: MeshDb, nodeId: string, addresses: string[]): void {
-  db.conn.run("UPDATE peers SET addresses = ?, last_seen = ? WHERE node_id = ?", [
-    JSON.stringify(addresses),
-    Date.now(),
-    nodeId,
-  ]);
-}
-
 export function upsertDiscoveredPeer(
   db: MeshDb,
   peer: { node_id: string; hostname: string; fingerprint: string; addresses: string[] },

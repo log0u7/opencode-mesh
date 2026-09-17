@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, statSync, readFileSync } from "node:fs";
+import { mkdtempSync, rmSync, statSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -50,5 +50,37 @@ describe("loadOrCreateIdentity", () => {
     expect(raw.public_key).toBeTruthy();
     expect(raw.private_key).toBeTruthy();
     expect(raw.private_key).not.toEqual(raw.public_key);
+  });
+});
+
+describe("pairing token flow", () => {
+  it("authenticateToken consumes a pending token and binds it to the sender", async () => {
+    const { createPairingToken, authenticateToken } = await import("../src/lib/peers.js");
+    const { openMeshDb } = await import("../src/lib/db.js");
+    const db = openMeshDb(":memory:");
+
+    const token = createPairingToken(db);
+
+    // No sender id: pending token alone is not accepted.
+    expect(authenticateToken(db, token, null)).toBeNull();
+    // With the claimed sender id: pairing completes.
+    const peer = authenticateToken(db, token, "node-b");
+    expect(peer?.node_id).toBe("node-b");
+    // Token is consumed: second use falls back to the now-paired row.
+    expect(authenticateToken(db, token, "node-c")?.node_id).toBe("node-b");
+    // Unknown tokens fail.
+    expect(authenticateToken(db, "nope", "node-x")).toBeNull();
+
+    db.close();
+  });
+});
+
+describe("corrupt identity file", () => {
+  it("regenerates a valid identity when node.json is garbage", () => {
+    writeFileSync(join(dir, "node.json"), "}{ not json", "utf8");
+
+    const identity = loadOrCreateIdentity(dir);
+    expect(identity.node_id).toMatch(/[0-9a-f-]{36}/);
+    expect(statSync(join(dir, "node.json")).isFile()).toBe(true);
   });
 });
