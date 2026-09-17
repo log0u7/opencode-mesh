@@ -1,4 +1,4 @@
-import type { Bonjour, Service } from "bonjour-service";
+import type { Bonjour } from "bonjour-service";
 
 import { upsertDiscoveredPeer } from "./peers.js";
 import type { MeshDb } from "./db.js";
@@ -89,5 +89,3 @@ export async function tailnetAddresses(): Promise<string[]> {
     });
   });
 }
-
-export type { Service } from "bonjour-service";
