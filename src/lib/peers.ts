@@ -1,4 +1,4 @@
-import { randomBytes, randomUUID } from "node:crypto";
+import { randomBytes } from "node:crypto";
 
 import type { MeshDb } from "./db.js";
 import type { Peer } from "../types/peer.js";
