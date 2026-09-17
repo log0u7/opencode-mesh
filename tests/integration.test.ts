@@ -35,13 +35,14 @@ describe("two-node integration", () => {
     const a = await startNode("a");
     const b = await startNode("b");
 
-    // Each side pairs the other; each keeps the token it gave to the other.
-    const tokenForB = pairPeer(a.db, { node_id: "node-b", hostname: "b", fingerprint: "fb" });
+    // Each side pairs the other. The token that matters for sending is the one
+    // the RECEIVER issued: B pairs node-a (tokenForA), so A authenticates to B with it.
     const tokenForA = pairPeer(b.db, { node_id: "node-a", hostname: "a", fingerprint: "fa" });
+    const tokenForB = pairPeer(a.db, { node_id: "node-b", hostname: "b", fingerprint: "fb" });
 
     const result = await sendMail({
       url: b.url,
-      token: tokenForB,
+      token: tokenForA,
       from: "node-a",
       subject: "handoff",
       body: "api layer is done, tests green",
@@ -57,7 +58,7 @@ describe("two-node integration", () => {
     b.server.close();
     a.db.close();
     b.db.close();
-    expect(tokenForA.length).toBeGreaterThan(10);
+    expect(tokenForB.length).toBeGreaterThan(10);
   });
 
   it("sendMail reports unreachable peers without throwing", async () => {
