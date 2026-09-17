@@ -84,13 +84,14 @@ export const MeshPlugin: Plugin = async (_input, options?: PluginOptions) => {
 
       mesh_pair: tool({
         description:
-          "Pair with a peer. With no args: generate a pairing token to paste into the peer's mesh_pair call. With node_id and token: complete pairing started by the other side.",
+          "Pair with a peer. With no args: emit a pairing offer (token, node id, server address) for the peer's mesh_pair. With node_id, token, and address: complete pairing started by the other side.",
         args: {
           node_id: tool.schema
             .string()
             .optional()
             .describe("Peer node id, from its mesh_pair output"),
-          token: tool.schema.string().optional().describe("Pairing token generated on the peer"),
+          token: tool.schema.string().optional().describe("Pairing token from the peer's offer"),
+          address: tool.schema.string().optional().describe("Peer server address as host:port"),
         },
         execute: async (args) => {
           if (typeof args.token === "string" && typeof args.node_id === "string") {
@@ -99,11 +100,12 @@ export const MeshPlugin: Plugin = async (_input, options?: PluginOptions) => {
               hostname: "manual",
               fingerprint: "manual",
               token: args.token,
+              addresses: args.address !== undefined ? [args.address] : [],
             });
             return `paired with ${args.node_id}`;
           }
           const token = createPairingToken(db);
-          return `share this pairing token with the peer, which runs: mesh_pair(node_id="${identity.node_id}", token="${token}")`;
+          return `peer should run: mesh_pair(node_id="${identity.node_id}", token="${token}", address="127.0.0.1:${port}")`;
         },
       }),
 

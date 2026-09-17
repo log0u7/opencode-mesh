@@ -24,16 +24,29 @@ export function pairPeer(
 // Complete pairing with a token the peer generated (shared out of band).
 export function pairWithToken(
   db: MeshDb,
-  peer: { node_id: string; hostname: string; fingerprint: string; token: string },
+  peer: {
+    node_id: string;
+    hostname: string;
+    fingerprint: string;
+    token: string;
+    addresses?: string[];
+  },
 ): void {
   const now = Date.now();
 
   db.conn.run(
     `INSERT INTO peers (node_id, hostname, fingerprint, addresses, paired, token, last_seen)
-     VALUES (?, ?, ?, '[]', 1, ?, ?)
+     VALUES (?, ?, ?, ?, 1, ?, ?)
      ON CONFLICT(node_id) DO UPDATE SET hostname = excluded.hostname,
        fingerprint = excluded.fingerprint, paired = 1, token = excluded.token, last_seen = excluded.last_seen`,
-    [peer.node_id, peer.hostname, peer.fingerprint, peer.token, now],
+    [
+      peer.node_id,
+      peer.hostname,
+      peer.fingerprint,
+      JSON.stringify(peer.addresses ?? []),
+      peer.token,
+      now,
+    ],
   );
   db.conn.run("DELETE FROM pending_tokens WHERE token = ?", [peer.token]);
 }
