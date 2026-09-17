@@ -13,8 +13,8 @@ import {
   type AdvertiseHandle,
 } from "./lib/discovery.js";
 import { loadOrCreateIdentity, type NodeIdentity } from "./lib/identity.js";
-import { ackMessages, receiveMessage, unreadMessages } from "./lib/mail.js";
-import { listLocks, releaseLock, tryLock } from "./lib/locks.js";
+import { ackMessages, unreadMessages } from "./lib/mail.js";
+import { releaseLock, tryLock } from "./lib/locks.js";
 import { createPairingToken, listPeers, pairWithToken } from "./lib/peers.js";
 import { startMeshServer } from "./lib/serve.js";
 
