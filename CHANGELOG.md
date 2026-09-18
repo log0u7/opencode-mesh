@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Orchestrator: `mesh_spawn` runs tasks as tracked headless workers in isolated opencode worktrees (native worktree API), with `mesh_workers`, `mesh_worker_logs`, `mesh_worker_stop`, and `mesh_worker_remove`; plugin dispose SIGTERMs live workers.
 - Coverage gate in CI: 90% lines/functions, 80% branches (`pnpm test:coverage` locally).
 - Dependabot group coupling vitest with @vitest/* (coverage provider) so major bumps arrive together.
 - CONTRIBUTING.md documents the mandatory test-first flow and the solo-maintainer merge preference.

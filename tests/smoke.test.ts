@@ -31,8 +31,13 @@ describe("smoke: plugin module", () => {
       "mesh_lock",
       "mesh_pair",
       "mesh_send",
+      "mesh_spawn",
       "mesh_status",
       "mesh_unlock",
+      "mesh_worker_logs",
+      "mesh_worker_remove",
+      "mesh_worker_stop",
+      "mesh_workers",
     ]);
     await hooks.dispose?.();
   });

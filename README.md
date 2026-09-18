@@ -48,6 +48,20 @@ mesh_unlock(path="src/api.ts")
 | `mesh_lock` | `path`, `ttl?` | Exclusive claim on a file or worktree path (default ttl 600s). |
 | `mesh_unlock` | `path` | Release a claim. |
 
+### Orchestrator
+
+Spawn headless workers in isolated opencode worktrees (native worktree API), track them, and clean up:
+
+```
+mesh_spawn(task="implement the parser", name="parser")     # -> worker_id, worktree, branch
+mesh_workers()                                             # lifecycle states, session ids
+mesh_worker_logs(worker_id="...", tail=50)                 # captured output
+mesh_worker_stop(worker_id="...")                          # SIGTERM a running worker
+mesh_worker_remove(worker_id="...", force=true)            # worktree + registry row cleanup
+```
+
+Workers run `opencode run --dir <worktree> --format json` headless with `--auto` permissions by default (`auto=false` to require approvals). model/agent are optional args (defaults: your local config). `dispose` SIGTERMs every live worker so stopping opencode never leaves orphan processes.
+
 ### Security model
 
 - Every HTTP endpoint requires a per-peer bearer token; nothing is open by default.

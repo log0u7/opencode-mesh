@@ -18,6 +18,9 @@ importers:
       '@opencode-ai/plugin':
         specifier: 1.18.30
         version: 1.18.30
+      '@opencode-ai/sdk':
+        specifier: 1.18.30
+        version: 1.18.30
       '@types/node':
         specifier: ^22.0.0
         version: 22.20.3

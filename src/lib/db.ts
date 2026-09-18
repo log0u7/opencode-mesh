@@ -36,6 +36,18 @@ CREATE TABLE IF NOT EXISTS pending_tokens (
   token TEXT PRIMARY KEY,
   created_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS workers (
+  id TEXT PRIMARY KEY,
+  task TEXT NOT NULL,
+  worktree_path TEXT NOT NULL,
+  branch TEXT NOT NULL,
+  pid INTEGER,
+  session_id TEXT,
+  status TEXT NOT NULL DEFAULT 'running',
+  exit_code INTEGER,
+  started_at INTEGER NOT NULL,
+  finished_at INTEGER
+);
 `;
 
 export function openMeshDb(path: string): MeshDb {
