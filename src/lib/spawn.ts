@@ -103,6 +103,9 @@ export function stopWorker(db: MeshDb, id: string, options: StopOptions = {}): b
 
   const kill = options.killFn ?? defaultKill;
   kill(worker.id, "SIGTERM");
+  // Registry is authoritative: remove the process entry even if the OS takes
+  // time to reap the process (or a test fake ignores the signal).
+  LIVE_PROCESSES.delete(id);
   setWorkerStatus(db, id, "stopped", { exit_code: null });
   return true;
 }
