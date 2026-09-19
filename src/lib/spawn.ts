@@ -136,9 +136,8 @@ function buildArgv(input: RunWorkerInput): string[] {
   if (input.model !== undefined) {
     argv.push("--model", input.model);
   }
-  if (input.agent !== undefined) {
-    argv.push("--agent", input.agent);
-  }
+  // Workers must execute, never plan: build is the safe default agent.
+  argv.push("--agent", input.agent ?? "build");
   if (input.auto !== false) {
     argv.push("--auto");
   }

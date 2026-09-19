@@ -85,10 +85,11 @@ describe("runWorker argv", () => {
     expect(fake.argv).toContain("--format");
     expect(fake.argv).toContain("json");
     expect(fake.argv).toContain("--auto");
-    // No model/agent flags when not provided; task is the last argument.
+    // Workers must execute, never plan: --agent build is the default.
+    expect(fake.argv).toContain("--agent");
+    expect(fake.argv).toContain("build");
     expect(fake.argv.at(-1)).toBe("summarize the README");
     expect(fake.argv).not.toContain("--model");
-    expect(fake.argv).not.toContain("--agent");
     db.close();
   });
 
