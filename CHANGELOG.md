@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-09-18
+
 ### Changed
 
 - Dev deps: vitest 5 with @vitest/coverage-v8 5 (coverage gate unchanged: 90/80).
