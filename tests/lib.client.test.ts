@@ -7,14 +7,10 @@ describe("sendMail result mapping", () => {
   it("maps 401 to unauthorized", async () => {
     const { startMeshServer } = await import("../src/lib/serve.js");
     const db = openMeshDb(":memory:");
-    const server = startMeshServer({ db, port: 0 });
-    const address = server.address();
-    if (address === null || typeof address === "string") {
-      throw new Error("no ephemeral port");
-    }
+    const { server, port } = await startMeshServer({ db, port: 0 });
 
     const result = await sendMail({
-      url: `http://127.0.0.1:${address.port}`,
+      url: `http://127.0.0.1:${port}`,
       token: "wrong-token",
       from: "node-a",
       subject: "s",
@@ -29,16 +25,12 @@ describe("sendMail result mapping", () => {
   it("maps server errors to error", async () => {
     const { startMeshServer } = await import("../src/lib/serve.js");
     const db = openMeshDb(":memory:");
-    const server = startMeshServer({ db, port: 0 });
-    const address = server.address();
-    if (address === null || typeof address === "string") {
-      throw new Error("no ephemeral port");
-    }
+    const { server, port } = await startMeshServer({ db, port: 0 });
     const { pairPeer } = await import("../src/lib/peers.js");
     const token = pairPeer(db, { node_id: "node-a", hostname: "a", fingerprint: "f" });
 
     // Authenticated but invalid body -> 400 -> mapped to "error".
-    const response = await fetch(`http://127.0.0.1:${address.port}/mail`, {
+    const response = await fetch(`http://127.0.0.1:${port}/mail`, {
       method: "POST",
       headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
       body: JSON.stringify({ nope: true }),

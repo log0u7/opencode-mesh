@@ -71,15 +71,33 @@ function createBunConn(db: BunSqliteDatabase): SqliteConn {
   };
 }
 
-// Open a sqlite connection with the runtime's bundled engine: bun:sqlite when
-// running inside OpenCode (Bun), node:sqlite when running under Node (tests, CI).
+// Engine resolution at module load: OpenCode's compiled runtime (Bun 1.3.x)
+// exposes neither `globalThis.Bun.sqlite` nor `node:sqlite` to hot-loaded
+// plugins, but the `bun:sqlite` module itself IS available there. Node (tests,
+// CI) has no bun:sqlite and falls back to node:sqlite via createRequire.
+interface BunSqliteLike {
+  Database: new (path: string) => BunSqliteDatabase;
+}
+
+let BunSqliteEngine: BunSqliteLike | null = null;
+try {
+  const specifier = "bun:sqlite";
+  BunSqliteEngine = (await import(specifier)) as BunSqliteLike;
+} catch {
+  BunSqliteEngine = null;
+}
+
 export function openSqlite(path: string): SqliteConn {
   const globalRuntime = globalThis as {
-    Bun?: { sqlite: { Database: BunSqliteModule["Database"] } };
+    Bun?: { sqlite?: { Database: BunSqliteLike["Database"] } };
   };
 
-  if (globalRuntime.Bun) {
+  if (globalRuntime.Bun?.sqlite?.Database) {
     return createBunConn(new globalRuntime.Bun.sqlite.Database(path));
+  }
+
+  if (BunSqliteEngine) {
+    return createBunConn(new BunSqliteEngine.Database(path));
   }
 
   // node:sqlite ships with Node >= 22.5; require keeps non-node runtimes from

@@ -3,6 +3,8 @@ import { describe, expect, it, vi } from "vitest";
 import {
   createWorkerWorktree,
   removeWorkerWorktree,
+  extractClientFetch,
+  defaultWorktreeFactory,
   type WorktreeClient,
 } from "../src/lib/worktree.js";
 
@@ -70,5 +72,34 @@ describe("removeWorkerWorktree", () => {
     await expect(removeWorkerWorktree(client, { directory: "/x" })).rejects.toThrow(
       "worktree busy",
     );
+  });
+});
+
+describe("in-process fetch extraction", () => {
+  it("extracts the custom fetch from the plugin v1 client (_client)", () => {
+    const customFetch = async () => new Response("{}");
+    const pluginClient = { _client: { getConfig: () => ({ fetch: customFetch }) } };
+
+    expect(extractClientFetch(pluginClient)).toBe(customFetch);
+  });
+
+  it("returns undefined when the client exposes no config fetch", () => {
+    expect(extractClientFetch({})).toBeUndefined();
+    expect(extractClientFetch({ _client: { getConfig: () => ({}) } })).toBeUndefined();
+  });
+});
+
+describe("defaultWorktreeFactory fetch pass-through", () => {
+  it("passes the fetch override to the v2 client when provided", () => {
+    const customFetch: typeof globalThis.fetch = async () => new Response("{}");
+    const factory = defaultWorktreeFactory as unknown as (
+      baseUrl: string,
+      directory: string,
+      fetchOverride?: typeof globalThis.fetch,
+    ) => unknown;
+    // The real factory builds a HeyApi client; we only assert it constructs
+    // without throwing and that the fetch override is accepted (no network).
+    const client = factory("http://127.0.0.1:1", "/tmp", customFetch) as WorktreeClient;
+    expect(typeof client.worktree.create).toBe("function");
   });
 });
