@@ -72,3 +72,19 @@ describe("removeWorkerWorktree", () => {
     );
   });
 });
+
+import { extractClientFetch, defaultWorktreeFactory } from "../src/lib/worktree.js";
+
+describe("in-process fetch extraction", () => {
+  it("extracts the custom fetch from the plugin v1 client", () => {
+    const customFetch = async () => new Response("{}");
+    const pluginClient = { client: { getConfig: () => ({ fetch: customFetch }) } };
+
+    expect(extractClientFetch(pluginClient)).toBe(customFetch);
+  });
+
+  it("returns undefined when the client exposes no config fetch", () => {
+    expect(extractClientFetch({})).toBeUndefined();
+    expect(extractClientFetch({ client: { getConfig: () => ({}) } })).toBeUndefined();
+  });
+});

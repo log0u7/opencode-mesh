@@ -21,6 +21,7 @@ import { nodeSpawn, runWorker, stopAllWorkers, stopWorker, type SpawnFn } from "
 import {
   createWorkerWorktree,
   defaultWorktreeFactory,
+  extractClientFetch,
   removeWorkerWorktree,
   type WorktreeClient,
 } from "./lib/worktree.js";
@@ -45,7 +46,12 @@ export const MeshPlugin: Plugin = async (input, options?: PluginOptions) => {
 
   const { server, port } = await startMeshServer({ db, port: options?.port ?? DEFAULT_PORT });
   const worktreeClient: WorktreeClient =
-    options?.worktreeClient ?? defaultWorktreeFactory(input.serverUrl.toString(), input.directory);
+    options?.worktreeClient ??
+    defaultWorktreeFactory(
+      input.serverUrl.toString(),
+      input.directory,
+      extractClientFetch(input.client),
+    );
   const spawnFn = options?.spawnFn ?? nodeSpawn;
 
   let advertiseHandle: AdvertiseHandle | null = null;

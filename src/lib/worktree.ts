@@ -20,13 +20,33 @@ type ApiEnvelope = {
   error?: { data?: { message?: string }; message?: string };
 };
 
-export type WorktreeFactory = (baseUrl: string, directory: string) => WorktreeClient;
+export type WorktreeFactory = (
+  baseUrl: string,
+  directory: string,
+  fetchOverride?: typeof fetch,
+) => WorktreeClient;
 
-export const defaultWorktreeFactory: WorktreeFactory = (baseUrl, directory) =>
+export const defaultWorktreeFactory: WorktreeFactory = (baseUrl, directory, fetchOverride) =>
   createOpencodeClient({
     baseUrl,
     directory,
+    ...(fetchOverride ? { fetch: fetchOverride } : {}),
   }) as unknown as WorktreeClient;
+
+// In `opencode run` (in-process server) the plugin's own v1 client carries the
+// custom fetch that routes to the embedded server; reuse it so our v2 client
+// reaches /experimental/worktree without a real TCP listener.
+export function extractClientFetch(pluginClient: unknown): typeof fetch | undefined {
+  try {
+    const inner = (pluginClient as { client?: { getConfig?: () => { fetch?: typeof fetch } } })
+      .client;
+    const config = inner?.getConfig?.();
+    const fetchFn = config?.fetch;
+    return typeof fetchFn === "function" ? fetchFn : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 function unwrap<T>(envelope: unknown, fallback: string): T {
   const parsed = (envelope ?? {}) as ApiEnvelope;
