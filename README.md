@@ -24,6 +24,8 @@ Then register the plugin in `opencode.json`:
 
 Restart OpenCode. Node identity and mailbox live under `~/.local/share/opencode-mesh/` (honors `XDG_DATA_HOME`), created with restrictive permissions.
 
+Note (npm 12): the package ships no lifecycle install scripts and needs no `allowScripts` / allowlist on install (its runtime dependency `bonjour-service` has none either).
+
 ## Usage
 
 Same machine: start two OpenCode instances in the same repository.

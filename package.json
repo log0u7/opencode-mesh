@@ -1,6 +1,6 @@
 {
   "name": "@log0u7/opencode-mesh",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "Multi-session coordination for OpenCode: session coordination on one machine and a peer pool across LAN or Tailscale, with pairing, mailbox, and worktree locks.",
   "type": "module",
   "license": "Apache-2.0",
