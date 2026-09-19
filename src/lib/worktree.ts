@@ -35,11 +35,12 @@ export const defaultWorktreeFactory: WorktreeFactory = (baseUrl, directory, fetc
 
 // In `opencode run` (in-process server) the plugin's own v1 client carries the
 // custom fetch that routes to the embedded server; reuse it so our v2 client
-// reaches /experimental/worktree without a real TCP listener.
+// reaches /experimental/worktree without a real TCP listener. The v1 client
+// stores the HeyApi core client as `_client` (TS-protected, reachable at runtime).
 export function extractClientFetch(pluginClient: unknown): typeof fetch | undefined {
   try {
-    const inner = (pluginClient as { client?: { getConfig?: () => { fetch?: typeof fetch } } })
-      .client;
+    const inner = (pluginClient as { _client?: { getConfig?: () => { fetch?: typeof fetch } } })
+      ._client;
     const config = inner?.getConfig?.();
     const fetchFn = config?.fetch;
     return typeof fetchFn === "function" ? fetchFn : undefined;
