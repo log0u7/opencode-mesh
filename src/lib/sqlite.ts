@@ -73,12 +73,14 @@ function createBunConn(db: BunSqliteDatabase): SqliteConn {
 
 // Open a sqlite connection with the runtime's bundled engine: bun:sqlite when
 // running inside OpenCode (Bun), node:sqlite when running under Node (tests, CI).
+// Some OpenCode builds expose `Bun` without `Bun.sqlite`: guard on the actual
+// engine, not on the global, and fall back to node:sqlite (Bun implements it).
 export function openSqlite(path: string): SqliteConn {
   const globalRuntime = globalThis as {
-    Bun?: { sqlite: { Database: BunSqliteModule["Database"] } };
+    Bun?: { sqlite?: { Database: BunSqliteModule["Database"] } };
   };
 
-  if (globalRuntime.Bun) {
+  if (globalRuntime.Bun?.sqlite?.Database) {
     return createBunConn(new globalRuntime.Bun.sqlite.Database(path));
   }
 
