@@ -12,12 +12,37 @@ export type MeshServerOptions = {
   port: number;
 };
 
-export function startMeshServer(options: MeshServerOptions): Server {
+export type MeshServer = {
+  server: Server;
+  port: number;
+};
+
+// Bind the mesh HTTP server and resolve the actual port. When the requested
+// port is taken (two mesh nodes on one machine, e.g. a spawned worker loading
+// the same plugin), fall back to an ephemeral port instead of crashing.
+export async function startMeshServer(options: MeshServerOptions): Promise<MeshServer> {
   const server = createServer((req, res) => {
     void handle(options.db, req, res);
   });
-  server.listen(options.port);
-  return server;
+
+  const port = await new Promise<number>((resolve, reject) => {
+    const tryListen = (requested: number) => {
+      server.once("error", (err: NodeJS.ErrnoException) => {
+        if (err.code === "EADDRINUSE" && requested !== 0) {
+          tryListen(0);
+          return;
+        }
+        reject(err);
+      });
+      server.listen(requested, () => {
+        const address = server.address();
+        resolve(address !== null && typeof address !== "string" ? address.port : requested);
+      });
+    };
+    tryListen(options.port);
+  });
+
+  return { server, port };
 }
 
 async function handle(db: MeshDb, req: IncomingMessage, res: ServerResponse): Promise<void> {

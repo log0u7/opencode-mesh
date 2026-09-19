@@ -21,12 +21,8 @@ afterEach(() => {
 
 async function start() {
   const db = openMeshDb(join(dir, "mesh.db"));
-  const server = startMeshServer({ db, port: 0 });
-  const address = server.address();
-  if (address === null || typeof address === "string") {
-    throw new Error("no ephemeral port");
-  }
-  const url = `http://127.0.0.1:${address.port}`;
+  const { server, port } = await startMeshServer({ db, port: 0 });
+  const url = `http://127.0.0.1:${port}`;
   return { db, server, url };
 }
 

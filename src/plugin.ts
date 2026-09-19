@@ -43,8 +43,7 @@ export const MeshPlugin: Plugin = async (input, options?: PluginOptions) => {
   const identity: NodeIdentity = loadOrCreateIdentity(dataDir);
   const db: MeshDb = openMeshDb(`${dataDir}/mesh.db`);
 
-  const server = startMeshServer({ db, port: options?.port ?? DEFAULT_PORT });
-  const port = resolvePort(server);
+  const { server, port } = await startMeshServer({ db, port: options?.port ?? DEFAULT_PORT });
   const worktreeClient: WorktreeClient =
     options?.worktreeClient ?? defaultWorktreeFactory(input.serverUrl.toString(), input.directory);
   const spawnFn = options?.spawnFn ?? nodeSpawn;
@@ -351,14 +350,6 @@ export const MeshPlugin: Plugin = async (input, options?: PluginOptions) => {
 function defaultDataDir(): string {
   const dataHome = process.env.XDG_DATA_HOME ?? `${process.env.HOME ?? ""}/.local/share`;
   return `${dataHome}/opencode-mesh`;
-}
-
-function resolvePort(server: Server): number {
-  const address = server.address();
-  if (address !== null && typeof address !== "string") {
-    return address.port;
-  }
-  return DEFAULT_PORT;
 }
 
 function findSendablePeer(
