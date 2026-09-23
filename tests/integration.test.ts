@@ -36,7 +36,6 @@ describe("two-node integration", () => {
     pairWithToken(b.db, { node_id: "node-a", hostname: "a", fingerprint: "fa", token: "tok-a" });
     const tokenForA = "tok-a";
     pairWithToken(a.db, { node_id: "node-b", hostname: "b", fingerprint: "fb", token: "tok-b" });
-    const tokenForB = "tok-b";
 
     const result = await sendMail({
       url: b.url,
