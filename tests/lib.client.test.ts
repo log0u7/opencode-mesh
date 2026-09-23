@@ -26,8 +26,9 @@ describe("sendMail result mapping", () => {
     const { startMeshServer } = await import("../src/lib/serve.js");
     const db = openMeshDb(":memory:");
     const { server, port } = await startMeshServer({ db, port: 0 });
-    const { pairPeer } = await import("../src/lib/peers.js");
-    const token = pairPeer(db, { node_id: "node-a", hostname: "a", fingerprint: "f" });
+    const { pairWithToken } = await import("../src/lib/peers.js");
+    pairWithToken(db, { node_id: "node-a", hostname: "a", fingerprint: "f", token: "tok-a" });
+    const token = "tok-a";
 
     // Authenticated but invalid body -> 400 -> mapped to "error".
     const response = await fetch(`http://127.0.0.1:${port}/mail`, {

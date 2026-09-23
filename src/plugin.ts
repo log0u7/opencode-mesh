@@ -3,7 +3,6 @@ import { tool } from "@opencode-ai/plugin";
 import { Bonjour } from "bonjour-service";
 import type { Server } from "node:http";
 
-import { rememberPeer } from "./lib/discovery.js";
 import { sendMail } from "./lib/client.js";
 import { openMeshDb, type MeshDb } from "./lib/db.js";
 import {
@@ -12,9 +11,10 @@ import {
   tailnetAddresses,
   type AdvertiseHandle,
 } from "./lib/discovery.js";
+import { upsertDiscoveredPeer } from "./lib/peers.js";
 import { loadOrCreateIdentity, type NodeIdentity } from "./lib/identity.js";
 import { ackMessages, unreadMessages } from "./lib/mail.js";
-import { releaseLock, tryLock } from "./lib/locks.js";
+import { releaseLock, tryLock, listLocks } from "./lib/locks.js";
 import { createPairingToken, listPeers, pairWithToken } from "./lib/peers.js";
 import { startMeshServer } from "./lib/serve.js";
 import { nodeSpawn, runWorker, stopAllWorkers, stopWorker, type SpawnFn } from "./lib/spawn.js";
@@ -68,7 +68,7 @@ export const MeshPlugin: Plugin = async (input, options?: PluginOptions) => {
       bonjour,
       onDiscovered: (peer) => {
         if (peer.node_id !== identity.node_id) {
-          rememberPeer(db, peer);
+          upsertDiscoveredPeer(db, peer);
         }
       },
     });
@@ -95,6 +95,7 @@ export const MeshPlugin: Plugin = async (input, options?: PluginOptions) => {
                 paired: p.paired,
                 addresses: p.addresses,
               })),
+              locks: listLocks(db, { now: Date.now() }),
             },
             null,
             2,

@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { openMeshDb } from "../src/lib/db.js";
 import { unreadMessages } from "../src/lib/mail.js";
-import { pairPeer } from "../src/lib/peers.js";
+import { pairWithToken } from "../src/lib/peers.js";
 import { sendMail } from "../src/lib/client.js";
 import { startMeshServer } from "../src/lib/serve.js";
 
@@ -33,8 +33,10 @@ describe("two-node integration", () => {
 
     // Each side pairs the other. The token that matters for sending is the one
     // the RECEIVER issued: B pairs node-a (tokenForA), so A authenticates to B with it.
-    const tokenForA = pairPeer(b.db, { node_id: "node-a", hostname: "a", fingerprint: "fa" });
-    const tokenForB = pairPeer(a.db, { node_id: "node-b", hostname: "b", fingerprint: "fb" });
+    pairWithToken(b.db, { node_id: "node-a", hostname: "a", fingerprint: "fa", token: "tok-a" });
+    const tokenForA = "tok-a";
+    pairWithToken(a.db, { node_id: "node-b", hostname: "b", fingerprint: "fb", token: "tok-b" });
+    const tokenForB = "tok-b";
 
     const result = await sendMail({
       url: b.url,
@@ -50,11 +52,14 @@ describe("two-node integration", () => {
     expect(inbox[0]?.subject).toBe("handoff");
     expect(inbox[0]?.from).toBe("node-a");
 
+    // Issued pairing tokens stay long and unguessable (base64url of 32 bytes).
+    const { createPairingToken } = await import("../src/lib/peers.js");
+    expect(createPairingToken(a.db).length).toBeGreaterThan(10);
+
     a.server.close();
     b.server.close();
     a.db.close();
     b.db.close();
-    expect(tokenForB.length).toBeGreaterThan(10);
   });
 
   it("sendMail reports unreachable peers without throwing", async () => {

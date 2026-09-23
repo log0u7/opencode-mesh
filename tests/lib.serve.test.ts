@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { request } from "node:http";
 
 import { openMeshDb } from "../src/lib/db.js";
-import { pairPeer } from "../src/lib/peers.js";
+import { pairWithToken } from "../src/lib/peers.js";
 import { startMeshServer } from "../src/lib/serve.js";
 
 let dir: string;
@@ -68,7 +68,13 @@ describe("mesh server", () => {
 
   it("accepts mail from a paired peer token and stores it", async () => {
     const { db, server, url } = await start();
-    const token = pairPeer(db, { node_id: "peer1", hostname: "laptop", fingerprint: "ff00" });
+    pairWithToken(db, {
+      node_id: "peer1",
+      hostname: "laptop",
+      fingerprint: "ff00",
+      token: "tok-peer1",
+    });
+    const token = "tok-peer1";
 
     const response = await post(
       url,
@@ -84,7 +90,13 @@ describe("mesh server", () => {
 
   it("returns 401 for a paired token from a different node id", async () => {
     const { db, server, url } = await start();
-    const token = pairPeer(db, { node_id: "peer1", hostname: "laptop", fingerprint: "ff00" });
+    pairWithToken(db, {
+      node_id: "peer1",
+      hostname: "laptop",
+      fingerprint: "ff00",
+      token: "tok-peer1",
+    });
+    const token = "tok-peer1";
 
     const response = await post(
       url,
@@ -102,7 +114,13 @@ describe("mesh server", () => {
 describe("mesh server routes", () => {
   it("answers /status with node identity for a valid token", async () => {
     const { db, server, url } = await start();
-    const token = pairPeer(db, { node_id: "peer1", hostname: "laptop", fingerprint: "ff00" });
+    pairWithToken(db, {
+      node_id: "peer1",
+      hostname: "laptop",
+      fingerprint: "ff00",
+      token: "tok-peer1",
+    });
+    const token = "tok-peer1";
 
     const response = await fetch(`${url}/status`, {
       headers: { authorization: `Bearer ${token}` },
@@ -118,7 +136,13 @@ describe("mesh server routes", () => {
 
   it("accepts /announce from a paired peer and updates addresses", async () => {
     const { db, server, url } = await start();
-    const token = pairPeer(db, { node_id: "peer1", hostname: "laptop", fingerprint: "ff00" });
+    pairWithToken(db, {
+      node_id: "peer1",
+      hostname: "laptop",
+      fingerprint: "ff00",
+      token: "tok-peer1",
+    });
+    const token = "tok-peer1";
 
     const response = await post(url, "/announce", { addresses: ["10.0.0.9:4399"] }, token);
     expect(response.status).toBe(200);
@@ -132,7 +156,13 @@ describe("mesh server routes", () => {
 
   it("returns 404 for unknown routes and 405 for wrong methods", async () => {
     const { db, server, url } = await start();
-    const token = pairPeer(db, { node_id: "peer1", hostname: "laptop", fingerprint: "ff00" });
+    pairWithToken(db, {
+      node_id: "peer1",
+      hostname: "laptop",
+      fingerprint: "ff00",
+      token: "tok-peer1",
+    });
+    const token = "tok-peer1";
 
     expect((await post(url, "/nope", { x: 1 }, token)).status).toBe(404);
     expect(
@@ -150,7 +180,13 @@ describe("mesh server routes", () => {
 
   it("rejects mail with a missing or mismatched body (400)", async () => {
     const { db, server, url } = await start();
-    const token = pairPeer(db, { node_id: "peer1", hostname: "laptop", fingerprint: "ff00" });
+    pairWithToken(db, {
+      node_id: "peer1",
+      hostname: "laptop",
+      fingerprint: "ff00",
+      token: "tok-peer1",
+    });
+    const token = "tok-peer1";
 
     expect((await post(url, "/mail", { nope: true }, token)).status).toBe(400);
 
@@ -162,7 +198,13 @@ describe("mesh server routes", () => {
 describe("mesh server body guard", () => {
   it("rejects oversized chunked bodies without content-length (413)", async () => {
     const { db, server, url } = await start();
-    const token = pairPeer(db, { node_id: "peer1", hostname: "laptop", fingerprint: "ff00" });
+    pairWithToken(db, {
+      node_id: "peer1",
+      hostname: "laptop",
+      fingerprint: "ff00",
+      token: "tok-peer1",
+    });
+    const token = "tok-peer1";
 
     const urlObj = new URL(url);
     const status = await new Promise<number>((resolve, reject) => {
