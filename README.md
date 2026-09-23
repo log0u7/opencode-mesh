@@ -18,7 +18,7 @@ Then register the plugin in `opencode.json`:
 
 ```json
 {
-  "plugin": ["opencode-mesh"]
+  "plugin": ["@log0u7/opencode-mesh"]
 }
 ```
 
