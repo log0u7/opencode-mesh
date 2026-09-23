@@ -25,5 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Install docs register the scoped plugin name in `opencode.json` (an unscoped spec would attempt to install a nonexistent npm package).
+- Removed a stray committed PR body file (`.pr-body.md`).
 - Runtime compatibility with the installed OpenCode binary: ephemeral-port fallback for mesh servers, in-process fetch reuse for the worktree API in `opencode run` mode, `bun:sqlite` module resolution for hot-loaded plugins, and workers defaulting to `--agent build`.
 - CI gitleaks job no longer fails on Dependabot pull requests (push-only).
