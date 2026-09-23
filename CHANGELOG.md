@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-09-23
+
 ### Changed
 
 - Install docs describe opencode auto-install into its plugin cache; global npm/pnpm/mise installs are not used for plugin loading.
