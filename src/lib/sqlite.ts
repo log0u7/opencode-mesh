@@ -18,10 +18,6 @@ interface BunSqliteDatabase {
   close(): void;
 }
 
-interface BunSqliteModule {
-  Database: new (path: string) => BunSqliteDatabase;
-}
-
 interface NodeSqliteDatabase {
   prepare(sql: string): SqliteStatement;
   exec(sql: string): unknown;

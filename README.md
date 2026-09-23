@@ -35,7 +35,7 @@ Note (npm 12): the package ships no lifecycle install scripts and needs no `allo
 Same machine: start two OpenCode instances in the same repository.
 
 ```
-mesh_status()                      # local sessions + paired peers
+mesh_status()                      # local sessions + paired peers + active locks
 mesh_pair()                        # list discovered peers, approve pairing
 mesh_send(peer="laptop", subject="handoff", body="...")
 mesh_inbox()                       # pull new messages, ack
@@ -47,7 +47,7 @@ mesh_unlock(path="src/api.ts")
 
 | Tool | Args | Description |
 |---|---|---|
-| `mesh_status` | : local session registry, own address, paired peers. |
+| `mesh_status` | : local session registry, own address, paired peers, active locks. |
 | `mesh_pair` | `query?` | List discovered peers; operator approves by hostname/fingerprint. |
 | `mesh_send` | `peer`, `subject`, `body` | Deliver a message to a peer's mailbox. |
 | `mesh_inbox` | `ack?` | Fetch unread messages; ack marks them read. |

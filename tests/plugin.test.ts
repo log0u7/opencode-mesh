@@ -88,6 +88,21 @@ describe("mesh plugin", () => {
     await hooks.dispose?.();
   });
 
+  it("mesh_status reports active locks", async () => {
+    const hooks = await MeshPlugin(fakeInput(), { dataDir: dir, port: 0, advertise: false });
+    const tools = hooks.tool ?? {};
+
+    await tools.mesh_lock?.execute({ path: "src/api.ts" }, ctx());
+    const status = await tools.mesh_status?.execute({}, ctx());
+    expect(status).toContain("src/api.ts");
+
+    await tools.mesh_unlock?.execute({ path: "src/api.ts" }, ctx());
+    const after = await tools.mesh_status?.execute({}, ctx());
+    expect(after).not.toContain("src/api.ts");
+
+    await hooks.dispose?.();
+  });
+
   it("mesh_inbox lists unread messages after delivery", async () => {
     const hooks = await MeshPlugin(fakeInput(), { dataDir: dir, port: 0, advertise: false });
     const tools = hooks.tool ?? {};

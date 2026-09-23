@@ -6,11 +6,11 @@ import {
   listWorkers,
   setWorkerSession,
   setWorkerStatus,
-  upsertWorker,
+  insertWorker,
 } from "../src/lib/workers.js";
 
 function spawn(db: ReturnType<typeof openMeshDb>, overrides: Record<string, unknown> = {}) {
-  return upsertWorker(db, {
+  return insertWorker(db, {
     id: "w1",
     task: "summarize the README",
     worktree_path: "/data/worktree/p1/task",

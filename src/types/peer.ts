@@ -11,8 +11,6 @@ export type Peer = {
 export type MailMessage = {
   id: string;
   from: string;
-  to: string;
-  session_id: string | null;
   subject: string;
   body: string;
   status: "unread" | "read";

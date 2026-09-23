@@ -7,23 +7,22 @@ export function receiveMessage(
   db: MeshDb,
   input: { from: string; subject: string; body: string },
 ): MailMessage {
-  const message: MailMessage = {
-    id: randomUUID(),
-    from: input.from,
-    to: "self",
-    session_id: null,
-    subject: input.subject,
-    body: input.body,
-    status: "unread",
-    created_at: Date.now(),
-  };
+  const id = randomUUID();
+  const created_at = Date.now();
 
   db.conn.run(
     "INSERT INTO messages (id, from_node, subject, body, status, created_at) VALUES (?, ?, ?, ?, 'unread', ?)",
-    [message.id, message.from, message.subject, message.body, message.created_at],
+    [id, input.from, input.subject, input.body, created_at],
   );
 
-  return message;
+  return {
+    id,
+    from: input.from,
+    subject: input.subject,
+    body: input.body,
+    status: "unread",
+    created_at,
+  };
 }
 
 export function unreadMessages(db: MeshDb): MailMessage[] {
@@ -58,8 +57,6 @@ function rowToMessage(row: MessageRow): MailMessage {
   return {
     id: row.id,
     from: row.from_node,
-    to: "self",
-    session_id: null,
     subject: row.subject,
     body: row.body,
     status: row.status === "read" ? "read" : "unread",

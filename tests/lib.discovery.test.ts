@@ -3,10 +3,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   advertiseMesh,
   browseMesh,
-  rememberPeer,
   tailnetAddresses,
   type DiscoveredPeer,
 } from "../src/lib/discovery.js";
+import { upsertDiscoveredPeer } from "../src/lib/peers.js";
 import { openMeshDb } from "../src/lib/db.js";
 import { listPeers } from "../src/lib/peers.js";
 
@@ -115,9 +115,9 @@ describe("browseMesh", () => {
     expect(fake.stops).toHaveBeenCalled();
   });
 
-  it("rememberPeer stores the discovery in the peer table", () => {
+  it("upsertDiscoveredPeer stores the discovery in the peer table", () => {
     const db = openMeshDb(":memory:");
-    rememberPeer(db, {
+    upsertDiscoveredPeer(db, {
       node_id: "peer-2",
       hostname: "desktop",
       fingerprint: "ff11",

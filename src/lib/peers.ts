@@ -10,18 +10,8 @@ export type PeerInput = {
   addresses?: string[];
 };
 
-// Pair a peer (or re-pair, rotating the token) and return the new shared token.
-// Only the pairing call and the peer know it; the server compares on every request.
-export function pairPeer(
-  db: MeshDb,
-  peer: { node_id: string; hostname: string; fingerprint: string },
-): string {
-  const token = randomBytes(32).toString("base64url");
-  pairWithToken(db, { ...peer, token });
-  return token;
-}
-
 // Complete pairing with a token the peer generated (shared out of band).
+// Only the pairing call and the peer know it; the server compares on every request.
 export function pairWithToken(
   db: MeshDb,
   peer: {

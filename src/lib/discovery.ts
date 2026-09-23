@@ -1,8 +1,5 @@
 import type { Bonjour } from "bonjour-service";
 
-import { upsertDiscoveredPeer } from "./peers.js";
-import type { MeshDb } from "./db.js";
-
 export const MESH_SERVICE_TYPE = "opencode-mesh";
 
 export type AdvertiseHandle = {
@@ -61,11 +58,6 @@ export function browseMesh(options: {
       browser.stop();
     },
   };
-}
-
-// Feed a discovered peer into the local peer table (unpaired until mesh_pair).
-export function rememberPeer(db: MeshDb, peer: DiscoveredPeer): void {
-  upsertDiscoveredPeer(db, peer);
 }
 
 // Tailnet addresses let peers connect across subnets when tailscale runs.

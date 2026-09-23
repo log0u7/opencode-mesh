@@ -8,15 +8,10 @@
 
 import { MeshPlugin } from "./plugin.js";
 
-type V1PluginModule = {
-  id: string;
-  server: typeof MeshPlugin;
-};
-
 const pluginModule = {
   id: "@log0u7/opencode-mesh",
   server: MeshPlugin,
-} satisfies V1PluginModule;
+} satisfies { id: string; server: typeof MeshPlugin };
 
 export default pluginModule;
 

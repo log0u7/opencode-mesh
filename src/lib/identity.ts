@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { hostname as osHostname } from "node:os";
 import { join } from "node:path";
 
 type Jwk = {
@@ -83,10 +84,5 @@ function withFingerprint(identity: PersistedIdentity): NodeIdentity {
 }
 
 function hostName(): string {
-  try {
-    const os = require("node:os") as typeof import("node:os");
-    return os.hostname();
-  } catch {
-    return "unknown";
-  }
+  return osHostname();
 }

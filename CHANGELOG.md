@@ -10,6 +10,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Install docs describe opencode auto-install into its plugin cache; global npm/pnpm/mise installs are not used for plugin loading.
+- `mesh_status` now reports active locks, matching what `mesh_lock` errors have always told the model to check.
+
+### Removed
+
+- Over-engineering audit cuts: test-only `pairPeer` helper (tests pair via `pairWithToken`), constant `MailMessage` fields (`to`/`session_id` were constants absent from the schema), `onSpawned` hook (never set), `rememberPeer` one-line delegate (folded into `upsertDiscoveredPeer`), dead `BunSqliteModule` interface, internal-only exports unexported (`defaultKill`), duplicated row types reused via `Omit`, `V1PluginModule` alias inlined.
 
 ## [0.1.1] - 2026-09-23
 

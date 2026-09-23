@@ -2,8 +2,8 @@ import { spawn } from "node:child_process";
 import { appendFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 
-import { type MeshDb } from "./db.js";
-import { setWorkerSession, setWorkerStatus, upsertWorker, type Worker } from "./workers.js";
+import type { MeshDb } from "./db.js";
+import { insertWorker, setWorkerSession, setWorkerStatus, type Worker } from "./workers.js";
 
 export type SpawnedProcess = {
   pid: number;
@@ -49,7 +49,6 @@ export type RunWorkerInput = {
   auto?: boolean;
   spawnFn: SpawnFn;
   killFn?: KillFn;
-  onSpawned?: (worker: Worker, proc: SpawnedProcess) => void;
 };
 
 export type StopOptions = {
@@ -64,7 +63,7 @@ export function runWorker(db: MeshDb, dataDir: string, input: RunWorkerInput): W
   const proc = input.spawnFn(argv);
 
   mkdirSync(join(dataDir, "workers"), { recursive: true });
-  const worker = upsertWorker(db, {
+  const worker = insertWorker(db, {
     task: input.task,
     worktree_path: input.worktree_path,
     branch: input.branch,
@@ -89,20 +88,18 @@ export function runWorker(db: MeshDb, dataDir: string, input: RunWorkerInput): W
   });
 
   LIVE_PROCESSES.set(worker.id, proc);
-  input.onSpawned?.(worker, proc);
   return worker;
 }
 
 // Stop a running worker. The default kill sends SIGTERM to the recorded pid;
 // killFn is an injection seam for tests.
 export function stopWorker(db: MeshDb, id: string, options: StopOptions = {}): boolean {
-  const worker = db && liveWorker(id);
-  if (!worker) {
+  if (!LIVE_PROCESSES.has(id)) {
     throw new Error(`worker ${id} is not running`);
   }
 
   const kill = options.killFn ?? defaultKill;
-  kill(worker.id, "SIGTERM");
+  kill(id, "SIGTERM");
   // Registry is authoritative: remove the process entry even if the OS takes
   // time to reap the process (or a test fake ignores the signal).
   LIVE_PROCESSES.delete(id);
@@ -110,7 +107,7 @@ export function stopWorker(db: MeshDb, id: string, options: StopOptions = {}): b
   return true;
 }
 
-export function defaultKill(id: string, signal: string): void {
+function defaultKill(id: string, signal: string): void {
   const proc = LIVE_PROCESSES.get(id);
   proc?.kill(signal);
 }
@@ -165,8 +162,4 @@ function parseSessionId(chunk: string): string | null {
 
 function logPath(dataDir: string, id: string): string {
   return join(dataDir, "workers", `${id}.log`);
-}
-
-function liveWorker(id: string): { id: string } | null {
-  return LIVE_PROCESSES.has(id) ? { id } : null;
 }

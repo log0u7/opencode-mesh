@@ -19,20 +19,9 @@ export type Worker = {
 
 const TERMINAL_STATUSES = new Set<WorkerStatus>(["completed", "failed", "stopped"]);
 
-type WorkerRow = {
-  id: string;
-  task: string;
-  worktree_path: string;
-  branch: string;
-  pid: number | null;
-  session_id: string | null;
-  status: string;
-  exit_code: number | null;
-  started_at: number;
-  finished_at: number | null;
-};
+type WorkerRow = Omit<Worker, "status"> & { status: string };
 
-export function upsertWorker(
+export function insertWorker(
   db: MeshDb,
   input: { id?: string; task: string; worktree_path: string; branch: string; pid: number | null },
 ): Worker {
