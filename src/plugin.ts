@@ -29,7 +29,7 @@ import { deleteWorker, getWorker, listWorkers } from "./lib/workers.js";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
-type PluginOptions = {
+export type PluginOptions = {
   dataDir?: string;
   port?: number;
   advertise?: boolean;
@@ -354,12 +354,12 @@ export const MeshPlugin: Plugin = async (input, options?: PluginOptions) => {
   };
 };
 
-function defaultDataDir(): string {
+export function defaultDataDir(): string {
   const dataHome = process.env.XDG_DATA_HOME ?? `${process.env.HOME ?? ""}/.local/share`;
   return `${dataHome}/opencode-mesh`;
 }
 
-function findSendablePeer(
+export function findSendablePeer(
   db: MeshDb,
   query: string,
 ): { node_id: string; addresses: string[]; token: string | null } | null {
