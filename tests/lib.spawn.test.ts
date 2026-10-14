@@ -1,12 +1,12 @@
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { openMeshDb } from "../src/lib/db.js";
-import { getWorker } from "../src/lib/workers.js";
-import { runWorker, stopWorker, type SpawnedProcess } from "../src/lib/spawn.js";
+import { getWorker, insertWorker, reconcileWorkers } from "../src/lib/workers.js";
+import { readLogTail, runWorker, stopWorker, type SpawnedProcess } from "../src/lib/spawn.js";
 
 class FakeProc {
   exitCode: number | null = null;
@@ -50,14 +50,16 @@ let dir: string;
 
 function fakeSpawn(script: (proc: FakeProc) => void) {
   const argv: string[] = [];
+  const env: Array<Record<string, string> | undefined> = [];
   const proc = new FakeProc();
-  const spawnFn = (a: string[]) => {
+  const spawnFn = (a: string[], e?: Record<string, string>) => {
     argv.push(...a);
+    env.push(e);
     // Emit asynchronously so runWorker can attach listeners first.
     queueMicrotask(() => script(proc));
     return proc as unknown as SpawnedProcess;
   };
-  return { spawnFn, argv, proc };
+  return { spawnFn, argv, env, proc };
 }
 
 beforeEach(() => {
@@ -143,6 +145,22 @@ describe("runWorker lifecycle", () => {
     db.close();
   });
 
+  it("marks the child process so it does not boot its own mesh node", async () => {
+    const db = openMeshDb(":memory:");
+    const fake = fakeSpawn((proc) => proc.emitExit(0));
+
+    await runWorker(db, dir, {
+      task: "t",
+      worktree_path: "/wt",
+      branch: "b",
+      spawnFn: fake.spawnFn,
+    });
+
+    // Without this, every worker starts a server, an mDNS advertiser and a db.
+    expect(fake.env).toEqual([{ OPENCODE_MESH_CHILD: "1" }]);
+    db.close();
+  });
+
   it("marks failed on non-zero exit", async () => {
     const db = openMeshDb(":memory:");
     const fake = fakeSpawn((proc) => proc.emitExit(1));
@@ -178,6 +196,69 @@ describe("runWorker lifecycle", () => {
 
     expect(killFn).toHaveBeenCalledWith(worker.id, "SIGTERM");
     expect(getWorker(db, worker.id)?.status).toBe("stopped");
+    db.close();
+  });
+});
+
+describe("readLogTail", () => {
+  it("returns only the requested number of final lines", () => {
+    const logDir = join(dir, "workers");
+    mkdirSync(logDir, { recursive: true });
+    const id = "log-tail-worker";
+    const lines = Array.from({ length: 5000 }, (_, i) => `line ${i}`);
+    writeFileSync(join(logDir, `${id}.log`), `${lines.join("\n")}\n`, "utf8");
+
+    const tail = readLogTail(dir, id, 50);
+    const tailLines = tail.split("\n");
+    expect(tailLines).toHaveLength(50);
+    expect(tailLines[0]).toBe("line 4950");
+    expect(tailLines.at(-1)).toBe("line 4999");
+  });
+
+  it("returns the whole file when it is smaller than the window", () => {
+    const logDir = join(dir, "workers");
+    mkdirSync(logDir, { recursive: true });
+    const id = "log-small-worker";
+    writeFileSync(join(logDir, `${id}.log`), "one\ntwo\n", "utf8");
+
+    expect(readLogTail(dir, id, 50)).toBe("one\ntwo");
+  });
+
+  it("returns an empty string when no log exists yet", () => {
+    expect(readLogTail(dir, "missing-worker", 50)).toBe("");
+  });
+});
+
+describe("reconcileWorkers", () => {
+  it("marks running rows dead when their pid no longer exists", async () => {
+    const { spawn } = await import("node:child_process");
+    const { once } = await import("node:events");
+    const db = openMeshDb(":memory:");
+
+    // A pid that is guaranteed gone: a child that already exited and was reaped.
+    const dead = spawn(process.execPath, ["-e", "process.exit(0)"], { stdio: "ignore" });
+    await once(dead, "exit");
+    expect(dead.pid).toBeDefined();
+
+    const alive = insertWorker(db, {
+      id: "still-here",
+      task: "t",
+      worktree_path: "/wt",
+      branch: "b",
+      pid: process.pid,
+    });
+    const gone = insertWorker(db, {
+      id: "gone-after-reload",
+      task: "t",
+      worktree_path: "/wt",
+      branch: "b",
+      pid: dead.pid as number,
+    });
+
+    expect(reconcileWorkers(db)).toBe(1);
+    expect(getWorker(db, alive.id)?.status).toBe("running");
+    expect(getWorker(db, gone.id)?.status).toBe("stopped");
+
     db.close();
   });
 });

@@ -1,9 +1,15 @@
 import { spawn } from "node:child_process";
-import { appendFileSync, mkdirSync } from "node:fs";
+import { appendFileSync, closeSync, fstatSync, mkdirSync, openSync, readSync } from "node:fs";
 import { join } from "node:path";
 
 import type { MeshDb } from "./db.js";
-import { insertWorker, setWorkerSession, setWorkerStatus, type Worker } from "./workers.js";
+import {
+  getWorker,
+  insertWorker,
+  setWorkerSession,
+  setWorkerStatus,
+  type Worker,
+} from "./workers.js";
 
 export type SpawnedProcess = {
   pid: number;
@@ -14,14 +20,23 @@ export type SpawnedProcess = {
   kill(signal?: string): void;
 };
 
-export type SpawnFn = (argv: string[]) => SpawnedProcess;
+export type SpawnFn = (argv: string[], env?: Record<string, string>) => SpawnedProcess;
 export type KillFn = (id: string, signal: string) => void;
+
+// A child must not boot its own mesh node: a pool of N workers would otherwise
+// cost N servers, N mDNS advertisers and N databases.
+export const CHILD_ENV = { OPENCODE_MESH_CHILD: "1" };
 
 // Real adapter used by the plugin: node child_process wrapped to the minimal
 // SpawnedProcess surface (works under Bun's node compat at runtime).
-export function nodeSpawn(argv: string[]): SpawnedProcess {
+export function nodeSpawn(argv: string[], env?: Record<string, string>): SpawnedProcess {
+  // Detached on POSIX: the worker becomes a process group leader, so a stop
+  // takes down its own children too instead of orphaning them.
+  const detached = process.platform !== "win32";
   const child = spawn(argv[0] ?? "", argv.slice(1), {
     stdio: ["ignore", "pipe", "pipe"],
+    ...(detached ? { detached: true } : {}),
+    ...(env !== undefined ? { env: { ...process.env, ...env } } : {}),
   });
   const pid = child.pid ?? -1;
   return {
@@ -35,7 +50,17 @@ export function nodeSpawn(argv: string[]): SpawnedProcess {
       child.on(event, (code: number | null) => listener(code));
     },
     kill: (signal) => {
-      child.kill((signal ?? "SIGTERM") as never);
+      const sig = (signal ?? "SIGTERM") as NodeJS.Signals;
+      if (detached && pid > 0) {
+        try {
+          // Negative pid targets the whole group: worker plus its children.
+          process.kill(-pid, sig);
+          return;
+        } catch {
+          // Group already gone; fall through to the direct signal.
+        }
+      }
+      child.kill(sig);
     },
   };
 }
@@ -60,7 +85,7 @@ const LIVE_PROCESSES = new Map<string, SpawnedProcess>();
 // Headless worker: one prompt in an isolated worktree, tracked by pid and log.
 export function runWorker(db: MeshDb, dataDir: string, input: RunWorkerInput): Worker {
   const argv = buildArgv(input);
-  const proc = input.spawnFn(argv);
+  const proc = input.spawnFn(argv, CHILD_ENV);
 
   mkdirSync(join(dataDir, "workers"), { recursive: true });
   const worker = insertWorker(db, {
@@ -84,6 +109,12 @@ export function runWorker(db: MeshDb, dataDir: string, input: RunWorkerInput): W
 
   proc.on("exit", (code) => {
     LIVE_PROCESSES.delete(worker.id);
+    // A deliberate stopWorker already recorded a terminal state; the OS-level
+    // exit event that follows must not fight it.
+    const current = getWorker(db, worker.id);
+    if (current === null || current.status !== "running") {
+      return;
+    }
     setWorkerStatus(db, worker.id, code === 0 ? "completed" : "failed", { exit_code: code });
   });
 
@@ -162,4 +193,36 @@ function parseSessionId(chunk: string): string | null {
 
 function logPath(dataDir: string, id: string): string {
   return join(dataDir, "workers", `${id}.log`);
+}
+
+// Bounded tail read: a chatty worker can produce tens of MB, and the host's
+// event loop must not pay for a full readFileSync on every mesh_worker_logs
+// call. Reads at most LOG_WINDOW bytes from the end, then keeps the last
+// `limit` complete lines.
+const LOG_WINDOW_BYTES = 256 * 1024;
+
+export function readLogTail(dataDir: string, id: string, limit: number): string {
+  let fd: number;
+  try {
+    fd = openSync(logPath(dataDir, id), "r");
+  } catch {
+    return "";
+  }
+  try {
+    const size = fstatSync(fd).size;
+    const start = Math.max(0, size - LOG_WINDOW_BYTES);
+    const chunk = Buffer.alloc(size - start);
+    readSync(fd, chunk, 0, chunk.length, start);
+    const lines = chunk.toString("utf8").split("\n");
+    if (lines.at(-1) === "") {
+      lines.pop();
+    }
+    if (start > 0 && lines.length > 0) {
+      // The window may begin mid-line: drop the partial line.
+      lines.shift();
+    }
+    return lines.slice(-limit).join("\n");
+  } finally {
+    closeSync(fd);
+  }
 }
