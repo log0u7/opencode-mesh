@@ -41,12 +41,26 @@ describe("resolvePeerUrl", () => {
     const zoned = pair(["[fe80::1%eth0]:4399"]);
     expect(resolvePeerUrl(zoned, "node-b")).toBe("http://[fe80::1%eth0]:4399");
     zoned.close();
+
+    // IPv4-mapped IPv6 (dual-stack resolvers emit these) carries dots inside
+    // the brackets; it must not be classified as portless.
+    const mapped = pair(["[::ffff:192.168.1.10]:4399"]);
+    expect(resolvePeerUrl(mapped, "node-b")).toBe("http://[::ffff:192.168.1.10]:4399");
+    mapped.close();
   });
 
   it("refuses to invent a port for a portless address", () => {
     const db = pair(["10.0.0.2"]);
     expect(resolvePeerUrl(db, "node-b")).toBeNull();
     db.close();
+
+    // Bracketed forms without a port, and an empty zone id, stay rejected so a
+    // future relaxation cannot resurrect the portless-address path.
+    for (const address of ["[::ffff:192.168.1.10]", "[fe80::1]", "[fe80::1%]:4399"]) {
+      const bad = pair([address]);
+      expect(resolvePeerUrl(bad, "node-b"), `address: ${address}`).toBeNull();
+      bad.close();
+    }
   });
 
   it("prefers the first routable address when a peer lists several", () => {
