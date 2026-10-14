@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The node identity migration now finishes on disk: a `node.json` written by
+  <= 0.2.0 is rewritten without its dead Ed25519 keypair, so the stale key
+  material no longer lingers after the id is loaded. A corrupt or `node_id`-less
+  `node.json` now fails loudly with a recovery path instead of silently minting a
+  new node id, which would break every peer that recognised the node. Closes #31.
 - `mesh_lock` no longer throws a raw `UNIQUE constraint failed` error when two
   opencode sessions sharing the same data directory race for the same path. The
   lock claim is a single atomic `INSERT ... ON CONFLICT DO NOTHING`, and the

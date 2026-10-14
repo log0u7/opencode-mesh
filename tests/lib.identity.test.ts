@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, statSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, statSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -69,14 +69,78 @@ describe("loadOrCreateIdentity", () => {
     expect(identity.fingerprint).toMatch(/^[0-9a-f]{16}$/);
     expect(identity.fingerprint).not.toBe("");
   });
+
+  it("rewrites a migrated keypair file to the canonical shape on disk", () => {
+    const previous = {
+      node_id: "11111111-2222-3333-4444-555555555555",
+      hostname: "old-host",
+      public_key: { kty: "OKP", crv: "Ed25519", x: "stale" },
+      private_key: { kty: "OKP", crv: "Ed25519", x: "stale", d: "stale" },
+    };
+    const file = join(dir, "node.json");
+    writeFileSync(file, JSON.stringify(previous), "utf8");
+
+    loadOrCreateIdentity(dir);
+
+    // The stale key material must not survive on disk: migration is not done
+    // until the stored file matches the in-memory record.
+    const raw = JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>;
+    expect(Object.keys(raw).sort()).toEqual(["hostname", "node_id"]);
+    expect(raw).not.toHaveProperty("public_key");
+    expect(raw).not.toHaveProperty("private_key");
+    expect(statSync(file).mode & 0o777).toBe(0o600);
+  });
 });
 
 describe("corrupt identity file", () => {
-  it("regenerates a valid identity when node.json is garbage", () => {
+  it("refuses to mint a new identity when node.json is not valid JSON", () => {
     writeFileSync(join(dir, "node.json"), "}{ not json", "utf8");
 
-    const identity = loadOrCreateIdentity(dir);
-    expect(identity.node_id).toMatch(/[0-9a-f-]{36}/);
-    expect(statSync(join(dir, "node.json")).isFile()).toBe(true);
+    expect(() => loadOrCreateIdentity(dir)).toThrow(/node\.json|corrupt/i);
+  });
+
+  it("refuses to mint a new identity when node_id is missing", () => {
+    writeFileSync(join(dir, "node.json"), JSON.stringify({ hostname: "x" }), "utf8");
+
+    expect(() => loadOrCreateIdentity(dir)).toThrow(/node_id/);
+  });
+
+  it("leaves the corrupt file untouched for the operator to inspect", () => {
+    const file = join(dir, "node.json");
+    writeFileSync(file, "}{ not json", "utf8");
+
+    expect(() => loadOrCreateIdentity(dir)).toThrow();
+    expect(readFileSync(file, "utf8")).toBe("}{ not json");
+  });
+
+  it("refuses to mint a new identity for an empty or non-object body", () => {
+    for (const body of ["{}", "null", "[1,2]", '"str"', "42"]) {
+      writeFileSync(join(dir, "node.json"), body, "utf8");
+      expect(() => loadOrCreateIdentity(dir), `body: ${body}`).toThrow(/node_id/);
+    }
+  });
+
+  it("refuses to mint a new identity when node.json cannot be read", () => {
+    // A directory makes readFileSync throw EISDIR, not ENOENT: a real file
+    // exists, so reminting would be a silent identity change.
+    mkdirSync(join(dir, "node.json"));
+
+    expect(() => loadOrCreateIdentity(dir)).toThrow(/cannot read/);
+  });
+
+  it("strips unknown keys while migrating, not just the keypair", () => {
+    const file = join(dir, "node.json");
+    writeFileSync(
+      file,
+      JSON.stringify({ node_id: "11111111-2222-3333-4444-555555555555", hostname: "h", note: "x" }),
+      "utf8",
+    );
+
+    loadOrCreateIdentity(dir);
+
+    expect(Object.keys(JSON.parse(readFileSync(file, "utf8"))).sort()).toEqual([
+      "hostname",
+      "node_id",
+    ]);
   });
 });
