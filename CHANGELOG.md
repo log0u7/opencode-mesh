@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Node runtime support: the published package no longer calls `require()` from
+  ESM modules. The Node fallback paths (`node:sqlite` engine, `node:crypto`)
+  now use static and dynamic imports and actually run. Vitest's module runner
+  injects a `require`, which hid the `ReferenceError` from the suite, so
+  `scripts/smoke-dist.mjs` loads the built package under plain Node and is part
+  of `pnpm verify`.
+- Removed the Ed25519 keypair ceremony in node identity: nothing signed or
+  verified with it, so the short fingerprint is derived from `node_id`.
+  Existing node ids are preserved on upgrade; the fingerprint value changes,
+  which may require re-pairing peers.
+
 ## [0.2.0] - 2026-10-12
 
 ### Added

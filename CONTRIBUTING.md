@@ -36,11 +36,11 @@ Every behavior change ships with tests, written test-first (red-green-refactor):
 2. Implement the minimal code that makes it pass (green).
 3. Refactor with tests green.
 
-CI enforces a coverage gate (90% lines/functions, 80% branches) via `pnpm verify`; a PR without tests or below the threshold fails. Unit tests use real filesystem (temp dirs) and real SQLite: no mocks. Mocks are allowed only at true network/tool boundaries (mDNS, external CLIs).
+CI enforces a coverage gate (90% lines/functions, 80% branches) via `pnpm verify`; a PR without tests or below the threshold fails. `pnpm verify` also loads the built package under plain Node (`scripts/smoke-dist.mjs`): vitest's module runner injects a `require`, so a suite that passes can still ship `require()` calls that the published ESM output cannot run, and only the smoke test catches that. Unit tests use real filesystem (temp dirs) and real SQLite: no mocks. Mocks are allowed only at true network/tool boundaries (mDNS, external CLIs).
 
 ```sh
 pnpm test:coverage   # full suite with coverage report
-pnpm verify          # biome + typecheck + tests (coverage gate)
+pnpm verify          # biome + typecheck + tests (coverage gate) + Node smoke of dist/
 pnpm build:check     # tsc build + pack dry-run
 ```
 
