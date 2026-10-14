@@ -4,6 +4,7 @@ import { openMeshDb } from "../src/lib/db.js";
 import {
   getWorker,
   listWorkers,
+  setWorkerPid,
   setWorkerSession,
   setWorkerStatus,
   insertWorker,
@@ -48,6 +49,32 @@ describe("workers store", () => {
     expect(done?.status).toBe("completed");
     expect(done?.exit_code).toBe(0);
     expect(done?.finished_at).toBeGreaterThan(0);
+    db.close();
+  });
+
+  it("ignores a session id bound after the worker reached a terminal state", () => {
+    const db = openMeshDb(":memory:");
+    spawn(db);
+    setWorkerStatus(db, "w1", "failed", { exit_code: 1 });
+
+    // A late stdout chunk must not resurrect a session id on a terminal row.
+    setWorkerSession(db, "w1", "ses-late");
+    expect(getWorker(db, "w1")?.session_id).toBeNull();
+    db.close();
+  });
+
+  it("records the pid after the row exists (insert-first spawn)", () => {
+    const db = openMeshDb(":memory:");
+    insertWorker(db, {
+      id: "w-pid",
+      task: "t",
+      worktree_path: "/wt",
+      branch: "b",
+      pid: null,
+    });
+
+    setWorkerPid(db, "w-pid", 31337);
+    expect(getWorker(db, "w-pid")?.pid).toBe(31337);
     db.close();
   });
 

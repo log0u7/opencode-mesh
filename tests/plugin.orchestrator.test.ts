@@ -59,10 +59,14 @@ function okSpawn(lines: Array<Record<string, unknown>> = []) {
   return (argv: string[]) => {
     const listeners: Array<(code: number | null) => void> = [];
     const stdoutListeners: Array<(chunk: string) => void> = [];
+    const stderrListeners: Array<(chunk: string) => void> = [];
     const proc = {
       pid: 4242,
       stdout: { on: (_: string, cb: (chunk: string) => void) => stdoutListeners.push(cb) },
-      on: (_: string, cb: (code: number | null) => void) => listeners.push(cb),
+      stderr: { on: (_: string, cb: (chunk: string) => void) => stderrListeners.push(cb) },
+      on: (event: string, cb: (code: number | null) => void) => {
+        if (event === "exit") listeners.push(cb);
+      },
       kill: () => {},
     };
     queueMicrotask(() => {
@@ -102,6 +106,28 @@ describe("orchestrator tools", () => {
     expect(result.branch).toBe("opencode/task-1");
     expect(result.pid).toBe(4242);
     expect(wt.worktree.create).toHaveBeenCalled();
+  });
+
+  it("mesh_spawn reports an error instead of a success envelope when the child never spawns", async () => {
+    // A real ENOENT reports pid -1 synchronously; the 'error' event lands later.
+    const failingSpawn = () => {
+      const proc = {
+        pid: -1,
+        stdout: { on: (_: string, cb: (chunk: string) => void) => void cb },
+        stderr: { on: (_: string, cb: (chunk: string) => void) => void cb },
+        on: (_: string, cb: (arg: unknown) => void) => void cb,
+        kill: () => {},
+      };
+      return proc as never;
+    };
+    const { tools } = await loadTools({
+      worktreeClient: fakeWorktreeClient(),
+      spawnFn: failingSpawn,
+    });
+
+    const result = String(await tools.mesh_spawn?.execute({ task: "t" }, ctx("s1")));
+
+    expect(result).toMatch(/^error: worker \S+ failed to start$/);
   });
 
   it("mesh_workers lists workers with lifecycle states", async () => {
@@ -147,6 +173,7 @@ describe("orchestrator tools", () => {
       const proc = {
         pid: 4242,
         stdout: { on: () => {} },
+        stderr: { on: () => {} },
         on: () => {},
         kill: () => {},
       };
@@ -211,6 +238,7 @@ describe("orchestrator tools", () => {
       const proc = {
         pid: 4242,
         stdout: { on: () => {} },
+        stderr: { on: () => {} },
         on: () => {},
         kill: () => {},
       };

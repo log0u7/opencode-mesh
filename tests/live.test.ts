@@ -58,6 +58,41 @@ describe("runWorker with a real child process", () => {
     db.close();
   });
 
+  it("does not block when the child writes a lot to stderr", async () => {
+    const db = openMeshDb(":memory:");
+
+    // >64 KB on stderr: with an undrained pipe the child would block forever.
+    const worker = await runWorker(db, dataDir, {
+      task: "flood stderr",
+      worktree_path: dir,
+      branch: "b",
+      spawnFn: (_argv) =>
+        nodeSpawn([
+          process.execPath,
+          "-e",
+          [
+            "process.stderr.write('e'.repeat(200000));",
+            "console.log(JSON.stringify({type:'text',sessionID:'ses-err',text:'done'}));",
+          ].join(" "),
+        ]),
+    });
+
+    for (let i = 0; i < 100; i++) {
+      if (getWorker(db, worker.id)?.status !== "running") {
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+
+    const row = getWorker(db, worker.id);
+    expect(row?.status).toBe("completed");
+
+    const { readFileSync } = await import("node:fs");
+    const log = readFileSync(join(dataDir, "workers", `${worker.id}.log`), "utf8");
+    expect(log).toContain("e".repeat(1000));
+    db.close();
+  });
+
   it("kills the whole worker process group on stop", async () => {
     const db = openMeshDb(":memory:");
 

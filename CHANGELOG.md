@@ -23,6 +23,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   processes: workers are detached process-group leaders and a stop takes the
   group down. The late `exit` event after a deliberate stop no longer throws;
   a host restart reconciles `running` rows whose pid is gone.
+- A worker that fails to start (binary missing, `error` event with no `exit`)
+  is now finalized as `failed` instead of staying `running` forever with a
+  leaked live entry; a `-1` pid is never persisted. `mesh_spawn` reports the
+  failure instead of a success envelope.
+- A worker's stderr is drained into its log; a child writing more than the pipe
+  buffer (~64 KB) to stderr no longer blocks. `mesh_worker_stop` escalates
+  `SIGTERM` to `SIGKILL` after 3s so a worker ignoring the signal cannot linger.
+- Worker logs are capped at 512 KB (rotated to `<id>.log.1`) and deleted by
+  `mesh_worker_remove`, so a chatty worker cannot fill the disk.
+- A JSON line split across two stdout chunks is now reassembled before parsing,
+  so a worker's `session_id` is captured instead of silently dropping to null.
+  A session id arriving after the row is terminal is ignored.
 
 ### Security
 

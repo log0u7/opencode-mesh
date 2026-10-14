@@ -1,4 +1,12 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+  mkdirSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -6,14 +14,23 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { openMeshDb } from "../src/lib/db.js";
 import { getWorker, insertWorker, reconcileWorkers } from "../src/lib/workers.js";
-import { readLogTail, runWorker, stopWorker, type SpawnedProcess } from "../src/lib/spawn.js";
+import {
+  readLogTail,
+  removeWorkerLog,
+  runWorker,
+  stopWorker,
+  type SpawnedProcess,
+} from "../src/lib/spawn.js";
 
 class FakeProc {
   exitCode: number | null = null;
   pid = 7777;
   signals: string[] = [];
+  ignoredSignals = new Set<string>();
   private listeners: Array<(code: number | null) => void> = [];
+  private errorListeners: Array<(error: Error) => void> = [];
   private stdoutListeners: Array<(chunk: string) => void> = [];
+  private stderrListeners: Array<(chunk: string) => void> = [];
 
   stdout = {
     on: (_: string, cb: (chunk: string) => void) => {
@@ -21,14 +38,25 @@ class FakeProc {
     },
   };
 
+  stderr = {
+    on: (_: string, cb: (chunk: string) => void) => {
+      this.stderrListeners.push(cb);
+    },
+  };
+
   kill(signal: string): void {
     this.signals.push(signal);
-    this.emitExit(143);
+    if (this.ignoredSignals.has(signal)) {
+      return;
+    }
+    this.emitExit(signal === "SIGKILL" ? 137 : 143);
   }
 
-  on(event: string, cb: (code: number | null) => void) {
+  on(event: string, cb: (...args: unknown[]) => void) {
     if (event === "exit") {
-      this.listeners.push(cb);
+      this.listeners.push(cb as (code: number | null) => void);
+    } else if (event === "error") {
+      this.errorListeners.push(cb as (error: Error) => void);
     }
   }
 
@@ -38,10 +66,22 @@ class FakeProc {
     }
   }
 
+  writeErr(text: string): void {
+    for (const cb of this.stderrListeners) {
+      cb(text);
+    }
+  }
+
   emitExit(code: number | null): void {
     this.exitCode = code;
     for (const cb of this.listeners) {
       cb(code);
+    }
+  }
+
+  emitError(error: Error): void {
+    for (const cb of this.errorListeners) {
+      cb(error);
     }
   }
 }
@@ -189,13 +229,180 @@ describe("runWorker lifecycle", () => {
       worktree_path: "/wt",
       branch: "b",
       spawnFn: fake.spawnFn,
-      killFn,
     });
 
     stopWorker(db, worker.id, { killFn });
 
     expect(killFn).toHaveBeenCalledWith(worker.id, "SIGTERM");
     expect(getWorker(db, worker.id)?.status).toBe("stopped");
+    db.close();
+  });
+
+  it("escalates to SIGKILL when the worker ignores SIGTERM", async () => {
+    const db = openMeshDb(":memory:");
+    const fake = fakeSpawn((proc) => {
+      proc.ignoredSignals.add("SIGTERM");
+    });
+
+    const worker = await runWorker(db, dir, {
+      task: "t",
+      worktree_path: "/wt",
+      branch: "b",
+      spawnFn: fake.spawnFn,
+    });
+
+    stopWorker(db, worker.id, { graceMs: 10 });
+    await new Promise((resolve) => setTimeout(resolve, 40));
+
+    expect(fake.proc.signals).toEqual(["SIGTERM", "SIGKILL"]);
+    expect(getWorker(db, worker.id)?.status).toBe("stopped");
+    db.close();
+  });
+
+  it("cancels the SIGKILL escalation when the worker exits during the grace window", async () => {
+    const db = openMeshDb(":memory:");
+    const fake = fakeSpawn((proc) => {
+      // Exit asynchronously on SIGTERM, like a real child honouring the signal.
+      proc.kill = (signal: string) => {
+        proc.signals.push(signal);
+        queueMicrotask(() => proc.emitExit(143));
+      };
+    });
+
+    const worker = await runWorker(db, dir, {
+      task: "t",
+      worktree_path: "/wt",
+      branch: "b",
+      spawnFn: fake.spawnFn,
+    });
+
+    stopWorker(db, worker.id, { graceMs: 10 });
+    await new Promise((resolve) => setTimeout(resolve, 40));
+
+    expect(fake.proc.signals).toEqual(["SIGTERM"]);
+    expect(getWorker(db, worker.id)?.status).toBe("stopped");
+    db.close();
+  });
+
+  it("schedules no escalation for graceMs 0", async () => {
+    const db = openMeshDb(":memory:");
+    const fake = fakeSpawn((proc) => {
+      proc.ignoredSignals.add("SIGTERM");
+    });
+
+    const worker = await runWorker(db, dir, {
+      task: "t",
+      worktree_path: "/wt",
+      branch: "b",
+      spawnFn: fake.spawnFn,
+    });
+
+    stopWorker(db, worker.id, { graceMs: 0 });
+    await new Promise((resolve) => setTimeout(resolve, 40));
+
+    expect(fake.proc.signals).toEqual(["SIGTERM"]);
+    expect(getWorker(db, worker.id)?.status).toBe("stopped");
+    db.close();
+  });
+
+  it("ignores a spawn error delivered after the row already finalized", async () => {
+    const db = openMeshDb(":memory:");
+    const fake = fakeSpawn((proc) => {
+      proc.emitExit(0);
+      proc.emitError(new Error("late error"));
+    });
+
+    const worker = await runWorker(db, dir, {
+      task: "t",
+      worktree_path: "/wt",
+      branch: "b",
+      spawnFn: fake.spawnFn,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    const row = getWorker(db, worker.id);
+    expect(row?.status).toBe("completed");
+    expect(row?.exit_code).toBe(0);
+    db.close();
+  });
+
+  it("captures a session id delivered without a trailing newline", async () => {
+    const db = openMeshDb(":memory:");
+    const fake = fakeSpawn((proc) => {
+      proc.write('{"type":"step_start","sessionID":"ses-tail"}');
+      proc.emitExit(0);
+    });
+
+    const worker = await runWorker(db, dir, {
+      task: "t",
+      worktree_path: "/wt",
+      branch: "b",
+      spawnFn: fake.spawnFn,
+    });
+
+    expect(getWorker(db, worker.id)?.session_id).toBe("ses-tail");
+    db.close();
+  });
+
+  it("finalizes failed when the spawn emits an error instead of exiting", async () => {
+    const db = openMeshDb(":memory:");
+    const fake = fakeSpawn((proc) => {
+      proc.emitError(new Error("spawn opencode ENOENT"));
+    });
+    // A failed spawn reports pid -1 synchronously, before spawnFn returns.
+    fake.proc.pid = -1;
+
+    const worker = await runWorker(db, dir, {
+      task: "t",
+      worktree_path: "/wt",
+      branch: "b",
+      spawnFn: fake.spawnFn,
+    });
+    // The error event is async: let it deliver before asserting.
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    const row = getWorker(db, worker.id);
+    expect(row?.status).toBe("failed");
+    // pid -1 means "no process": it must never be persisted.
+    expect(row?.pid).toBeNull();
+    db.close();
+  });
+
+  it("reassembles a session id split across two stdout chunks", async () => {
+    const db = openMeshDb(":memory:");
+    const fake = fakeSpawn((proc) => {
+      proc.write('{"type":"step_start","session');
+      proc.write('ID":"ses-split"}\n');
+      proc.emitExit(0);
+    });
+
+    const worker = await runWorker(db, dir, {
+      task: "t",
+      worktree_path: "/wt",
+      branch: "b",
+      spawnFn: fake.spawnFn,
+    });
+
+    expect(getWorker(db, worker.id)?.session_id).toBe("ses-split");
+    db.close();
+  });
+
+  it("drains stderr into the worker log", async () => {
+    const db = openMeshDb(":memory:");
+    const fake = fakeSpawn((proc) => {
+      proc.writeErr("warning: something\n");
+      proc.emitExit(0);
+    });
+
+    const worker = await runWorker(db, dir, {
+      task: "t",
+      worktree_path: "/wt",
+      branch: "b",
+      spawnFn: fake.spawnFn,
+    });
+
+    const log = readFileSync(join(dir, "workers", `${worker.id}.log`), "utf8");
+    expect(log).toContain("warning: something");
     db.close();
   });
 });
@@ -226,6 +433,61 @@ describe("readLogTail", () => {
 
   it("returns an empty string when no log exists yet", () => {
     expect(readLogTail(dir, "missing-worker", 50)).toBe("");
+  });
+
+  it("returns nothing for a non-positive limit and falls back for NaN", () => {
+    const logDir = join(dir, "workers");
+    mkdirSync(logDir, { recursive: true });
+    const id = "log-limit-worker";
+    writeFileSync(join(logDir, `${id}.log`), "one\ntwo\nthree\n", "utf8");
+
+    expect(readLogTail(dir, id, 0)).toBe("");
+    expect(readLogTail(dir, id, -5)).toBe("");
+    // A non-finite limit falls back to the 50-line default, not to "all".
+    expect(readLogTail(dir, id, Number.NaN)).toBe("one\ntwo\nthree");
+  });
+});
+
+describe("removeWorkerLog", () => {
+  it("deletes the log and its rotated generation, and is idempotent", () => {
+    const logDir = join(dir, "workers");
+    mkdirSync(logDir, { recursive: true });
+    const id = "remove-log-worker";
+    writeFileSync(join(logDir, `${id}.log`), "current\n", "utf8");
+    writeFileSync(join(logDir, `${id}.log.1`), "rotated\n", "utf8");
+
+    removeWorkerLog(dir, id);
+
+    expect(existsSync(join(logDir, `${id}.log`))).toBe(false);
+    expect(existsSync(join(logDir, `${id}.log.1`))).toBe(false);
+    expect(() => removeWorkerLog(dir, id)).not.toThrow();
+  });
+});
+
+describe("worker log rotation", () => {
+  it("rotates the log to .1 once it exceeds the cap", async () => {
+    const db = openMeshDb(":memory:");
+    const chunk = "x".repeat(300 * 1024);
+    const fake = fakeSpawn((proc) => {
+      proc.write(chunk);
+      proc.write(chunk);
+      proc.write(chunk);
+      proc.emitExit(0);
+    });
+
+    const worker = await runWorker(db, dir, {
+      task: "t",
+      worktree_path: "/wt",
+      branch: "b",
+      spawnFn: fake.spawnFn,
+    });
+
+    const log = join(dir, "workers", `${worker.id}.log`);
+    const rotated = `${log}.1`;
+    expect(existsSync(rotated)).toBe(true);
+    // The live log restarted empty, so it is smaller than the rotated one.
+    expect(statSync(log).size).toBeLessThan(statSync(rotated).size);
+    db.close();
   });
 });
 
