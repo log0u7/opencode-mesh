@@ -178,6 +178,34 @@ describe("orchestrator tools", () => {
     expect(after).toBe("[]");
   });
 
+  it("mesh_worker_remove with force drops a running row missing from the live map", async () => {
+    const { openMeshDb } = await import("../src/lib/db.js");
+    const wt = fakeWorktreeClient();
+    const { tools } = await loadTools({ worktreeClient: wt, spawnFn: okSpawn([]) });
+
+    // Simulate a host restart: a 'running' row whose process is not in this
+    // process's live map. The pid is alive (unsettled reconcile), so removal
+    // must still work instead of erroring on a missing entry.
+    const db = openMeshDb(`${dir}/mesh.db`);
+    const row = await import("../src/lib/workers.js").then((m) =>
+      m.insertWorker(db, {
+        task: "orphaned",
+        worktree_path: "/data/worktree/p1/task-1",
+        branch: "opencode/task-1",
+        pid: process.pid,
+      }),
+    );
+    db.close();
+
+    const removed = String(
+      await tools.mesh_worker_remove?.execute({ worker_id: row.id, force: true }, ctx("s1")),
+    );
+    expect(removed).toContain("removed");
+    expect(wt.worktree.remove).toHaveBeenCalledWith({
+      worktreeRemoveInput: { directory: "/data/worktree/p1/task-1" },
+    });
+  });
+
   it("dispose stops live workers so nothing outlives the plugin", async () => {
     const hangingSpawn = (_argv: string[]) => {
       const proc = {

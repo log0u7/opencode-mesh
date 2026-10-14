@@ -305,8 +305,14 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
           if (args.force !== true) {
             return `error: worker ${worker.id} is running; use force=true to stop and remove it`;
           }
-          // force: terminate first so no process keeps writing into a deleted worktree.
-          stopWorker(db, worker.id);
+          // force: terminate first so no process keeps writing into a deleted
+          // worktree. A row can be 'running' with no live process left (host
+          // restart, pid not yet reconciled): removal must still proceed.
+          try {
+            stopWorker(db, worker.id);
+          } catch {
+            // Nothing live to signal; the registry row is what gets cleaned up.
+          }
         }
         try {
           await removeWorkerWorktree(worktreeClient, { directory: worker.worktree_path });
