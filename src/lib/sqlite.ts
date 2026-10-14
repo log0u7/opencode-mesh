@@ -70,7 +70,8 @@ function createBunConn(db: BunSqliteDatabase): SqliteConn {
 // Engine resolution at module load: OpenCode's compiled runtime (Bun 1.3.x)
 // exposes neither `globalThis.Bun.sqlite` nor `node:sqlite` to hot-loaded
 // plugins, but the `bun:sqlite` module itself IS available there. Node (tests,
-// CI) has no bun:sqlite and falls back to node:sqlite via createRequire.
+// CI) has no bun:sqlite and falls back to node:sqlite via dynamic import:
+// a static import would throw at module load on Bun before the fallback runs.
 interface BunSqliteLike {
   Database: new (path: string) => BunSqliteDatabase;
 }
@@ -81,6 +82,19 @@ try {
   BunSqliteEngine = (await import(specifier)) as BunSqliteLike;
 } catch {
   BunSqliteEngine = null;
+}
+
+interface NodeSqliteLike {
+  DatabaseSync: new (path: string) => NodeSqliteDatabase;
+}
+
+let NodeSqliteEngine: NodeSqliteLike | null = null;
+try {
+  NodeSqliteEngine =
+    ((await import("node:sqlite")) as { default?: NodeSqliteLike }).default ??
+    ((await import("node:sqlite")) as NodeSqliteLike);
+} catch {
+  NodeSqliteEngine = null;
 }
 
 export function openSqlite(path: string): SqliteConn {
@@ -96,12 +110,10 @@ export function openSqlite(path: string): SqliteConn {
     return createBunConn(new BunSqliteEngine.Database(path));
   }
 
-  // node:sqlite ships with Node >= 22.5; require keeps non-node runtimes from
-  // failing at module load and gives tests a clear error if the engine is absent.
-  const { DatabaseSync } = require("node:sqlite") as NodeSqliteExports;
-  return createPreparedConn(new DatabaseSync(path));
-}
-
-interface NodeSqliteExports {
-  DatabaseSync: new (path: string) => NodeSqliteDatabase;
+  // node:sqlite ships with Node >= 22.5; a failed import leaves the engine
+  // null, so tests get a clear error instead of a hidden require() ReferenceError.
+  if (!NodeSqliteEngine) {
+    throw new Error("no sqlite engine available: expected bun:sqlite or node:sqlite");
+  }
+  return createPreparedConn(new NodeSqliteEngine.DatabaseSync(path));
 }
