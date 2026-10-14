@@ -1,4 +1,12 @@
-import { createHash, randomUUID } from "node:crypto";
+import {
+  createHash,
+  createPrivateKey,
+  createPublicKey,
+  generateKeyPairSync,
+  randomUUID,
+  sign,
+  verify,
+} from "node:crypto";
 import { chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { hostname as osHostname } from "node:os";
 import { dirname, join } from "node:path";
@@ -6,6 +14,8 @@ import { dirname, join } from "node:path";
 export type NodeIdentity = {
   node_id: string;
   hostname: string;
+  public_key: string;
+  private_key: string;
   fingerprint: string;
 };
 
@@ -16,15 +26,19 @@ export function loadOrCreateIdentity(dataDir: string): NodeIdentity {
   const existing = readIdentity(file);
 
   if (existing) {
-    // A file written by <= 0.2.0 carries an Ed25519 keypair nothing ever used.
-    // Only the node_id matters, so the migration finishes by rewriting the file
-    // without the key material: the node keeps its id and its peers stay
-    // recognised, and the dead keys stop lingering on disk.
+    // A file written by <= 0.2.0 carries either no keys or a dead Ed25519
+    // JWK keypair nothing ever used. The node keeps its node_id (peers stay
+    // recognised), and the file is rewritten to the canonical shape with a
+    // fresh signing keypair so pairing proofs can be produced.
     if (existing.migrated) writeIdentity(file, existing.identity);
     return withFingerprint(existing.identity);
   }
 
-  const identity: PersistedIdentity = { node_id: randomUUID(), hostname: hostName() };
+  const identity: PersistedIdentity = {
+    ...freshKeys(),
+    node_id: randomUUID(),
+    hostname: hostName(),
+  };
   writeIdentity(file, identity);
   return withFingerprint(identity);
 }
@@ -52,11 +66,24 @@ function readIdentity(file: string): ReadIdentity | null {
     throw corrupt(file, "has no node_id");
   }
 
-  return {
-    identity: { node_id: record.node_id, hostname: hostName(record.hostname) },
-    migrated: Object.keys(record).some((key) => key !== "node_id" && key !== "hostname"),
+  const identity: PersistedIdentity = {
+    node_id: record.node_id,
+    hostname: hostName(record.hostname),
+    public_key: typeof record.public_key === "string" ? record.public_key : "",
+    private_key: typeof record.private_key === "string" ? record.private_key : "",
   };
+  const keysUsable = isSpki(identity.public_key) && isPkcs8(identity.private_key);
+  const migrated = !keysUsable || Object.keys(record).some((key) => !KNOWN_KEYS.has(key));
+  if (!keysUsable) {
+    // Replace dead or missing keys; the node_id above is never regenerated, so
+    // peers keep recognising this node through the migration.
+    Object.assign(identity, freshKeys());
+  }
+
+  return { identity, migrated };
 }
+
+const KNOWN_KEYS = new Set(["node_id", "hostname", "public_key", "private_key"]);
 
 // A corrupt identity file would make the node silently mint a new id, breaking
 // every peer that recognises it and orphaning queued mail. Refuse to start and
@@ -68,6 +95,84 @@ function corrupt(file: string, why: string): Error {
   );
 }
 
+function freshKeys(): { public_key: string; private_key: string } {
+  const { publicKey, privateKey } = generateKeyPairSync("ed25519");
+  return {
+    public_key: Buffer.from(publicKey.export({ type: "spki", format: "der" })).toString("base64"),
+    private_key: Buffer.from(privateKey.export({ type: "pkcs8", format: "der" })).toString(
+      "base64",
+    ),
+  };
+}
+
+function isSpki(value: string): boolean {
+  try {
+    const key = createPublicKey({
+      key: Buffer.from(value, "base64"),
+      format: "der",
+      type: "spki",
+    });
+    // Only the algorithm we sign with: a hand-edited RSA key must not pass
+    // validation and then break `sign(null, ...)` at send time.
+    return key.asymmetricKeyType === "ed25519";
+  } catch {
+    return false;
+  }
+}
+
+function isPkcs8(value: string): boolean {
+  try {
+    const key = createPrivateKey({
+      key: Buffer.from(value, "base64"),
+      format: "der",
+      type: "pkcs8",
+    });
+    return key.asymmetricKeyType === "ed25519";
+  } catch {
+    return false;
+  }
+}
+
+// Pairing proofs: an Ed25519 signature binding the sender's node id to the
+// token it presents. The canonical payload lives next to the signers so the
+// sender and the verifier cannot drift.
+export function pairingProofPayload(nodeId: string, token: string): string {
+  return `opencode-mesh-pair:${nodeId}:${token}`;
+}
+
+export function signPairingProof(privateKey: string, payload: string): string {
+  const key = createPrivateKey({
+    key: Buffer.from(privateKey, "base64"),
+    format: "der",
+    type: "pkcs8",
+  });
+  return Buffer.from(sign(null, Buffer.from(payload, "utf8"), key)).toString("base64");
+}
+
+// The wire form of a pairing proof: `<base64 spki>.<base64 signature>`.
+export function pairingProof(
+  identity: { node_id: string; public_key: string; private_key: string },
+  token: string,
+): string {
+  return `${identity.public_key}.${signPairingProof(
+    identity.private_key,
+    pairingProofPayload(identity.node_id, token),
+  )}`;
+}
+
+export function verifyPairingProof(publicKey: string, payload: string, proof: string): boolean {
+  try {
+    const key = createPublicKey({
+      key: Buffer.from(publicKey, "base64"),
+      format: "der",
+      type: "spki",
+    });
+    return verify(null, Buffer.from(payload, "utf8"), key, Buffer.from(proof, "base64"));
+  } catch {
+    return false;
+  }
+}
+
 function writeIdentity(file: string, identity: PersistedIdentity): void {
   mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
   // Atomic write: temp file + rename, so a crash never leaves a truncated record.
@@ -77,9 +182,9 @@ function writeIdentity(file: string, identity: PersistedIdentity): void {
   chmodSync(file, 0o600);
 }
 
-// The keypair this replaces produced a fingerprint nobody verified. Deriving it
-// from the node_id keeps the same short, operator-readable label for `mesh_status`
-// without storing or protecting key material.
+// The fingerprint stays derived from the node_id (not from the signing key):
+// keys can be replaced on migration without shuffling the operator-facing
+// label for `mesh_status`.
 function withFingerprint(identity: PersistedIdentity): NodeIdentity {
   return {
     ...identity,

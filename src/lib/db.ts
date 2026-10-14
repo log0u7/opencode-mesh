@@ -10,7 +10,7 @@ export type MeshDb = {
 
 // Bump when a schema change needs a migration step; the version anchors future
 // migrations that cannot be expressed as idempotent `CREATE ... IF NOT EXISTS`.
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS peers (
@@ -20,6 +20,7 @@ CREATE TABLE IF NOT EXISTS peers (
   addresses TEXT NOT NULL DEFAULT '[]',
   paired INTEGER NOT NULL DEFAULT 0,
   token TEXT,
+  public_key TEXT,
   last_seen INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS messages (
@@ -67,6 +68,12 @@ function migrate(conn: SqliteConn): void {
   // Every statement in SCHEMA is idempotent, so a version-0 database (fresh or
   // pre-versioning) is brought up to date by re-running it.
   conn.exec(SCHEMA);
+  // v2: pairing proofs are verified against a pinned public key, so peers gain
+  // the column. ALTER TABLE is not idempotent: guard it on the live schema.
+  const peerColumns = conn.all<{ name: string }>("PRAGMA table_info(peers)").map((row) => row.name);
+  if (!peerColumns.includes("public_key")) {
+    conn.exec("ALTER TABLE peers ADD COLUMN public_key TEXT");
+  }
   conn.run(`PRAGMA user_version = ${SCHEMA_VERSION}`);
 }
 

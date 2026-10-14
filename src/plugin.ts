@@ -125,6 +125,7 @@ export const MeshPlugin: Plugin = async (input, rawOptions?: PluginOptions) => {
       port,
       node_id: identity.node_id,
       fingerprint: identity.fingerprint,
+      public_key: identity.public_key,
     });
     browseHandle = browseMesh({
       bonjour,

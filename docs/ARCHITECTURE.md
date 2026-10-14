@@ -11,8 +11,8 @@ offloading; source under `src/`.
 | Adapters | `src/plugin.ts` (v1), `src/plugin-v2.ts` (v2) | Validate `options` (`parseOptions`), bootstrap everything, map tool specs onto the host's tool surface (v1 zod, v2 JSON schema). |
 | Tools | `src/tools.ts` | The single tool table: 11 `mesh_*` tools with fields and executes, shared by both adapters. |
 | Store | `src/lib/db.ts`, `src/lib/sqlite.ts` | SQLite (`bun:sqlite` on the opencode runtime, `node:sqlite` fallback), WAL, 5s busy timeout, schema version (`user_version`), five hot-lookup indexes. |
-| Identity | `src/lib/identity.ts` | `node.json` (`{node_id, hostname}`) with id continuity across migration; corrupt file fails loud, never remints. |
-| Peers | `src/lib/peers.ts` | Peer rows, pairing tokens, bearer-token auth, address resolution. |
+| Identity | `src/lib/identity.ts` | `node.json` (`{node_id, hostname, public_key, private_key}`) with id continuity across migration; corrupt file fails loud, never remints. The Ed25519 keypair signs pairing proofs. |
+| Peers | `src/lib/peers.ts` | Peer rows, pairing tokens, bearer-token auth, address resolution, pairing proofs (sender must sign with its pinned key to bind or rotate a row). |
 | Mail | `src/lib/mail.ts` | Append-only messages (`unread`/`read`), unread counters, acks. |
 | Server | `src/lib/serve.ts` | HTTP `/mail` + `/status`, loopback binding with an ephemeral fallback. |
 | Discovery | `src/lib/discovery.ts` | mDNS advertise/browse (TXT: id + fingerprint), tailnet IPs. |
@@ -97,8 +97,8 @@ concurrency (two opencode sessions in the same repository) is protected by:
 
 ```
 ~/.local/share/opencode-mesh/        (0700, honors XDG_DATA_HOME)
-├── node.json        { "node_id": "...uuid...", "hostname": "..." }   0600
-├── mesh.db          SQLite: peers, messages, locks, pending_tokens, workers
+├── node.json        { node_id, hostname, public_key, private_key }   0600
+├── mesh.db          SQLite: peers (+ pinned public_key), messages, locks, tokens, workers
 ├── mesh.db-wal      -- WAL sidecar
 └── workers/
     └── <worker id>.log   captured output, rotated at 512 KiB

@@ -2,7 +2,7 @@ import { basename } from "node:path";
 import { sendMail } from "./lib/client.js";
 import type { MeshDb } from "./lib/db.js";
 import { tailnetAddresses } from "./lib/discovery.js";
-import type { NodeIdentity } from "./lib/identity.js";
+import { pairingProof, type NodeIdentity } from "./lib/identity.js";
 import { ackMessages, unreadMessages } from "./lib/mail.js";
 import { listLocks, releaseLock, tryLock } from "./lib/locks.js";
 import {
@@ -96,11 +96,12 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
     {
       name: "mesh_pair",
       description:
-        "Pair with a peer. With no args: emit a pairing offer (token, node id, server address) for the peer's mesh_pair. With node_id, token, and address: complete pairing started by the other side.",
+        "Pair with a peer. With no args: emit a pairing offer (token, node id, public key, server address) for the peer's mesh_pair. With node_id, token, and address (pk from the offer): complete pairing started by the other side.",
       fields: [
         str("node_id", "Peer node id, from its mesh_pair output", false),
         str("token", "Pairing token from the peer's offer", false),
         str("address", "Peer server address as host:port", false),
+        str("pk", "Peer public key from the peer's offer (pins its signing key)", false),
       ],
       execute: async (args) => {
         const node_id = args.node_id;
@@ -117,11 +118,12 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
             fingerprint: "manual",
             token,
             addresses: typeof args.address === "string" ? [args.address] : [],
+            ...(typeof args.pk === "string" && args.pk.length > 0 ? { public_key: args.pk } : {}),
           });
           return `paired with ${node_id}`;
         }
         const offer = createPairingToken(db);
-        return `peer should run: mesh_pair(node_id="${identity.node_id}", token="${offer}", address="${serverAddress}:${port}")`;
+        return `peer should run: mesh_pair(node_id="${identity.node_id}", token="${offer}", address="${serverAddress}:${port}", pk="${identity.public_key}")`;
       },
     },
 
@@ -143,12 +145,16 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
         if (url === null) {
           return `error: peer ${target.node_id} has no known address with a port; have it run mesh_pair to share its address, or wait for discovery`;
         }
+        // Every mail carries a pairing proof signed by this node's key: it is
+        // what lets the receiving side bind (or rotate) a pairing to us without
+        // trusting the bearer token alone.
         const result = await sendMail({
           url,
           token: target.token ?? "",
           from: identity.node_id,
           subject: String(args.subject),
           body: String(args.body),
+          proof: pairingProof(identity, target.token ?? ""),
         });
         return `sent to ${target.node_id}: ${result}`;
       },

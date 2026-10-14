@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Signed pairing offers close the pending-token rebind window (Closes #30).
+  Each node keeps an Ed25519 keypair in `node.json` (generated on first run or
+  on migration; the `node_id` is preserved). Pairing offers carry the emitter's
+  public key (`pk`), completing a pairing pins it, mDNS TXT advertises it, and
+  every outgoing mail carries a pairing proof (`<pk>.<signature>` over
+  `opencode-mesh-pair:<node_id>:<token>`). A pending token now binds (or
+  rotates) a peer row only with a valid proof from the pinned key: a leaked
+  offer alone can no longer take over a paired peer's credential. Peers paired
+  without a pinned key (0.3.0-era rows, or completions without `pk`) refuse
+  remote rebinding: re-run `mesh_pair` to rotate them. `peers` gains a
+  `public_key` column (schema version 2, migrated in place).
+
 ### Fixed
 
 - Peer addresses in the IPv4-mapped IPv6 form (`[::ffff:192.168.1.10]:4399`)
