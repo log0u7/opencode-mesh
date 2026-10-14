@@ -10,6 +10,8 @@ Coordination for [OpenCode](https://opencode.ai): multiple sessions working toge
 
 Each node advertises itself over mDNS, pairs with explicit operator approval (per-peer bearer tokens, deny by default), then sessions can exchange messages (`mesh_send` / `mesh_inbox`) and coordinate on shared work (`mesh_lock` / `mesh_unlock`). Tailscale IPs are picked up automatically when `tailscale status` works, for cross-subnet pools.
 
+`mesh_lock` is **local to your machine**: it is enforced between OpenCode sessions sharing this host's data directory (`~/.local/share/opencode-mesh/`). Locks are not part of the wire protocol, so a peer on another node does not see or respect them. Remote nodes coordinate through messages (`mesh_send`), not locks.
+
 ## Install
 
 Register the plugin in `opencode.json` (project or global `~/.config/opencode/opencode.json`):
@@ -30,6 +32,8 @@ Restart OpenCode. The package is installed automatically at startup into opencod
 
 Node identity and mailbox live under `~/.local/share/opencode-mesh/` (honors `XDG_DATA_HOME`), created with restrictive permissions.
 
+Workers spawned with `mesh_spawn` run with `OPENCODE_MESH_CHILD=1`: they skip the mesh server, mDNS and all mesh tools, so a pool of N workers costs N worktrees, not N mesh nodes.
+
 Note (npm 12): the package ships no lifecycle install scripts and needs no `allowScripts` / allowlist on install (its runtime dependency `bonjour-service` has none either).
 
 ## Usage
@@ -41,7 +45,7 @@ mesh_status()                      # local sessions + paired peers + active lock
 mesh_pair()                        # list discovered peers, approve pairing
 mesh_send(peer="laptop", subject="handoff", body="...")
 mesh_inbox()                       # pull new messages, ack
-mesh_lock(path="src/api.ts", ttl=300)   # claim a file before editing
+mesh_lock(path="src/api.ts", ttl=300)   # claim a file before editing (this machine only)
 mesh_unlock(path="src/api.ts")
 ```
 
@@ -50,10 +54,10 @@ mesh_unlock(path="src/api.ts")
 | Tool | Args | Description |
 |---|---|---|
 | `mesh_status` | : local session registry, own address, paired peers, active locks. |
-| `mesh_pair` | `query?` | List discovered peers; operator approves by hostname/fingerprint. |
+| `mesh_pair` | `node_id?`, `token?`, `address?` | No args: emit a pairing offer (5 min ttl). With args: complete the peer's offer. |
 | `mesh_send` | `peer`, `subject`, `body` | Deliver a message to a peer's mailbox. |
 | `mesh_inbox` | `ack?` | Fetch unread messages; ack marks them read. |
-| `mesh_lock` | `path`, `ttl?` | Exclusive claim on a file or worktree path (default ttl 600s). |
+| `mesh_lock` | `path`, `ttl?` | Exclusive claim on a file or path, enforced only between sessions on this machine (default ttl 600s). Not visible to remote peers. |
 | `mesh_unlock` | `path` | Release a claim. |
 
 ### Orchestrator
@@ -72,10 +76,13 @@ Workers run `opencode run --dir <worktree> --format json` headless with `--auto`
 
 ### Security model
 
-- Every HTTP endpoint requires a per-peer bearer token; nothing is open by default.
-- All peers, same machine or remote, pair through `mesh_pair`: one side emits a one-time token, the other completes the pairing with it.
-- mDNS TXT records carry node id + key fingerprint only, never secrets.
-- LAN-only by default; tailnet addresses are surfaced by `mesh_status` when `tailscale` runs, for cross-subnet pools (`"allow_tailnet": true` plugin option, planned).
+- The HTTP mesh server binds to `127.0.0.1` by default. Set `"bind": "lan"` in the plugin options to listen on all interfaces for a LAN pool.
+- Every endpoint requires a per-peer bearer token; nothing is open by default.
+- Pairing offers expire after 5 minutes. A pending token alone grants nothing: the claimed node must already be known to this host (discovered over mDNS, or paired out of band with `mesh_pair`). Both sides run `mesh_pair` to complete a pairing, so a leaked offer cannot install a permanent peer on its own.
+- Peer addresses always carry the advertised port; a portless address is refused instead of being completed with the local port.
+- mDNS TXT records carry node id + fingerprint only, never secrets.
+- Tailnet addresses are surfaced by `mesh_status` when `tailscale` runs, for cross-subnet pools (`"allow_tailnet": true` plugin option, planned).
+- Messages travel over plain HTTP: there is no TLS layer. Loopback and trusted networks only.
 
 ## Development
 
@@ -83,8 +90,9 @@ Requires Node >= 22 (mise: `mise install`) and pnpm (corepack).
 
 ```sh
 pnpm install
-pnpm verify      # biome + typecheck + vitest
+pnpm verify      # biome + typecheck + vitest + Node smoke of dist/
 pnpm build:check # tsc build + pack dry-run
+pnpm smoke:dist  # build, then load dist/ under plain Node (no vitest shims)
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the workflow.
