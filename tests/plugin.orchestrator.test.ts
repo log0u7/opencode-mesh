@@ -59,10 +59,14 @@ function okSpawn(lines: Array<Record<string, unknown>> = []) {
   return (argv: string[]) => {
     const listeners: Array<(code: number | null) => void> = [];
     const stdoutListeners: Array<(chunk: string) => void> = [];
+    const stderrListeners: Array<(chunk: string) => void> = [];
     const proc = {
       pid: 4242,
       stdout: { on: (_: string, cb: (chunk: string) => void) => stdoutListeners.push(cb) },
-      on: (_: string, cb: (code: number | null) => void) => listeners.push(cb),
+      stderr: { on: (_: string, cb: (chunk: string) => void) => stderrListeners.push(cb) },
+      on: (event: string, cb: (code: number | null) => void) => {
+        if (event === "exit") listeners.push(cb);
+      },
       kill: () => {},
     };
     queueMicrotask(() => {
@@ -147,6 +151,7 @@ describe("orchestrator tools", () => {
       const proc = {
         pid: 4242,
         stdout: { on: () => {} },
+        stderr: { on: () => {} },
         on: () => {},
         kill: () => {},
       };
@@ -211,6 +216,7 @@ describe("orchestrator tools", () => {
       const proc = {
         pid: 4242,
         stdout: { on: () => {} },
+        stderr: { on: () => {} },
         on: () => {},
         kill: () => {},
       };

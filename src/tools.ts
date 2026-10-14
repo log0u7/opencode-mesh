@@ -11,7 +11,7 @@ import {
   pairWithToken,
   resolvePeerUrl,
 } from "./lib/peers.js";
-import { readLogTail, runWorker, stopWorker, type SpawnFn } from "./lib/spawn.js";
+import { readLogTail, removeWorkerLog, runWorker, stopWorker, type SpawnFn } from "./lib/spawn.js";
 import { createWorkerWorktree, removeWorkerWorktree, type WorktreeClient } from "./lib/worktree.js";
 import { deleteWorker, getWorker, listWorkers } from "./lib/workers.js";
 
@@ -221,6 +221,9 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
             ...(typeof args.auto === "boolean" ? { auto: args.auto } : {}),
             spawnFn,
           });
+          if (worker.status === "failed") {
+            return `error: worker ${worker.id} failed to start`;
+          }
           return JSON.stringify(
             {
               worker_id: worker.id,
@@ -320,7 +323,8 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
           return `error: worktree remove failed: ${error instanceof Error ? error.message : String(error)}`;
         }
         deleteWorker(db, worker_id);
-        return `removed ${worker.id} (worktree and registry row deleted)`;
+        removeWorkerLog(dataDir, worker.id);
+        return `removed ${worker.id} (worktree, registry row and log deleted)`;
       },
     },
   ];

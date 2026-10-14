@@ -60,7 +60,16 @@ export function listWorkers(db: MeshDb): Worker[] {
 }
 
 export function setWorkerSession(db: MeshDb, id: string, sessionId: string): void {
-  db.conn.run("UPDATE workers SET session_id = ? WHERE id = ?", [sessionId, id]);
+  // A late stdout chunk after the process finalized must not resurrect a
+  // session id on a terminal row.
+  db.conn.run("UPDATE workers SET session_id = ? WHERE id = ? AND status = 'running'", [
+    sessionId,
+    id,
+  ]);
+}
+
+export function setWorkerPid(db: MeshDb, id: string, pid: number): void {
+  db.conn.run("UPDATE workers SET pid = ? WHERE id = ?", [pid, id]);
 }
 
 export function setWorkerStatus(
