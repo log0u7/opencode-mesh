@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   advertiseMesh,
   browseMesh,
+  resetTailnetCache,
   tailnetAddresses,
   type DiscoveredPeer,
 } from "../src/lib/discovery.js";
@@ -18,6 +19,7 @@ vi.mock("node:child_process", () => ({
 
 beforeEach(() => {
   execFileMocks.execFile.mockReset();
+  resetTailnetCache();
 });
 
 afterEach(() => {
@@ -26,27 +28,23 @@ afterEach(() => {
 
 type ServiceRecord = { name: string; type: string; port: number; txt?: Record<string, string> };
 
+type FakeService = {
+  port?: number;
+  txt?: Record<string, string>;
+  host?: string;
+  name: string;
+  addresses?: string[];
+};
+
 function fakeBonjour() {
   const published: ServiceRecord[] = [];
   const stops = vi.fn();
-  let findCallback:
-    | ((service: {
-        txt?: Record<string, string>;
-        host?: string;
-        name: string;
-        addresses?: string[];
-      }) => void)
-    | null = null;
+  let findCallback: ((service: FakeService) => void) | null = null;
 
   return {
     published,
     stops,
-    emit(service: {
-      txt?: Record<string, string>;
-      host?: string;
-      name: string;
-      addresses?: string[];
-    }) {
+    emit(service: FakeService) {
       findCallback?.(service);
     },
     bonjour: {
@@ -54,7 +52,7 @@ function fakeBonjour() {
         published.push(record);
         return { stop: stops };
       },
-      find: (_types: unknown, onUp: typeof findCallback) => {
+      find: (_types: unknown, onUp: (service: FakeService) => void) => {
         findCallback = onUp;
         return { stop: stops };
       },
@@ -85,7 +83,7 @@ describe("advertiseMesh", () => {
 });
 
 describe("browseMesh", () => {
-  it("forwards valid discoveries and ignores malformed TXT", () => {
+  it("attaches the advertised port to every discovered address", () => {
     const fake = fakeBonjour();
     const seen: DiscoveredPeer[] = [];
     const handle = browseMesh({
@@ -94,25 +92,35 @@ describe("browseMesh", () => {
     });
 
     fake.emit({
+      port: 5555,
       txt: { id: "peer-1", fp: "ff00" },
       host: "laptop.local",
       name: "peer-1",
-      addresses: ["192.168.1.5"],
+      addresses: ["192.168.1.5", "fe80::1"],
     });
-    fake.emit({ txt: {}, name: "no-txt" });
-    fake.emit({ txt: { id: "", fp: "x" }, name: "empty-id" });
 
     expect(seen).toEqual([
       {
         node_id: "peer-1",
         hostname: "laptop.local",
         fingerprint: "ff00",
-        addresses: ["192.168.1.5"],
+        // A bare IP is not routable: the port comes from the same mDNS record.
+        addresses: ["192.168.1.5:5555", "[fe80::1]:5555"],
       },
     ]);
 
     handle.close();
     expect(fake.stops).toHaveBeenCalled();
+  });
+
+  it("drops addresses when the record carries no port", () => {
+    const fake = fakeBonjour();
+    const seen: DiscoveredPeer[] = [];
+    browseMesh({ bonjour: fake.bonjour as never, onDiscovered: (p) => seen.push(p) });
+
+    fake.emit({ txt: { id: "peer-1", fp: "ff00" }, name: "peer-1", addresses: ["192.168.1.5"] });
+
+    expect(seen[0]?.addresses).toEqual([]);
   });
 
   it("upsertDiscoveredPeer stores the discovery in the peer table", () => {
@@ -144,6 +152,7 @@ describe("tailnetAddresses edge cases", () => {
     execFileMocks.execFile.mockImplementation(((
       _cmd: string,
       _args: string[],
+      _opts: unknown,
       cb: (err: Error | null, stdout: string) => void,
     ) => cb(null, "not-json")) as never);
 
@@ -165,8 +174,39 @@ describe("browseMesh host fallback", () => {
 });
 
 describe("tailnetAddresses", () => {
+  it("caches the status so repeated tool calls do not re-exec tailscale", async () => {
+    execFileMocks.execFile.mockClear();
+    execFileMocks.execFile.mockImplementation((_cmd, _args, _opts, cb) =>
+      cb(null, JSON.stringify({ Self: { TailscaleIPs: ["100.64.0.9"] } }), ""),
+    );
+
+    const first = await tailnetAddresses();
+    const second = await tailnetAddresses();
+
+    expect(first).toEqual(["100.64.0.9"]);
+    expect(second).toEqual(["100.64.0.9"]);
+    expect(execFileMocks.execFile).toHaveBeenCalledTimes(1);
+  });
+
+  it("bounds the tailscale subprocess with a timeout", async () => {
+    execFileMocks.execFile.mockClear();
+    execFileMocks.execFile.mockImplementation((_cmd, _args, _opts, cb) =>
+      cb(null, JSON.stringify({ Self: { TailscaleIPs: ["100.64.0.2"] } }), ""),
+    );
+
+    await tailnetAddresses();
+
+    // A wedged tailscaled must not hang mesh_status forever.
+    expect(execFileMocks.execFile).toHaveBeenCalledWith(
+      "tailscale",
+      ["status", "--json"],
+      expect.objectContaining({ timeout: 2000 }),
+      expect.any(Function),
+    );
+  });
+
   it("returns empty when tailscale is not installed", async () => {
-    execFileMocks.execFile.mockImplementation((_cmd, _args, cb) =>
+    execFileMocks.execFile.mockImplementation((_cmd, _args, _opts, cb) =>
       cb(new Error("not found"), "", ""),
     );
 
@@ -174,7 +214,7 @@ describe("tailnetAddresses", () => {
   });
 
   it("collects self addresses from tailscale status", async () => {
-    execFileMocks.execFile.mockImplementation((_cmd, _args, cb) => {
+    execFileMocks.execFile.mockImplementation((_cmd, _args, _opts, cb) => {
       cb(null, JSON.stringify({ Self: { TailscaleIPs: ["100.64.0.1"] } }), "");
     });
 
@@ -182,7 +222,7 @@ describe("tailnetAddresses", () => {
   });
 
   it("returns empty on malformed tailscale output", async () => {
-    execFileMocks.execFile.mockImplementation((_cmd, _args, cb) => cb(null, "not-json", ""));
+    execFileMocks.execFile.mockImplementation((_cmd, _args, _opts, cb) => cb(null, "not-json", ""));
 
     expect(await tailnetAddresses()).toEqual([]);
   });

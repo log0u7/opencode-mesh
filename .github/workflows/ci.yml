@@ -42,6 +42,11 @@ jobs:
       - name: Canonical verification
         run: pnpm verify
 
+      # vitest thresholds only apply with --coverage: keep the fast verify for
+      # the dev loop and enforce 90/80 here.
+      - name: Coverage gate
+        run: pnpm run test:coverage
+
       - name: Build and pack dry-run
         run: pnpm run build:check
 

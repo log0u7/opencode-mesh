@@ -94,6 +94,35 @@ export function deleteWorker(db: MeshDb, id: string): boolean {
   return (db.conn.get<{ changes: number }>("SELECT changes() AS changes")?.changes ?? 0) > 0;
 }
 
+// After a host restart the in-memory process map is gone, so 'running' rows can
+// never be stopped again. Rows whose pid no longer exists are marked stopped.
+export function reconcileWorkers(db: MeshDb): number {
+  const rows = db.conn.all<{ id: string; pid: number | null }>(
+    "SELECT id, pid FROM workers WHERE status = 'running'",
+  );
+  let reconciled = 0;
+  for (const row of rows) {
+    if (row.pid === null || !pidAlive(row.pid)) {
+      db.conn.run(
+        "UPDATE workers SET status = 'stopped', exit_code = NULL, finished_at = ? WHERE id = ?",
+        [Date.now(), row.id],
+      );
+      reconciled++;
+    }
+  }
+  return reconciled;
+}
+
+function pidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    // EPERM means the process exists but belongs to someone else.
+    return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
 function rowToWorker(row: WorkerRow): Worker {
   return {
     id: row.id,

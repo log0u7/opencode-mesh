@@ -1,4 +1,5 @@
 import { mkdtempSync, rmSync } from "node:fs";
+import { networkInterfaces } from "node:os";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -37,6 +38,62 @@ async function post(url: string, path: string, body: unknown, token?: string) {
     body: JSON.stringify(body),
   });
 }
+
+describe("mesh server bind", () => {
+  it("binds loopback by default and reports the address it bound", async () => {
+    const db = openMeshDb(":memory:");
+    const { server, port, address } = await startMeshServer({ db, port: 0 });
+
+    expect(address).toBe("127.0.0.1");
+    expect(server.address()).toMatchObject({ address: "127.0.0.1", port });
+
+    server.close();
+    db.close();
+  });
+
+  it("binds every interface only when explicitly asked for lan", async () => {
+    const db = openMeshDb(":memory:");
+    const { server, address } = await startMeshServer({ db, port: 0, bind: "lan" });
+
+    expect(address).not.toBe("127.0.0.1");
+
+    server.close();
+    db.close();
+  });
+
+  it("serves mail on the non-loopback interface when lan is opted into", async () => {
+    const db = openMeshDb(":memory:");
+    const { server, port, address } = await startMeshServer({ db, port: 0, bind: "lan" });
+
+    const lanIp = Object.values(networkInterfaces())
+      .flat()
+      .find((iface) => iface?.family === "IPv4" && !iface.internal)?.address;
+
+    if (lanIp !== undefined) {
+      pairWithToken(db, {
+        node_id: "peer1",
+        hostname: "laptop",
+        fingerprint: "ff00",
+        token: "tok-peer1",
+      });
+      const response = await post(
+        `http://${lanIp}:${port}`,
+        "/mail",
+        {
+          subject: "x",
+          body: "y",
+          from: "peer1",
+        },
+        "tok-peer1",
+      );
+      expect(response.status).toBe(200);
+    }
+    expect(address).not.toBe("127.0.0.1");
+
+    server.close();
+    db.close();
+  });
+});
 
 describe("mesh server", () => {
   it("rejects unauthenticated requests with 401", async () => {
@@ -134,7 +191,7 @@ describe("mesh server routes", () => {
     db.close();
   });
 
-  it("accepts /announce from a paired peer and updates addresses", async () => {
+  it("exposes no lock route: locks stay local to this host (guard)", async () => {
     const { db, server, url } = await start();
     pairWithToken(db, {
       node_id: "peer1",
@@ -144,11 +201,11 @@ describe("mesh server routes", () => {
     });
     const token = "tok-peer1";
 
-    const response = await post(url, "/announce", { addresses: ["10.0.0.9:4399"] }, token);
-    expect(response.status).toBe(200);
-
-    const { listPeers } = await import("../src/lib/peers.js");
-    expect(listPeers(db)[0]?.addresses).toEqual(["10.0.0.9:4399"]);
+    // mesh_lock is deliberately not part of the wire protocol. A future
+    // half-measure that adds a lock endpoint must fail here.
+    for (const path of ["/lock", "/locks", "/unlock", "/announce"]) {
+      expect((await post(url, path, { path: "a" }, token)).status).toBe(404);
+    }
 
     server.close();
     db.close();

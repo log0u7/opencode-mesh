@@ -15,10 +15,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   injects a `require`, which hid the `ReferenceError` from the suite, so
   `scripts/smoke-dist.mjs` loads the built package under plain Node and is part
   of `pnpm verify`.
+- `mesh_send` no longer derives the peer's port from the local node. Discovered
+  addresses now carry the port from the mDNS SRV record (`[ipv6]:port` for IPv6
+  literals), and a portless address is refused instead of resolving to a wrong
+  socket. Peers that fall back to an ephemeral port are now reachable.
+- Workers killed through `mesh_worker_stop` no longer orphan their own child
+  processes: workers are detached process-group leaders and a stop takes the
+  group down. The late `exit` event after a deliberate stop no longer throws;
+  a host restart reconciles `running` rows whose pid is gone.
+
+### Security
+
+- The mesh HTTP server binds to `127.0.0.1` by default. `"bind": "lan"` opts
+  into listening on all interfaces, and `mesh_status` / the `mesh_pair` offer
+  report the address actually bound instead of a hardcoded loopback string.
+- Pairing offers expire after 5 minutes, are pruned on check, and a pending
+  token alone no longer installs a permanent peer: the claimed node must
+  already be known to this host (mDNS discovery or explicit `mesh_pair`).
+  Auto-pairing a previously unknown node id is gone.
+- Discovered peers keep their hostname and fingerprint through pairing instead
+  of collapsing to `"pending"`, so `mesh_status` still shows a real identity.
+
+### Changed
+
+- `mesh_lock` is documented and advertised as local to this machine: it is
+  enforced between sessions sharing this host's data directory and is not part
+  of the wire protocol. A guard test fails the build if a lock route reappears
+  on the server.
 - Removed the Ed25519 keypair ceremony in node identity: nothing signed or
   verified with it, so the short fingerprint is derived from `node_id`.
   Existing node ids are preserved on upgrade; the fingerprint value changes,
   which may require re-pairing peers.
+- Workers spawned by `mesh_spawn` run with `OPENCODE_MESH_CHILD=1` and skip the
+  server, mDNS and all mesh tools, so a pool of N workers no longer costs N
+  mesh nodes.
+- `mesh_worker_logs` reads only the tail of a worker log instead of loading the
+  whole file on the host's event loop; `mesh_status` caches `tailscale status`
+  for 60s and bounds the subprocess with a 2s timeout.
+
+### Removed
+
+- `/announce` endpoint, its parser and `touchAddress` (no client ever called
+  the route).
 
 ## [0.2.0] - 2026-10-12
 

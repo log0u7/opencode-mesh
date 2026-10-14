@@ -26,6 +26,27 @@ async function startNode(name: string) {
   return { db, server, url: `http://127.0.0.1:${port}` };
 }
 
+function field(offer: string, name: string): string {
+  const match = new RegExp(`${name}="([^"]*)"`).exec(offer.slice(offer.indexOf(`${name}=`)));
+  return match?.[1] ?? "";
+}
+
+function ctx() {
+  return {} as never;
+}
+
+function input() {
+  return {
+    client: {} as never,
+    project: { id: "p1" } as never,
+    directory: "/work/project",
+    worktree: "/work/project",
+    experimental_workspace: {} as never,
+    serverUrl: new URL("http://localhost:4096"),
+    $: (() => Promise.resolve()) as never,
+  };
+}
+
 describe("two-node integration", () => {
   it("round-trips mail: sender -> receiver inbox, then ack", async () => {
     const a = await startNode("a");
@@ -59,6 +80,55 @@ describe("two-node integration", () => {
     b.server.close();
     a.db.close();
     b.db.close();
+  });
+
+  it("reaches a peer discovered on an ephemeral port through mesh_send", async () => {
+    // No requested port, so the receiver lands on whatever the OS picks: the
+    // address a peer relays must already carry its own port.
+    const { MeshPlugin } = await import("../src/plugin.js");
+    const dir = mkdtempSync(join(tmpdir(), "opencode-mesh-ephemeral-"));
+    const a = await MeshPlugin(input(), { dataDir: join(dir, "a"), port: 0, advertise: false });
+    const b = await MeshPlugin(input(), { dataDir: join(dir, "b"), port: 0, advertise: false });
+
+    const aStatus = JSON.parse(String(await a.tool?.mesh_status?.execute({}, ctx()))) as {
+      server: string;
+    };
+    const bStatus = JSON.parse(String(await b.tool?.mesh_status?.execute({}, ctx()))) as {
+      server: string;
+    };
+    expect(aStatus.server).not.toBe(bStatus.server);
+
+    // Exchange offers so each side knows the other, then send.
+    const offerA = String(await a.tool?.mesh_pair?.execute({}, ctx()));
+    const offerB = String(await b.tool?.mesh_pair?.execute({}, ctx()));
+    await b.tool?.mesh_pair?.execute(
+      {
+        node_id: field(offerA, "node_id"),
+        token: field(offerA, "token"),
+        address: field(offerA, "address"),
+      },
+      ctx(),
+    );
+    await a.tool?.mesh_pair?.execute(
+      {
+        node_id: field(offerB, "node_id"),
+        token: field(offerB, "token"),
+        address: field(offerB, "address"),
+      },
+      ctx(),
+    );
+
+    const sent = String(
+      await b.tool?.mesh_send?.execute(
+        { peer: field(offerA, "node_id"), subject: "s", body: "b" },
+        ctx(),
+      ),
+    );
+    expect(sent).toContain("ok");
+
+    await a.dispose?.();
+    await b.dispose?.();
+    rmSync(dir, { recursive: true, force: true });
   });
 
   it("sendMail reports unreachable peers without throwing", async () => {

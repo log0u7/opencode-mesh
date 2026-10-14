@@ -49,7 +49,7 @@ export function browseMesh(options: {
       node_id: id,
       hostname: service.host ?? service.name,
       fingerprint: fp,
-      addresses: service.addresses ?? [],
+      addresses: socketAddresses(service.addresses, service.port),
     });
   });
 
@@ -60,24 +60,60 @@ export function browseMesh(options: {
   };
 }
 
+// An mDNS A/AAAA record is a bare IP: the peer's listening port comes from the
+// SRV record in the same service. Guessing the port from the local node is
+// wrong whenever the peer fell back to an ephemeral port, so a record without
+// a port yields no address at all rather than a wrong one.
+function socketAddresses(ips: string[] | undefined, port: number | undefined): string[] {
+  if (port === undefined) {
+    return [];
+  }
+  return (ips ?? []).map((ip) => (ip.includes(":") ? `[${ip}]:${port}` : `${ip}:${port}`));
+}
+
 // Tailnet addresses let peers connect across subnets when tailscale runs.
-// Absent CLI = empty list, never an error.
+// Absent CLI = empty list, never an error. The result is cached: mesh_status is
+// a hot tool call and `tailscale status --json` is a subprocess we must not pay
+// on every invocation.
+const TAILNET_TTL_MS = 60_000;
+const TAILNET_TIMEOUT_MS = 2000;
+
+let tailnetCache: { addresses: string[]; expiresAt: number } | null = null;
+
+export function resetTailnetCache(): void {
+  tailnetCache = null;
+}
+
 export async function tailnetAddresses(): Promise<string[]> {
+  if (tailnetCache !== null && tailnetCache.expiresAt > Date.now()) {
+    return tailnetCache.addresses;
+  }
+
   const { execFile } = await import("node:child_process");
 
-  return new Promise((resolve) => {
-    execFile("tailscale", ["status", "--json"], (error: Error | null, stdout: string) => {
-      if (error) {
-        resolve([]);
-        return;
-      }
-      try {
-        const status = JSON.parse(stdout) as { Self?: { TailscaleIPs?: string[] } };
-        const ips = status.Self?.TailscaleIPs;
-        resolve(Array.isArray(ips) ? ips.filter((ip): ip is string => typeof ip === "string") : []);
-      } catch {
-        resolve([]);
-      }
-    });
+  const addresses = await new Promise<string[]>((resolve) => {
+    execFile(
+      "tailscale",
+      ["status", "--json"],
+      { timeout: TAILNET_TIMEOUT_MS },
+      (error: Error | null, stdout: string) => {
+        if (error) {
+          resolve([]);
+          return;
+        }
+        try {
+          const status = JSON.parse(stdout) as { Self?: { TailscaleIPs?: string[] } };
+          const ips = status.Self?.TailscaleIPs;
+          resolve(
+            Array.isArray(ips) ? ips.filter((ip): ip is string => typeof ip === "string") : [],
+          );
+        } catch {
+          resolve([]);
+        }
+      },
+    );
   });
+
+  tailnetCache = { addresses, expiresAt: Date.now() + TAILNET_TTL_MS };
+  return addresses;
 }

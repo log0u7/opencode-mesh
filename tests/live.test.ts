@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { openMeshDb } from "../src/lib/db.js";
 import { getWorker } from "../src/lib/workers.js";
-import { nodeSpawn, runWorker } from "../src/lib/spawn.js";
+import { nodeSpawn, runWorker, stopWorker } from "../src/lib/spawn.js";
 
 let dir: string;
 let dataDir: string;
@@ -31,7 +31,7 @@ describe("runWorker with a real child process", () => {
       task: "emit one json line",
       worktree_path: dir,
       branch: "b",
-      spawnFn: (argv) =>
+      spawnFn: (_argv) =>
         nodeSpawn([
           process.execPath,
           "-e",
@@ -57,4 +57,57 @@ describe("runWorker with a real child process", () => {
     expect(log).toContain("real process output");
     db.close();
   });
+
+  it("kills the whole worker process group on stop", async () => {
+    const db = openMeshDb(":memory:");
+
+    // The worker spawns its own grandchild and traps nothing: without a group
+    // kill, the grandchild would be orphaned and keep running.
+    const worker = runWorker(db, dataDir, {
+      task: "spawn a grandchild",
+      worktree_path: dir,
+      branch: "b",
+      spawnFn: (_argv) =>
+        nodeSpawn([
+          process.execPath,
+          "-e",
+          [
+            "const { spawn } = require('child_process');",
+            "const child = spawn(process.execPath, ['-e', 'console.log(\\'gc:\\' + process.pid); setInterval(()=>{},1000)'], { stdio: 'inherit' });",
+            "setInterval(()=>{},1000);",
+          ].join(" "),
+        ]),
+    });
+
+    // Wait until the grandchild printed its pid into the worker log.
+    let grandchildPid = 0;
+    for (let i = 0; i < 40 && grandchildPid === 0; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      try {
+        const { readFileSync } = await import("node:fs");
+        const log = readFileSync(join(dataDir, "workers", `${worker.id}.log`), "utf8");
+        grandchildPid = Number(/gc:(\d+)/.exec(log)?.[1] ?? 0);
+      } catch {
+        // Log not written yet.
+      }
+    }
+    expect(grandchildPid).toBeGreaterThan(0);
+
+    stopWorker(db, worker.id);
+    // Give the OS a moment to reap both processes.
+    await new Promise((resolve) => setTimeout(resolve, 300));
+
+    expect(pidAlive(worker.pid ?? 0)).toBe(false);
+    expect(pidAlive(grandchildPid)).toBe(false);
+    db.close();
+  });
 });
+
+function pidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
