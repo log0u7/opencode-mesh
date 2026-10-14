@@ -7,42 +7,58 @@ import { receiveMessage, unreadCount } from "./mail.js";
 
 const BODY_LIMIT = 64 * 1024;
 
+// Loopback by default: the mesh HTTP API must not be reachable from the
+// network unless the operator explicitly opted into a LAN pool.
+const DEFAULT_BIND = "127.0.0.1";
+
 export type MeshServerOptions = {
   db: MeshDb;
   port: number;
+  bind?: "loopback" | "lan";
 };
 
 export type MeshServer = {
   server: Server;
   port: number;
+  address: string;
 };
-
 // Bind the mesh HTTP server and resolve the actual port. When the requested
 // port is taken (two mesh nodes on one machine, e.g. a spawned worker loading
 // the same plugin), fall back to an ephemeral port instead of crashing.
 export async function startMeshServer(options: MeshServerOptions): Promise<MeshServer> {
+  const host = options.bind === "lan" ? "0.0.0.0" : DEFAULT_BIND;
   const server = createServer((req, res) => {
     void handle(options.db, req, res);
   });
 
+  let onListen: () => void = () => {};
   const port = await new Promise<number>((resolve, reject) => {
-    const tryListen = (requested: number) => {
-      server.once("error", (err: NodeJS.ErrnoException) => {
-        if (err.code === "EADDRINUSE" && requested !== 0) {
-          tryListen(0);
-          return;
-        }
-        reject(err);
-      });
-      server.listen(requested, () => {
-        const address = server.address();
-        resolve(address !== null && typeof address !== "string" ? address.port : requested);
-      });
+    const attempt = (requested: number): void => {
+      onListen = () => {
+        server.removeListener("error", onError);
+        resolve(serverAddressPort(server, requested));
+      };
+      server.once("listening", onListen);
+      server.once("error", onError);
+      server.listen(requested, host);
     };
-    tryListen(options.port);
+    const onError = (err: NodeJS.ErrnoException): void => {
+      server.removeListener("listening", onListen);
+      if (err.code === "EADDRINUSE" && server.listening === false) {
+        attempt(0);
+        return;
+      }
+      reject(err);
+    };
+    attempt(options.port);
   });
 
-  return { server, port };
+  return { server, port, address: host };
+}
+
+function serverAddressPort(server: Server, fallback: number): number {
+  const address = server.address();
+  return address !== null && typeof address !== "string" ? address.port : fallback;
 }
 
 async function handle(db: MeshDb, req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -59,51 +75,31 @@ async function handle(db: MeshDb, req: IncomingMessage, res: ServerResponse): Pr
     return;
   }
 
-  if (req.method === "POST") {
+  if (req.method === "POST" && url.pathname === "/mail") {
     const body = await readBody(req);
     if (body === null) {
       json(res, 413, { error: "body too large" });
       return;
     }
-
-    if (url.pathname === "/mail") {
-      const parsed = parseMail(body);
-      if (!parsed) {
-        json(res, 400, { error: "invalid mail body" });
-        return;
-      }
-      // Authenticate with the claimed sender so pending pairing tokens bind
-      // to the node id in the message.
-      const mailPeer = authenticate(db, req, parsed.from);
-      if (!mailPeer) {
-        json(res, 401, { error: "unauthorized" });
-        return;
-      }
-      if (parsed.from !== mailPeer.node_id) {
-        json(res, 401, { error: "from does not match token" });
-        return;
-      }
-      receiveMessage(db, parsed);
-      json(res, 200, { ok: true, unread: unreadCount(db) });
+    const parsed = parseMail(body);
+    if (!parsed) {
+      json(res, 400, { error: "invalid mail body" });
       return;
     }
-
-    const peer = authenticate(db, req);
-    if (!peer) {
+    // Authenticate with the claimed sender so a pending pairing token can only
+    // bind to a node this host already knows.
+    const mailPeer = authenticate(db, req, parsed.from);
+    if (!mailPeer) {
       json(res, 401, { error: "unauthorized" });
       return;
     }
-
-    if (url.pathname === "/announce") {
-      const parsed = parseAnnounce(body);
-      if (!parsed) {
-        json(res, 400, { error: "invalid announce body" });
-        return;
-      }
-      touchAddress(db, peer.node_id, parsed.addresses);
-      json(res, 200, { ok: true });
+    if (parsed.from !== mailPeer.node_id) {
+      json(res, 401, { error: "from does not match token" });
       return;
     }
+    receiveMessage(db, parsed);
+    json(res, 200, { ok: true, unread: unreadCount(db) });
+    return;
   }
 
   if (req.method === "GET" && url.pathname === "/status") {
@@ -134,14 +130,6 @@ function authenticate(
   }
   const peer = authenticateToken(db, match[1], from);
   return peer ? { node_id: peer.node_id } : null;
-}
-
-function touchAddress(db: MeshDb, nodeId: string, addresses: string[]): void {
-  db.conn.run("UPDATE peers SET addresses = ?, last_seen = ? WHERE node_id = ?", [
-    JSON.stringify(addresses),
-    Date.now(),
-    nodeId,
-  ]);
 }
 
 function readBody(req: IncomingMessage): Promise<string | null> {
@@ -187,19 +175,6 @@ type MailBody = {
   subject: string;
   body: string;
 };
-
-function parseAnnounce(raw: string): { addresses: string[] } | null {
-  try {
-    const parsed = JSON.parse(raw) as { addresses?: unknown };
-    if (!Array.isArray(parsed.addresses)) {
-      return null;
-    }
-    const addresses = parsed.addresses.filter((a): a is string => typeof a === "string");
-    return { addresses };
-  } catch {
-    return null;
-  }
-}
 
 function json(res: ServerResponse, status: number, body: unknown): void {
   res.writeHead(status, { "content-type": "application/json" });
