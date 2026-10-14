@@ -16,6 +16,12 @@ afterEach(() => {
   rmSync(dir, { recursive: true, force: true });
 });
 
+// The offer reads `...address="host:port"`: isolate the tail so the regex
+// cannot match the node_id pair that precedes it.
+function addressPart(offer: string): string {
+  return offer.slice(offer.indexOf("address="));
+}
+
 function ctx(sessionID: string) {
   return {
     sessionID,
@@ -47,16 +53,30 @@ describe("e2e: two plugin instances", () => {
     const b = await MeshPlugin(input(), { dataDir: `${dir}/b`, port: 0, advertise: false });
 
     // A generates a pairing offer: token + its own node id + server address.
-    const aOffer = String(await a.tool?.mesh_pair?.execute({}, ctx("s-a")));
-    const token = /token="([^"]+)"/.exec(aOffer)?.[1];
-    const nodeIdA = /node_id="([^"]+)"/.exec(aOffer)?.[1];
-    const addressA = /address="([^"]+)"/.exec(aOffer)?.[1];
-    expect(token).toBeTruthy();
+    const offerA = String(await a.tool?.mesh_pair?.execute({}, ctx("s-a")));
+    const tokenA = /token="([^"]+)"/.exec(offerA)?.[1];
+    const nodeIdA = /node_id="([^"]+)"/.exec(offerA)?.[1];
+    const addressA = /address="([^"]+)"/.exec(addressPart(offerA))?.[1];
+    expect(tokenA).toBeTruthy();
     expect(nodeIdA).toBeTruthy();
     expect(addressA).toBeTruthy();
 
-    // B completes pairing with that offer...
-    await b.tool?.mesh_pair?.execute({ node_id: nodeIdA, token, address: addressA }, ctx("s-b"));
+    // B generates its own offer too: an offer alone must not be able to mint a
+    // permanent peer on the other side.
+    const offerB = String(await b.tool?.mesh_pair?.execute({}, ctx("s-b")));
+    const tokenB = /token="([^"]+)"/.exec(offerB)?.[1];
+    const nodeIdB = /node_id="([^"]+)"/.exec(offerB)?.[1];
+    const addressB = /address="([^"]+)"/.exec(addressPart(offerB))?.[1];
+
+    // Each operator completes the other side's offer explicitly.
+    await b.tool?.mesh_pair?.execute(
+      { node_id: nodeIdA, token: tokenA, address: addressA },
+      ctx("s-b"),
+    );
+    await a.tool?.mesh_pair?.execute(
+      { node_id: nodeIdB, token: tokenB, address: addressB },
+      ctx("s-a"),
+    );
 
     // ...and B sends mail to A through the peer connection.
     const send = String(

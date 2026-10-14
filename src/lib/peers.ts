@@ -3,6 +3,10 @@ import { randomBytes } from "node:crypto";
 import type { MeshDb } from "./db.js";
 import type { Peer } from "../types/peer.js";
 
+// A pairing offer is only useful while the operator can relay it out of band.
+// Past this age the token is dropped instead of becoming a permanent credential.
+export const PAIRING_TOKEN_TTL_MS = 5 * 60_000;
+
 export type PeerInput = {
   node_id: string;
   hostname: string;
@@ -52,13 +56,16 @@ export function createPairingToken(db: MeshDb): string {
   return token;
 }
 
-// Check a bearer token: known paired peer, or a pending pairing token (which
-// then completes pairing for the claimed sender node).
+// Check a bearer token: known paired peer, or a live pending pairing token.
+// The pending path requires the claimed sender to be a node this host already
+// knows, so a leaked token cannot mint a permanent peer on its own.
 export function authenticateToken(db: MeshDb, token: string, from: string | null): Peer | null {
   const paired = findPeerByToken(db, token);
   if (paired) {
     return paired;
   }
+
+  prunePendingTokens(db);
 
   const pending = db.conn.get<{ token: string }>(
     "SELECT token FROM pending_tokens WHERE token = ?",
@@ -72,25 +79,68 @@ export function authenticateToken(db: MeshDb, token: string, from: string | null
   if (from === null || from.length === 0) {
     return null;
   }
-  pairWithToken(db, { node_id: from, hostname: "pending", fingerprint: "pending", token });
-  return {
-    node_id: from,
-    hostname: "pending",
-    fingerprint: "pending",
-    addresses: [],
-    paired: true,
+
+  const known = findPeerById(db, from);
+  if (!known) {
+    return null;
+  }
+
+  pairWithToken(db, {
+    node_id: known.node_id,
+    hostname: known.hostname,
+    fingerprint: known.fingerprint,
+    addresses: known.addresses,
     token,
-    last_seen: Date.now(),
-  };
+  });
+  return known;
+}
+
+// Pairing offers are single-shot credentials with a short life: bulk delete on
+// every check keeps the table bounded without a background timer.
+export function prunePendingTokens(db: MeshDb): void {
+  db.conn.run("DELETE FROM pending_tokens WHERE created_at <= ?", [
+    Date.now() - PAIRING_TOKEN_TTL_MS,
+  ]);
 }
 
 export function listPeers(db: MeshDb): Peer[] {
   return db.conn.all<PeerRow>("SELECT * FROM peers ORDER BY hostname").map(rowToPeer);
 }
 
+export function findPeerById(db: MeshDb, nodeId: string): Peer | null {
+  const row = db.conn.get<PeerRow>("SELECT * FROM peers WHERE node_id = ?", [nodeId]);
+  return row ? rowToPeer(row) : null;
+}
+
 export function findPeerByToken(db: MeshDb, token: string): Peer | null {
   const row = db.conn.get<PeerRow>("SELECT * FROM peers WHERE token = ? AND paired = 1", [token]);
   return row ? rowToPeer(row) : null;
+}
+
+// Paired peers only: discovery alone never makes a peer sendable.
+export function findSendablePeer(
+  db: MeshDb,
+  query: string,
+): { node_id: string; addresses: string[]; token: string | null } | null {
+  const peers = listPeers(db).filter((p) => p.paired);
+  return peers.find((p) => p.node_id === query) ?? peers.find((p) => p.hostname === query) ?? null;
+}
+
+// Peer addresses must carry a port: discovery attaches the advertised port and
+// mesh_pair transmits a full host:port. Returning null instead of guessing the
+// local port keeps a stale address from silently reaching the wrong socket.
+export function resolvePeerUrl(db: MeshDb, query: string): string | null {
+  const peers = listPeers(db).filter((p) => p.paired);
+  const peer =
+    peers.find((p) => p.node_id === query) ?? peers.find((p) => p.hostname === query) ?? null;
+  // A bare IPv6 literal also ends in ":<digits>", so the bracketed form is the
+  // only one that can be told apart unambiguously.
+  const address = peer?.addresses.find(hasPort);
+  return address !== undefined ? `http://${address}` : null;
+}
+
+function hasPort(address: string): boolean {
+  return /^\[[0-9a-f:]+\]:\d+$/i.test(address) || /^[^:]+:\d+$/.test(address);
 }
 
 export function upsertDiscoveredPeer(
