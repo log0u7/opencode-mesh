@@ -6,19 +6,20 @@ export type AdvertiseHandle = {
   close(): void;
 };
 
-// Advertise this node on the LAN. TXT carries only the node id and key
-// fingerprint: never secrets.
+// Advertise this node on the LAN. TXT carries the node id, key fingerprint and
+// the pairing public key (pk): never secrets.
 export function advertiseMesh(options: {
   bonjour: Bonjour;
   port: number;
   node_id: string;
   fingerprint: string;
+  public_key: string;
 }): AdvertiseHandle {
   const service = options.bonjour.publish({
     name: options.node_id,
     type: MESH_SERVICE_TYPE,
     port: options.port,
-    txt: { id: options.node_id, fp: options.fingerprint },
+    txt: { id: options.node_id, fp: options.fingerprint, pk: options.public_key },
   });
 
   return {
@@ -33,6 +34,7 @@ export type DiscoveredPeer = {
   hostname: string;
   fingerprint: string;
   addresses: string[];
+  public_key?: string;
 };
 
 export function browseMesh(options: {
@@ -50,6 +52,9 @@ export function browseMesh(options: {
       hostname: service.host ?? service.name,
       fingerprint: fp,
       addresses: socketAddresses(service.addresses, service.port),
+      ...(typeof service.txt?.pk === "string" && service.txt.pk.length > 0
+        ? { public_key: service.txt.pk }
+        : {}),
     });
   });
 

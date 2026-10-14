@@ -4,6 +4,8 @@ export type SendTarget = {
   from: string;
   subject: string;
   body: string;
+  /** `<base64 spki>.<base64 ed25519 signature>` over node_id:token. */
+  proof?: string;
 };
 
 export type SendResult = "ok" | "unreachable" | "unauthorized" | "error";
@@ -18,7 +20,12 @@ export async function sendMail(target: SendTarget): Promise<SendResult> {
         "content-type": "application/json",
         authorization: `Bearer ${target.token}`,
       },
-      body: JSON.stringify({ from: target.from, subject: target.subject, body: target.body }),
+      body: JSON.stringify({
+        from: target.from,
+        subject: target.subject,
+        body: target.body,
+        ...(target.proof !== undefined ? { proof: target.proof } : {}),
+      }),
       signal: AbortSignal.timeout(5000),
     });
     if (response.ok) {

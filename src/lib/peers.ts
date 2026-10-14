@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 
 import type { MeshDb } from "./db.js";
+import { pairingProofPayload, verifyPairingProof } from "./identity.js";
 import type { Peer } from "../types/peer.js";
 
 // A pairing offer is only useful while the operator can relay it out of band.
@@ -12,10 +13,13 @@ export type PeerInput = {
   hostname: string;
   fingerprint: string;
   addresses?: string[];
+  public_key?: string;
 };
 
 // Complete pairing with a token the peer generated (shared out of band).
 // Only the pairing call and the peer know it; the server compares on every request.
+// The pinned public_key is preserved when the call provides none (manual pairing):
+// pairing must never be able to erase a proof key it did not attest.
 export function pairWithToken(
   db: MeshDb,
   peer: {
@@ -24,21 +28,24 @@ export function pairWithToken(
     fingerprint: string;
     token: string;
     addresses?: string[];
+    public_key?: string;
   },
 ): void {
   const now = Date.now();
 
   db.conn.run(
-    `INSERT INTO peers (node_id, hostname, fingerprint, addresses, paired, token, last_seen)
-     VALUES (?, ?, ?, ?, 1, ?, ?)
+    `INSERT INTO peers (node_id, hostname, fingerprint, addresses, paired, token, public_key, last_seen)
+     VALUES (?, ?, ?, ?, 1, ?, ?, ?)
      ON CONFLICT(node_id) DO UPDATE SET hostname = excluded.hostname,
-       fingerprint = excluded.fingerprint, paired = 1, token = excluded.token, last_seen = excluded.last_seen`,
+       fingerprint = excluded.fingerprint, paired = 1, token = excluded.token,
+       public_key = COALESCE(excluded.public_key, peers.public_key), last_seen = excluded.last_seen`,
     [
       peer.node_id,
       peer.hostname,
       peer.fingerprint,
       JSON.stringify(peer.addresses ?? []),
       peer.token,
+      peer.public_key ?? null,
       now,
     ],
   );
@@ -58,8 +65,14 @@ export function createPairingToken(db: MeshDb): string {
 
 // Check a bearer token: known paired peer, or a live pending pairing token.
 // The pending path requires the claimed sender to be a node this host already
-// knows, so a leaked token cannot mint a permanent peer on its own.
-export function authenticateToken(db: MeshDb, token: string, from: string | null): Peer | null {
+// knows, and (the rebind-window fix) a proof signed by the sender's pinned
+// key: a leaked offer alone cannot rotate a paired credential.
+export function authenticateToken(
+  db: MeshDb,
+  token: string,
+  from: string | null,
+  proof?: string,
+): Peer | null {
   const paired = findPeerByToken(db, token);
   if (paired) {
     return paired;
@@ -85,14 +98,59 @@ export function authenticateToken(db: MeshDb, token: string, from: string | null
     return null;
   }
 
+  // Proof of possession: the sender signs opencode-mesh-pair:<node_id>:<token>
+  // with the key pinned for it (first bind: the proof carries its own key).
+  const attested = attestedProof(known, token, proof);
+  if (attested === null) {
+    return null;
+  }
+
   pairWithToken(db, {
     node_id: known.node_id,
     hostname: known.hostname,
     fingerprint: known.fingerprint,
     addresses: known.addresses,
+    public_key: attested,
     token,
   });
   return known;
+}
+
+// Returns the public key to pin for this binding, or null when the proof does
+// not attest the sender. Rules:
+// - wire form is exactly `<base64 spki>.<base64 sig>`: no extra dots (base64
+//   decoders skip '.', so a trailing dot would otherwise verify);
+// - unpaired known node: the proof's key is pinned once its signature checks;
+// - paired node with a pinned key: the proof key must BE the pinned key;
+// - paired node without a pinned key (legacy/manual rows): no remote attested
+//   rebind at all. Rotation goes through the operator (re-run mesh_pair).
+function attestedProof(known: Peer, token: string, proof: string | undefined): string | null {
+  if (proof === undefined || proof.length === 0) {
+    return null;
+  }
+
+  const separator = proof.indexOf(".");
+  if (separator <= 0 || separator === proof.length - 1) {
+    return null;
+  }
+  const presentedKey = proof.slice(0, separator);
+  const signature = proof.slice(separator + 1);
+  if (signature.includes(".")) {
+    return null;
+  }
+  const payload = pairingProofPayload(known.node_id, token);
+
+  if (known.paired) {
+    // Rotation of a live credential: the pinned key is the only authority.
+    if (known.public_key === null || presentedKey !== known.public_key) {
+      return null;
+    }
+  } else if (known.public_key !== null && presentedKey !== known.public_key) {
+    // First bind, but discovery already pinned a different key: spoof guard.
+    return null;
+  }
+
+  return verifyPairingProof(presentedKey, payload, signature) ? presentedKey : null;
 }
 
 // Pairing offers are single-shot credentials with a short life: bulk delete on
@@ -147,15 +205,30 @@ function hasPort(address: string): boolean {
 
 export function upsertDiscoveredPeer(
   db: MeshDb,
-  peer: { node_id: string; hostname: string; fingerprint: string; addresses: string[] },
+  peer: {
+    node_id: string;
+    hostname: string;
+    fingerprint: string;
+    addresses: string[];
+    public_key?: string;
+  },
 ): void {
   const now = Date.now();
   db.conn.run(
-    `INSERT INTO peers (node_id, hostname, fingerprint, addresses, paired, token, last_seen)
-     VALUES (?, ?, ?, ?, 0, NULL, ?)
+    `INSERT INTO peers (node_id, hostname, fingerprint, addresses, paired, token, public_key, last_seen)
+     VALUES (?, ?, ?, ?, 0, NULL, ?, ?)
      ON CONFLICT(node_id) DO UPDATE SET hostname = excluded.hostname,
-       fingerprint = excluded.fingerprint, addresses = excluded.addresses, last_seen = excluded.last_seen`,
-    [peer.node_id, peer.hostname, peer.fingerprint, JSON.stringify(peer.addresses), now],
+       fingerprint = excluded.fingerprint, addresses = excluded.addresses,
+       public_key = CASE WHEN peers.paired = 1 THEN peers.public_key ELSE excluded.public_key END,
+       last_seen = excluded.last_seen`,
+    [
+      peer.node_id,
+      peer.hostname,
+      peer.fingerprint,
+      JSON.stringify(peer.addresses),
+      peer.public_key ?? null,
+      now,
+    ],
   );
 }
 
@@ -166,6 +239,7 @@ type PeerRow = {
   addresses: string;
   paired: number;
   token: string | null;
+  public_key: string | null;
   last_seen: number;
 };
 
@@ -177,6 +251,7 @@ function rowToPeer(row: PeerRow): Peer {
     addresses: parseAddresses(row.addresses),
     paired: row.paired === 1,
     token: row.token,
+    public_key: row.public_key,
     last_seen: row.last_seen,
   };
 }

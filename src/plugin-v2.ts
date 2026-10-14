@@ -60,6 +60,7 @@ export const MeshV2 = Plugin.define({
         port,
         node_id: identity.node_id,
         fingerprint: identity.fingerprint,
+        public_key: identity.public_key,
       });
       browseHandle = browseMesh({
         bonjour,

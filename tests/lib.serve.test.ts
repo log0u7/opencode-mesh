@@ -3,12 +3,15 @@ import { networkInterfaces } from "node:os";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { generateKeyPairSync } from "node:crypto";
+
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { request } from "node:http";
 import { connect } from "node:net";
 
 import { openMeshDb } from "../src/lib/db.js";
-import { pairWithToken } from "../src/lib/peers.js";
+import { pairingProof, pairingProofPayload, signPairingProof } from "../src/lib/identity.js";
+import { pairWithToken, upsertDiscoveredPeer, createPairingToken } from "../src/lib/peers.js";
 import { startMeshServer } from "../src/lib/serve.js";
 
 let dir: string;
@@ -323,6 +326,124 @@ describe("mesh server body guard", () => {
     });
 
     expect(status).toBe(400);
+
+    server.close();
+    db.close();
+  });
+});
+
+describe("mesh server pairing proof", () => {
+  function nodeKeys() {
+    const { publicKey, privateKey } = generateKeyPairSync("ed25519");
+    return {
+      public_key: Buffer.from(publicKey.export({ type: "spki", format: "der" })).toString("base64"),
+      private_key: Buffer.from(privateKey.export({ type: "pkcs8", format: "der" })).toString(
+        "base64",
+      ),
+    };
+  }
+
+  it("binds a pending token over /mail only with a valid sender proof", async () => {
+    const { db, server, url } = await start();
+    const keys = nodeKeys();
+    upsertDiscoveredPeer(db, {
+      node_id: "peer1",
+      hostname: "laptop",
+      fingerprint: "ff00",
+      addresses: [],
+      public_key: keys.public_key,
+    });
+    const token = createPairingToken(db);
+    const proof = `${keys.public_key}.${signPairingProof(
+      keys.private_key,
+      pairingProofPayload("peer1", token),
+    )}`;
+
+    // No proof: the pending token binds nothing, even from a known node.
+    const noProof = await post(url, "/mail", { subject: "s", body: "b", from: "peer1" }, token);
+    expect(noProof.status).toBe(401);
+
+    // Wrong signer: refused.
+    const wrongSigner = `${keys.public_key}.${signPairingProof(
+      nodeKeys().private_key,
+      pairingProofPayload("peer1", token),
+    )}`;
+    const bad = await post(
+      url,
+      "/mail",
+      { subject: "s", body: "b", from: "peer1", proof: wrongSigner },
+      token,
+    );
+    expect(bad.status).toBe(401);
+
+    // The peer's real proof: binding happens, mail accepted.
+    const good = await post(
+      url,
+      "/mail",
+      { subject: "handoff", body: "x", from: "peer1", proof },
+      token,
+    );
+    expect(good.status).toBe(200);
+
+    server.close();
+    db.close();
+  });
+
+  it("accepts mail from a paired peer whose credential matches, proof optional", async () => {
+    const { db, server, url } = await start();
+    pairWithToken(db, {
+      node_id: "peer1",
+      hostname: "laptop",
+      fingerprint: "ff00",
+      token: "tok-peer1",
+    });
+
+    const response = await post(
+      url,
+      "/mail",
+      { subject: "s", body: "b", from: "peer1" },
+      "tok-peer1",
+    );
+    expect(response.status).toBe(200);
+
+    // Intent pin: the live credential answers by itself; a garbage proof is
+    // never consulted on this path.
+    const withGarbage = await post(
+      url,
+      "/mail",
+      { subject: "s", body: "b", from: "peer1", proof: "nonsense" },
+      "tok-peer1",
+    );
+    expect(withGarbage.status).toBe(200);
+
+    server.close();
+    db.close();
+  });
+
+  it("signs outgoing mail like a peer would (sendMail carries the proof)", async () => {
+    const { db, server, url } = await start();
+    const keys = nodeKeys();
+    upsertDiscoveredPeer(db, {
+      node_id: "peer1",
+      hostname: "laptop",
+      fingerprint: "ff00",
+      addresses: [],
+      public_key: keys.public_key,
+    });
+    const token = createPairingToken(db);
+
+    // The sender-side proof helper produces a verifying wire proof.
+    const proof = pairingProof(
+      { node_id: "peer1", public_key: keys.public_key, private_key: keys.private_key },
+      token,
+    );
+    const response = await post(
+      url,
+      "/mail",
+      { subject: "s", body: "b", from: "peer1", proof },
+      token,
+    );
+    expect(response.status).toBe(200);
 
     server.close();
     db.close();

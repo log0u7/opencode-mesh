@@ -61,20 +61,21 @@ function fakeBonjour() {
 }
 
 describe("advertiseMesh", () => {
-  it("publishes the service with id and fingerprint in TXT, close stops it", () => {
+  it("publishes the service with id, fingerprint and public key in TXT, close stops it", () => {
     const fake = fakeBonjour();
     const handle = advertiseMesh({
       bonjour: fake.bonjour as never,
       port: 4399,
       node_id: "n1",
       fingerprint: "abcd1234",
+      public_key: "PKDATA",
     });
 
     expect(fake.published[0]).toMatchObject({
       name: "n1",
       type: "opencode-mesh",
       port: 4399,
-      txt: { id: "n1", fp: "abcd1234" },
+      txt: { id: "n1", fp: "abcd1234", pk: "PKDATA" },
     });
 
     handle.close();
@@ -93,7 +94,7 @@ describe("browseMesh", () => {
 
     fake.emit({
       port: 5555,
-      txt: { id: "peer-1", fp: "ff00" },
+      txt: { id: "peer-1", fp: "ff00", pk: "PKDATA" },
       host: "laptop.local",
       name: "peer-1",
       addresses: ["192.168.1.5", "fe80::1"],
@@ -106,6 +107,7 @@ describe("browseMesh", () => {
         fingerprint: "ff00",
         // A bare IP is not routable: the port comes from the same mDNS record.
         addresses: ["192.168.1.5:5555", "[fe80::1]:5555"],
+        public_key: "PKDATA",
       },
     ]);
 
@@ -140,6 +142,7 @@ describe("browseMesh", () => {
         addresses: ["10.0.0.2:4399"],
         paired: false,
         token: null,
+        public_key: null,
         last_seen: expect.any(Number),
       },
     ]);

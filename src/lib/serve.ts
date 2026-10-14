@@ -91,8 +91,9 @@ async function handle(db: MeshDb, req: IncomingMessage, res: ServerResponse): Pr
       return;
     }
     // Authenticate with the claimed sender so a pending pairing token can only
-    // bind to a node this host already knows.
-    const mailPeer = authenticate(db, req, parsed.from);
+    // bind to a node this host already knows. The pairing proof (sender-signed
+    // over node_id+token) is what authorizes binding a pairing to that node.
+    const mailPeer = authenticate(db, req, parsed.from, parsed.proof);
     if (!mailPeer) {
       json(res, 401, { error: "unauthorized" });
       return;
@@ -126,13 +127,14 @@ function authenticate(
   db: MeshDb,
   req: IncomingMessage,
   from: string | null = null,
+  proof?: string,
 ): { node_id: string } | null {
   const header = req.headers.authorization ?? "";
   const match = /^Bearer (.+)$/.exec(header);
   if (!match?.[1]) {
     return null;
   }
-  const peer = authenticateToken(db, match[1], from);
+  const peer = authenticateToken(db, match[1], from, proof);
   return peer ? { node_id: peer.node_id } : null;
 }
 
@@ -177,7 +179,12 @@ function parseMail(raw: string): MailBody | null {
     ) {
       return null;
     }
-    return { from: parsed.from, subject: parsed.subject, body: parsed.body };
+    return {
+      from: parsed.from,
+      subject: parsed.subject,
+      body: parsed.body,
+      ...(typeof parsed.proof === "string" ? { proof: parsed.proof } : {}),
+    };
   } catch {
     return null;
   }
@@ -187,6 +194,7 @@ type MailBody = {
   from: string;
   subject: string;
   body: string;
+  proof?: string;
 };
 
 function json(res: ServerResponse, status: number, body: unknown): void {

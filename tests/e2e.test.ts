@@ -57,9 +57,11 @@ describe("e2e: two plugin instances", () => {
     const tokenA = /token="([^"]+)"/.exec(offerA)?.[1];
     const nodeIdA = /node_id="([^"]+)"/.exec(offerA)?.[1];
     const addressA = /address="([^"]+)"/.exec(addressPart(offerA))?.[1];
+    const pkA = /pk="([^"]+)"/.exec(addressPart(offerA))?.[1];
     expect(tokenA).toBeTruthy();
     expect(nodeIdA).toBeTruthy();
     expect(addressA).toBeTruthy();
+    expect(pkA).toBeTruthy();
 
     // B generates its own offer too: an offer alone must not be able to mint a
     // permanent peer on the other side.
@@ -67,14 +69,16 @@ describe("e2e: two plugin instances", () => {
     const tokenB = /token="([^"]+)"/.exec(offerB)?.[1];
     const nodeIdB = /node_id="([^"]+)"/.exec(offerB)?.[1];
     const addressB = /address="([^"]+)"/.exec(addressPart(offerB))?.[1];
+    const pkB = /pk="([^"]+)"/.exec(addressPart(offerB))?.[1];
 
-    // Each operator completes the other side's offer explicitly.
+    // Each operator completes the other side's offer explicitly, carrying the
+    // offer's public key: the completing side pins the emitter's signing key.
     await b.tool?.mesh_pair?.execute(
-      { node_id: nodeIdA, token: tokenA, address: addressA },
+      { node_id: nodeIdA, token: tokenA, address: addressA, pk: pkA },
       ctx("s-b"),
     );
     await a.tool?.mesh_pair?.execute(
-      { node_id: nodeIdB, token: tokenB, address: addressB },
+      { node_id: nodeIdB, token: tokenB, address: addressB, pk: pkB },
       ctx("s-a"),
     );
 

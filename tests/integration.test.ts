@@ -106,6 +106,7 @@ describe("two-node integration", () => {
         node_id: field(offerA, "node_id"),
         token: field(offerA, "token"),
         address: field(offerA, "address"),
+        pk: field(offerA, "pk"),
       },
       ctx(),
     );
@@ -114,6 +115,7 @@ describe("two-node integration", () => {
         node_id: field(offerB, "node_id"),
         token: field(offerB, "token"),
         address: field(offerB, "address"),
+        pk: field(offerB, "pk"),
       },
       ctx(),
     );
