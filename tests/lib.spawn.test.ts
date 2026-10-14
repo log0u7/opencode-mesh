@@ -259,6 +259,91 @@ describe("runWorker lifecycle", () => {
     db.close();
   });
 
+  it("cancels the SIGKILL escalation when the worker exits during the grace window", async () => {
+    const db = openMeshDb(":memory:");
+    const fake = fakeSpawn((proc) => {
+      // Exit asynchronously on SIGTERM, like a real child honouring the signal.
+      proc.kill = (signal: string) => {
+        proc.signals.push(signal);
+        queueMicrotask(() => proc.emitExit(143));
+      };
+    });
+
+    const worker = await runWorker(db, dir, {
+      task: "t",
+      worktree_path: "/wt",
+      branch: "b",
+      spawnFn: fake.spawnFn,
+    });
+
+    stopWorker(db, worker.id, { graceMs: 10 });
+    await new Promise((resolve) => setTimeout(resolve, 40));
+
+    expect(fake.proc.signals).toEqual(["SIGTERM"]);
+    expect(getWorker(db, worker.id)?.status).toBe("stopped");
+    db.close();
+  });
+
+  it("schedules no escalation for graceMs 0", async () => {
+    const db = openMeshDb(":memory:");
+    const fake = fakeSpawn((proc) => {
+      proc.ignoredSignals.add("SIGTERM");
+    });
+
+    const worker = await runWorker(db, dir, {
+      task: "t",
+      worktree_path: "/wt",
+      branch: "b",
+      spawnFn: fake.spawnFn,
+    });
+
+    stopWorker(db, worker.id, { graceMs: 0 });
+    await new Promise((resolve) => setTimeout(resolve, 40));
+
+    expect(fake.proc.signals).toEqual(["SIGTERM"]);
+    expect(getWorker(db, worker.id)?.status).toBe("stopped");
+    db.close();
+  });
+
+  it("ignores a spawn error delivered after the row already finalized", async () => {
+    const db = openMeshDb(":memory:");
+    const fake = fakeSpawn((proc) => {
+      proc.emitExit(0);
+      proc.emitError(new Error("late error"));
+    });
+
+    const worker = await runWorker(db, dir, {
+      task: "t",
+      worktree_path: "/wt",
+      branch: "b",
+      spawnFn: fake.spawnFn,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    const row = getWorker(db, worker.id);
+    expect(row?.status).toBe("completed");
+    expect(row?.exit_code).toBe(0);
+    db.close();
+  });
+
+  it("captures a session id delivered without a trailing newline", async () => {
+    const db = openMeshDb(":memory:");
+    const fake = fakeSpawn((proc) => {
+      proc.write('{"type":"step_start","sessionID":"ses-tail"}');
+      proc.emitExit(0);
+    });
+
+    const worker = await runWorker(db, dir, {
+      task: "t",
+      worktree_path: "/wt",
+      branch: "b",
+      spawnFn: fake.spawnFn,
+    });
+
+    expect(getWorker(db, worker.id)?.session_id).toBe("ses-tail");
+    db.close();
+  });
+
   it("finalizes failed when the spawn emits an error instead of exiting", async () => {
     const db = openMeshDb(":memory:");
     const fake = fakeSpawn((proc) => {

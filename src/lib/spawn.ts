@@ -106,6 +106,8 @@ export type StopOptions = {
 const LIVE_PROCESSES = new Map<string, SpawnedProcess>();
 const PENDING_KILLS = new Map<string, ReturnType<typeof setTimeout>>();
 const DEFAULT_KILL_GRACE_MS = 3000;
+// Session-id line-buffer cap: session lines are short, 64 KiB is generous.
+const PENDING_MAX_CHARS = 64 * 1024;
 
 // Headless worker: one prompt in an isolated worktree, tracked by pid and log.
 export function runWorker(db: MeshDb, dataDir: string, input: RunWorkerInput): Worker {
@@ -149,8 +151,12 @@ export function runWorker(db: MeshDb, dataDir: string, input: RunWorkerInput): W
   proc.stdout.on("data", (chunk) => {
     appendLog(dataDir, worker.id, chunk);
     // Buffer across chunks: a JSON line split between two reads must still be
-    // parsed once, not dropped as two invalid halves.
+    // parsed once, not dropped as two invalid halves. Cap host memory: a
+    // newline-free chatty stream would otherwise accumulate forever.
     pending += chunk;
+    if (pending.length > PENDING_MAX_CHARS) {
+      pending = pending.slice(-PENDING_MAX_CHARS);
+    }
     const lastBreak = pending.lastIndexOf("\n");
     if (lastBreak === -1) {
       return;
@@ -186,6 +192,15 @@ export function runWorker(db: MeshDb, dataDir: string, input: RunWorkerInput): W
     }
     setWorkerStatus(db, worker.id, code === 0 ? "completed" : "failed", { exit_code: code });
   });
+
+  // A pid <= 0 means the child never spawned (a real ENOENT reports pid -1
+  // synchronously and delivers 'error' a tick later). Finalize now so the tool
+  // reports the failure; the later 'error' event finds a terminal row and is a
+  // no-op. Listeners stay attached so an unhandled 'error' cannot crash the host.
+  if (proc.pid <= 0) {
+    finalize(db, worker.id, "failed", null);
+    return { ...worker, status: "failed", finished_at: Date.now() };
+  }
 
   LIVE_PROCESSES.set(worker.id, proc);
   return worker;

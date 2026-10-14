@@ -108,6 +108,28 @@ describe("orchestrator tools", () => {
     expect(wt.worktree.create).toHaveBeenCalled();
   });
 
+  it("mesh_spawn reports an error instead of a success envelope when the child never spawns", async () => {
+    // A real ENOENT reports pid -1 synchronously; the 'error' event lands later.
+    const failingSpawn = () => {
+      const proc = {
+        pid: -1,
+        stdout: { on: (_: string, cb: (chunk: string) => void) => void cb },
+        stderr: { on: (_: string, cb: (chunk: string) => void) => void cb },
+        on: (_: string, cb: (arg: unknown) => void) => void cb,
+        kill: () => {},
+      };
+      return proc as never;
+    };
+    const { tools } = await loadTools({
+      worktreeClient: fakeWorktreeClient(),
+      spawnFn: failingSpawn,
+    });
+
+    const result = String(await tools.mesh_spawn?.execute({ task: "t" }, ctx("s1")));
+
+    expect(result).toMatch(/^error: worker \S+ failed to start$/);
+  });
+
   it("mesh_workers lists workers with lifecycle states", async () => {
     const { tools } = await loadTools({
       worktreeClient: fakeWorktreeClient(),
