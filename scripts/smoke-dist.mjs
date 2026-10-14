@@ -28,6 +28,13 @@ try {
   if (typeof module.MeshPlugin !== "function") {
     fail("named export MeshPlugin is missing");
   }
+  // The v2 entry: a host that loads the package for setup() must find it.
+  if (typeof module.default.setup !== "function") {
+    fail("default export has no setup() plugin factory (v2 entry)");
+  }
+  if (typeof module.default.id !== "string" || module.default.id.length === 0) {
+    fail("default export has no plugin id (v2 entry)");
+  }
 
   // The Node fallback paths: identity generation and the SQLite engine both
   // must run under plain Node with no Bun runtime present.

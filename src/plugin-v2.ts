@@ -11,7 +11,7 @@ import { v2WorktreeDomainClient } from "./lib/worktree.js";
 import { reconcileWorkers } from "./lib/workers.js";
 import { startMeshServer } from "./lib/serve.js";
 import { buildToolSpecs, type ToolSpec } from "./tools.js";
-import { defaultDataDir, type PluginOptions } from "./plugin.js";
+import { defaultDataDir, parseOptions, type PluginOptions } from "./plugin.js";
 
 const DEFAULT_PORT = 4399;
 
@@ -31,8 +31,8 @@ export const MeshV2 = Plugin.define({
     if (isChildProcess()) {
       return async () => {};
     }
-    const options = ctx.options as PluginOptions;
-    const dataDir = options?.dataDir ?? defaultDataDir();
+    const options = parseOptions(ctx.options as PluginOptions);
+    const dataDir = options.dataDir ?? defaultDataDir();
     const identity: NodeIdentity = loadOrCreateIdentity(dataDir);
     const db: MeshDb = openMeshDb(`${dataDir}/mesh.db`);
     // Workers from a previous host process can never be stopped again once the
@@ -41,19 +41,19 @@ export const MeshV2 = Plugin.define({
 
     const { server, port, address } = await startMeshServer({
       db,
-      port: options?.port ?? DEFAULT_PORT,
-      ...(options?.bind !== undefined ? { bind: options.bind } : {}),
+      port: options.port ?? DEFAULT_PORT,
+      ...(options.bind !== undefined ? { bind: options.bind } : {}),
     });
     // Prefer an injected client (tests, hosts that pass one), then adapt the
     // 2.x in-process worktree domain to the REST-shaped WorktreeClient. The
     // domain resolves payloads directly, without the v1 `{ data }` envelope.
     const worktreeClient: WorktreeClient =
-      options?.worktreeClient ?? v2WorktreeDomainClient(ctx.worktree, ctx.location.project.id);
-    const spawnFn: SpawnFn = options?.spawnFn ?? nodeSpawn;
+      options.worktreeClient ?? v2WorktreeDomainClient(ctx.worktree, ctx.location.project.id);
+    const spawnFn: SpawnFn = options.spawnFn ?? nodeSpawn;
 
     let advertiseHandle: AdvertiseHandle | null = null;
     let browseHandle: { close(): void } | null = null;
-    if (options?.advertise !== false) {
+    if (options.advertise !== false) {
       const bonjour = new Bonjour();
       advertiseHandle = advertiseMesh({
         bonjour,

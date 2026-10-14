@@ -7,8 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Plugin options are validated at setup. A `port` outside `[0, 65535]` or not an
+  integer, a `bind` other than `loopback`/`lan`, a non-boolean `advertise`, or an
+  empty/non-string `dataDir` now fails fast with a clear message instead of
+  surfacing later as `EADDRINUSE`, a bind on the wrong interface, or a data dir
+  at the wrong path. `tsconfig.test.json` and a `pnpm typecheck:tests` step
+  typecheck the test suite, which `tsconfig.json` (src only) never did.
+
+### Changed
+
+- `engines.node` is now `>=22.5.0` (the first release with `node:sqlite`), and
+  `@types/node` is pinned to the max Node major tested in CI (24) instead of 26.
+  `scripts/smoke-dist.mjs` now asserts the v2 (`setup`) entrypoint, and
+  `biome.json` is migrated to the 2.5.x schema.
+
 ### Fixed
 
+- `mesh_pair` now rejects an empty `node_id` or `token` instead of completing a
+  pairing with a credential nobody can present (or that clobbers a peer record).
+  A partially-supplied pair (`node_id` without `token`, or vice versa) is an
+  error rather than being silently ignored.
+- The mesh server reports a body read failure as `400` (malformed request) rather
+  than `413` (too large): a client that drops the connection mid-body no longer
+  looks like an oversized payload.
+- Peer addresses that carry an IPv6 zone id (`[fe80::1%eth0]:4399`) are accepted,
+  so a link-local peer is no longer silently unreachable.
+- `defaultDataDir()` no longer resolves to a filesystem-root path
+  (`/.local/share/opencode-mesh`) when `HOME` is unset or blank: it falls back to
+  `os.homedir()`, then `os.tmpdir()`.
 - The node identity migration now finishes on disk: a `node.json` written by
   <= 0.2.0 is rewritten without its dead Ed25519 keypair, so the stale key
   material no longer lingers after the id is loaded. A corrupt or `node_id`-less

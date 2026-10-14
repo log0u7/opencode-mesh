@@ -140,7 +140,8 @@ export function resolvePeerUrl(db: MeshDb, query: string): string | null {
 }
 
 function hasPort(address: string): boolean {
-  return /^\[[0-9a-f:]+\]:\d+$/i.test(address) || /^[^:]+:\d+$/.test(address);
+  // Bracketed IPv6, optionally with a zone id (e.g. `[fe80::1%eth0]:4399`).
+  return /^\[[0-9a-f:]+(?:%[^\]]+)?\]:\d+$/i.test(address) || /^[^:]+:\d+$/.test(address);
 }
 
 export function upsertDiscoveredPeer(
