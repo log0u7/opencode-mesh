@@ -73,6 +73,33 @@ describe("pairing token rules", () => {
     db.close();
   });
 
+  it("rebinds a paired peer's token when its own offer is presented back", () => {
+    const db = openMeshDb(":memory:");
+    upsertDiscoveredPeer(db, {
+      node_id: "node-b",
+      hostname: "laptop",
+      fingerprint: "fb",
+      addresses: ["10.0.0.2:4399"],
+    });
+    // Two-sided pairing: this host accepted node-b's offer...
+    pairWithToken(db, {
+      node_id: "node-b",
+      hostname: "laptop",
+      fingerprint: "fb",
+      token: "tok-b-offer",
+      addresses: ["10.0.0.2:4399"],
+    });
+    // ...and node-b authenticates with THIS host's offer token, which is still
+    // pending here. Binding it is how the protocol works, not a downgrade.
+    const offer = createPairingToken(db);
+
+    expect(authenticateToken(db, offer, "node-b")?.node_id).toBe("node-b");
+    // The presented offer becomes the peer's credential from now on.
+    expect(authenticateToken(db, offer, null)?.node_id).toBe("node-b");
+
+    db.close();
+  });
+
   it("keeps serving an already paired peer without a pending token", () => {
     const db = openMeshDb(":memory:");
     pairWithToken(db, {
