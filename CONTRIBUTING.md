@@ -40,7 +40,7 @@ CI enforces a coverage gate (90% lines/functions, 80% branches) through a dedica
 
 ```sh
 pnpm test:coverage   # full suite with coverage report
-pnpm verify          # biome + typecheck + tests (coverage gate) + Node smoke of dist/
+pnpm verify          # biome + typecheck + tests + Node smoke of dist/
 pnpm build:check     # tsc build + pack dry-run
 ```
 

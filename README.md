@@ -42,7 +42,7 @@ Same machine: start two OpenCode instances in the same repository.
 
 ```
 mesh_status()                      # local sessions + paired peers + active locks
-mesh_pair()                        # list discovered peers, approve pairing
+mesh_pair()                        # emit a pairing offer (5 min) / complete the peer's offer
 mesh_send(peer="laptop", subject="handoff", body="...")
 mesh_inbox()                       # pull new messages, ack
 mesh_lock(path="src/api.ts", ttl=300)   # claim a file before editing (this machine only)
