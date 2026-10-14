@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Plugin } from "@opencode/plugin";
 
 import { pluginModule } from "../src/index.js";
@@ -27,11 +27,41 @@ type AddedTool = {
   ) => Promise<{ content?: string }>;
 };
 
-function fakeCtx(dataDir: string, extraOptions: Record<string, unknown> = {}) {
+// A worker process that reports nothing and exits cleanly, so mesh_spawn
+// returns a success envelope without waiting on any real child.
+function okSpawn() {
+  const exitListeners: Array<(code: number | null) => void> = [];
+  const proc = {
+    pid: 2222,
+    stdout: { on: () => {} },
+    stderr: { on: () => {} },
+    on: (event: string, cb: (code: number | null) => void) => {
+      if (event === "exit") exitListeners.push(cb);
+    },
+    kill: () => {},
+  };
+  queueMicrotask(() => {
+    for (const cb of exitListeners) cb(0);
+  });
+  return proc as never;
+}
+
+function fakeCtx(
+  dataDir: string,
+  overrides: { options?: Record<string, unknown>; worktree?: unknown } = {},
+) {
   const added: AddedTool[] = [];
 
   const ctx = {
-    location: { directory: "/home/u/project" },
+    location: {
+      directory: "/home/u/project",
+      project: {
+        id: "proj-1",
+        directory: "/home/u/project",
+        canonical: "/home/u/project",
+      },
+    },
+    worktree: overrides.worktree,
     options: {
       dataDir,
       port: 0, // random OS port
@@ -39,11 +69,11 @@ function fakeCtx(dataDir: string, extraOptions: Record<string, unknown> = {}) {
       worktreeClient: {
         worktree: {
           create: async () => ({ data: { name: "wt", directory: "/tmp/wt" } }),
-          remove: async () => ({ data: null }),
+          remove: async () => ({ data: true }),
         },
       },
       spawnFn: () => ({ pid: -1, kill: async () => {} }) as never,
-      ...extraOptions,
+      ...overrides.options,
     },
     tool: {
       transform: async (fn: (editor: { add: (t: AddedTool & { id: string }) => void }) => void) =>
@@ -123,6 +153,52 @@ describe("opencode-mesh v2 setup", () => {
       await byName.get("mesh_unlock")?.execute({ path: "src/a.ts" }, { sessionID: "s1" })
     )?.content;
     expect(unlockAgain).toContain("was not locked by this node");
+
+    await cleanup?.();
+  });
+
+  it("mesh_spawn spawns through the injected options.worktreeClient", async () => {
+    const create = vi.fn(async () => ({ data: { name: "wt", directory: "/tmp/wt" } }));
+    const { ctx, added } = fakeCtx(tmpDataDir(), {
+      options: {
+        worktreeClient: { worktree: { create, remove: async () => ({ data: true }) } },
+        spawnFn: okSpawn,
+      },
+    });
+    const cleanup = await pluginModule.setup(ctx);
+    const spawn = added.find((t) => t.name === "mesh_spawn");
+
+    const out = (await spawn?.execute({ task: "t" }, { sessionID: "s1" }))?.content ?? "";
+    const parsed = JSON.parse(out) as { worker_id: string; worktree: string };
+
+    expect(create).toHaveBeenCalledWith(
+      { worktreeCreateInput: {} },
+      expect.objectContaining({ signal: expect.anything() }),
+    );
+    expect(parsed.worker_id).toMatch(/^[a-f0-9-]{36}$/);
+    expect(parsed.worktree).toBe("/tmp/wt");
+
+    await cleanup?.();
+  });
+
+  it("mesh_spawn falls back to the flat, project-scoped v2 ctx.worktree domain", async () => {
+    const domain = {
+      create: vi.fn(async () => ({ directory: "/v2/wt2" })),
+      remove: vi.fn(async () => {}),
+    };
+    const { ctx, added } = fakeCtx(tmpDataDir(), {
+      options: { worktreeClient: undefined, spawnFn: okSpawn },
+      worktree: domain,
+    });
+    const cleanup = await pluginModule.setup(ctx);
+    const spawn = added.find((t) => t.name === "mesh_spawn");
+
+    const out = (await spawn?.execute({ task: "t" }, { sessionID: "s1" }))?.content ?? "";
+    const parsed = JSON.parse(out) as { worker_id: string; worktree: string; branch: string };
+
+    expect(domain.create).toHaveBeenCalledWith({ projectID: "proj-1" });
+    expect(parsed.worktree).toBe("/v2/wt2");
+    expect(parsed.branch).toBe("wt2");
 
     await cleanup?.();
   });

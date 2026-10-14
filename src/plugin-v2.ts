@@ -7,6 +7,7 @@ import { upsertDiscoveredPeer } from "./lib/peers.js";
 import { loadOrCreateIdentity, type NodeIdentity } from "./lib/identity.js";
 import { nodeSpawn, stopAllWorkers, type SpawnFn } from "./lib/spawn.js";
 import type { WorktreeClient } from "./lib/worktree.js";
+import { v2WorktreeDomainClient } from "./lib/worktree.js";
 import { reconcileWorkers } from "./lib/workers.js";
 import { startMeshServer } from "./lib/serve.js";
 import { buildToolSpecs, type ToolSpec } from "./tools.js";
@@ -43,9 +44,11 @@ export const MeshV2 = Plugin.define({
       port: options?.port ?? DEFAULT_PORT,
       ...(options?.bind !== undefined ? { bind: options.bind } : {}),
     });
-    // The v2 worktree domain speaks the same worktree.create/remove shape the
-    // plugin's WorktreeClient wraps over the v1 REST API.
-    const worktreeClient = ctx.worktree as unknown as WorktreeClient;
+    // Prefer an injected client (tests, hosts that pass one), then adapt the
+    // 2.x in-process worktree domain to the REST-shaped WorktreeClient. The
+    // domain resolves payloads directly, without the v1 `{ data }` envelope.
+    const worktreeClient: WorktreeClient =
+      options?.worktreeClient ?? v2WorktreeDomainClient(ctx.worktree, ctx.location.project.id);
     const spawnFn: SpawnFn = options?.spawnFn ?? nodeSpawn;
 
     let advertiseHandle: AdvertiseHandle | null = null;

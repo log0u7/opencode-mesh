@@ -130,6 +130,95 @@ describe("orchestrator tools", () => {
     expect(result).toMatch(/^error: worker \S+ failed to start$/);
   });
 
+  it("mesh_spawn removes the worktree when the child never spawns", async () => {
+    const wt = fakeWorktreeClient();
+    const failingSpawn = () => {
+      const proc = {
+        pid: -1,
+        stdout: { on: (_: string, cb: (chunk: string) => void) => void cb },
+        stderr: { on: (_: string, cb: (chunk: string) => void) => void cb },
+        on: (_: string, cb: (arg: unknown) => void) => void cb,
+        kill: () => {},
+      };
+      return proc as never;
+    };
+    const { tools } = await loadTools({ worktreeClient: wt, spawnFn: failingSpawn });
+
+    const result = String(await tools.mesh_spawn?.execute({ task: "t" }, ctx("s1")));
+
+    expect(result).toMatch(/^error: worker \S+ failed to start$/);
+    expect(wt.worktree.remove).toHaveBeenCalledWith(
+      { worktreeRemoveInput: { directory: "/data/worktree/p1/task-1" } },
+      expect.objectContaining({ signal: expect.anything() }),
+    );
+    // The failed row must not outlive the worktree it points at.
+    expect(String(await tools.mesh_workers?.execute({}, ctx("s1")))).toBe("[]");
+  });
+
+  it("mesh_spawn cleans up the worktree when runWorker throws after creating it", async () => {
+    const wt = fakeWorktreeClient();
+    // Missing stderr makes runWorker throw after the row insert (it drains
+    // stderr), exercising the catch-path cleanup rather than the failed path.
+    const brokenSpawn = () =>
+      ({
+        pid: 4242,
+        stdout: { on: () => {} },
+        on: () => {},
+        kill: () => {},
+      }) as never;
+    const { tools } = await loadTools({ worktreeClient: wt, spawnFn: brokenSpawn });
+
+    const result = String(await tools.mesh_spawn?.execute({ task: "t" }, ctx("s1")));
+
+    expect(result).toMatch(/^error:/);
+    expect(wt.worktree.remove).toHaveBeenCalledWith(
+      { worktreeRemoveInput: { directory: "/data/worktree/p1/task-1" } },
+      expect.objectContaining({ signal: expect.anything() }),
+    );
+  });
+
+  it("mesh_worker_remove keeps the registry row when worktree removal throws", async () => {
+    const wt = fakeWorktreeClient();
+    const { tools } = await loadTools({ worktreeClient: wt, spawnFn: okSpawn([]) });
+
+    const spawned = JSON.parse(
+      String(await tools.mesh_spawn?.execute({ task: "t" }, ctx("s1"))),
+    ) as { worker_id: string };
+
+    wt.worktree.remove = vi.fn(async () => ({
+      error: { data: { message: "worktree busy" } },
+    })) as never;
+
+    const result = String(
+      await tools.mesh_worker_remove?.execute(
+        { worker_id: spawned.worker_id, force: true },
+        ctx("s1"),
+      ),
+    );
+
+    expect(result).toContain("worktree remove failed");
+    expect(String(await tools.mesh_workers?.execute({}, ctx("s1")))).not.toBe("[]");
+  });
+
+  it("mesh_worker_remove keeps the registry row when the worktree was not removed", async () => {
+    const wt = fakeWorktreeClient();
+    wt.worktree.remove = vi.fn(async () => ({ data: false })) as never;
+    const { tools } = await loadTools({ worktreeClient: wt, spawnFn: okSpawn([]) });
+
+    const spawned = JSON.parse(
+      String(await tools.mesh_spawn?.execute({ task: "t" }, ctx("s1"))),
+    ) as { worker_id: string };
+
+    const result = String(
+      await tools.mesh_worker_remove?.execute(
+        { worker_id: spawned.worker_id, force: true },
+        ctx("s1"),
+      ),
+    );
+    expect(result).toMatch(/^error:/);
+    expect(String(await tools.mesh_workers?.execute({}, ctx("s1")))).not.toBe("[]");
+  });
+
   it("mesh_workers lists workers with lifecycle states", async () => {
     const { tools } = await loadTools({
       worktreeClient: fakeWorktreeClient(),
@@ -197,9 +286,10 @@ describe("orchestrator tools", () => {
       ),
     );
     expect(removed).toContain("removed");
-    expect(wt.worktree.remove).toHaveBeenCalledWith({
-      worktreeRemoveInput: { directory: "/data/worktree/p1/task-1" },
-    });
+    expect(wt.worktree.remove).toHaveBeenCalledWith(
+      { worktreeRemoveInput: { directory: "/data/worktree/p1/task-1" } },
+      expect.objectContaining({ signal: expect.anything() }),
+    );
 
     const after = String(await tools.mesh_workers?.execute({}, ctx("s1")));
     expect(after).toBe("[]");
@@ -228,9 +318,10 @@ describe("orchestrator tools", () => {
       await tools.mesh_worker_remove?.execute({ worker_id: row.id, force: true }, ctx("s1")),
     );
     expect(removed).toContain("removed");
-    expect(wt.worktree.remove).toHaveBeenCalledWith({
-      worktreeRemoveInput: { directory: "/data/worktree/p1/task-1" },
-    });
+    expect(wt.worktree.remove).toHaveBeenCalledWith(
+      { worktreeRemoveInput: { directory: "/data/worktree/p1/task-1" } },
+      expect.objectContaining({ signal: expect.anything() }),
+    );
   });
 
   it("dispose stops live workers so nothing outlives the plugin", async () => {
