@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- On OpenCode 2.x hosts, `mesh_spawn` and `mesh_worker_remove` no longer hand the
+  raw `ctx.worktree` domain to the REST-shaped worktree client. The in-process
+  domain (which resolves payloads directly, without the v1 `{ data, error }`
+  envelope) is wrapped back into that shape, and an injected
+  `options.worktreeClient` now takes precedence. Closes #29.
+- Worktree create/remove calls on the 1.x REST client are bounded by a 15s
+  timeout. A create response with no directory, or a remove response that is
+  not a boolean, now raises a clear error instead of persisting an `undefined`
+  directory. When the 2.x domain reports only a directory (no branch), the
+  worker's branch falls back to that directory's name.
+- A spawn that fails before the child runs no longer leaks its worktree:
+  `mesh_spawn` removes the worktree and the dead registry row when the child
+  never starts or `runWorker` throws. `mesh_worker_remove` keeps the registry
+  row when the worktree was not actually removed, instead of orphaning it.
 - Node runtime support: the published package no longer calls `require()` from
   ESM modules. The Node fallback paths (`node:sqlite` engine, `node:crypto`)
   now use static and dynamic imports and actually run. Vitest's module runner

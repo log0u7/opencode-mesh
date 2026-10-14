@@ -1,3 +1,4 @@
+import { basename } from "node:path";
 import { sendMail } from "./lib/client.js";
 import type { MeshDb } from "./lib/db.js";
 import { tailnetAddresses } from "./lib/discovery.js";
@@ -12,7 +13,12 @@ import {
   resolvePeerUrl,
 } from "./lib/peers.js";
 import { readLogTail, removeWorkerLog, runWorker, stopWorker, type SpawnFn } from "./lib/spawn.js";
-import { createWorkerWorktree, removeWorkerWorktree, type WorktreeClient } from "./lib/worktree.js";
+import {
+  createWorkerWorktree,
+  removeWorkerWorktree,
+  type WorktreeClient,
+  type WorktreeInfo,
+} from "./lib/worktree.js";
 import { deleteWorker, getWorker, listWorkers } from "./lib/workers.js";
 
 // One definition of the mesh tools, consumed by both host adapters (plugin.ts
@@ -208,20 +214,35 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
         bool("auto", "Grant all permissions to the worker (default true)"),
       ],
       execute: async (args) => {
+        let info: WorktreeInfo | undefined;
         try {
-          const info = await createWorkerWorktree(worktreeClient, {
+          info = await createWorkerWorktree(worktreeClient, {
             ...(typeof args.name === "string" ? { name: args.name } : {}),
           });
           const worker = runWorker(db, dataDir, {
             task: String(args.task),
             worktree_path: info.directory,
-            branch: info.branch ?? info.name,
+            // The 2.x domain reports only the directory; fall back to its
+            // basename (git's branch name for the worktree) for the NOT NULL
+            // branch column.
+            branch: info.branch ?? info.name ?? basename(info.directory),
             ...(typeof args.model === "string" ? { model: args.model } : {}),
             ...(typeof args.agent === "string" ? { agent: args.agent } : {}),
             ...(typeof args.auto === "boolean" ? { auto: args.auto } : {}),
             spawnFn,
           });
           if (worker.status === "failed") {
+            // The child never ran: do not leak the worktree. Only drop the row
+            // once the worktree is gone, so an unclean removal stays visible.
+            const cleaned = await removeWorkerWorktree(worktreeClient, {
+              directory: info.directory,
+            }).catch(() => false);
+            info = undefined;
+            if (!cleaned) {
+              return `error: worker ${worker.id} failed to start; worktree ${worker.worktree_path} may be stranded`;
+            }
+            deleteWorker(db, worker.id);
+            removeWorkerLog(dataDir, worker.id);
             return `error: worker ${worker.id} failed to start`;
           }
           return JSON.stringify(
@@ -235,7 +256,18 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
             2,
           );
         } catch (error) {
-          return `error: ${error instanceof Error ? error.message : String(error)}`;
+          const message = error instanceof Error ? error.message : String(error);
+          if (info) {
+            // A worktree was created before the failure: clean it up so a
+            // thrown runWorker does not strand a directory.
+            const cleaned = await removeWorkerWorktree(worktreeClient, {
+              directory: info.directory,
+            }).catch(() => false);
+            if (!cleaned) {
+              return `error: ${message}; worktree ${info.directory} may be stranded`;
+            }
+          }
+          return `error: ${message}`;
         }
       },
     },
@@ -317,12 +349,22 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
             // Nothing live to signal; the registry row is what gets cleaned up.
           }
         }
+        let removed: boolean;
         try {
-          await removeWorkerWorktree(worktreeClient, { directory: worker.worktree_path });
+          removed = await removeWorkerWorktree(worktreeClient, {
+            directory: worker.worktree_path,
+          });
         } catch (error) {
           return `error: worktree remove failed: ${error instanceof Error ? error.message : String(error)}`;
         }
-        deleteWorker(db, worker_id);
+        if (!removed) {
+          // Keep the row so the unremoved worktree stays discoverable.
+          return `error: worktree ${worker.worktree_path} was not removed; worker ${worker_id} kept`;
+        }
+        const rowDeleted = deleteWorker(db, worker_id);
+        if (!rowDeleted) {
+          return `error: worktree removed but worker row ${worker_id} was already gone`;
+        }
         removeWorkerLog(dataDir, worker.id);
         return `removed ${worker.id} (worktree, registry row and log deleted)`;
       },
