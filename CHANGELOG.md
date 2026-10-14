@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-14
+
 ### Added
 
 - Documentation: `docs/CONFIGURATION.md` (the full options reference), and new
@@ -26,6 +28,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `@types/node` is pinned to the max Node major tested in CI (24) instead of 26.
   `scripts/smoke-dist.mjs` now asserts the v2 (`setup`) entrypoint, and
   `biome.json` is migrated to the 2.5.x schema.
+- `mesh_lock` is documented and advertised as local to this machine: it is
+  enforced between sessions sharing this host's data directory and is not part
+  of the wire protocol. A guard test fails the build if a lock route reappears
+  on the server.
+- Removed the Ed25519 keypair ceremony in node identity: nothing signed or
+  verified with it, so the short fingerprint is derived from `node_id`.
+  Existing node ids are preserved on upgrade; the fingerprint value changes,
+  which may require re-pairing peers.
+- Workers spawned by `mesh_spawn` run with `OPENCODE_MESH_CHILD=1` and skip the
+  server, mDNS and all mesh tools, so a pool of N workers no longer costs N
+  mesh nodes.
+- `mesh_worker_logs` reads only the tail of a worker log instead of loading the
+  whole file on the host's event loop; `mesh_status` caches `tailscale status`
+  for 60s and bounds the subprocess with a 2s timeout.
 
 ### Fixed
 
@@ -112,23 +128,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Auto-pairing a previously unknown node id is gone.
 - Discovered peers keep their hostname and fingerprint through pairing instead
   of collapsing to `"pending"`, so `mesh_status` still shows a real identity.
-
-### Changed
-
-- `mesh_lock` is documented and advertised as local to this machine: it is
-  enforced between sessions sharing this host's data directory and is not part
-  of the wire protocol. A guard test fails the build if a lock route reappears
-  on the server.
-- Removed the Ed25519 keypair ceremony in node identity: nothing signed or
-  verified with it, so the short fingerprint is derived from `node_id`.
-  Existing node ids are preserved on upgrade; the fingerprint value changes,
-  which may require re-pairing peers.
-- Workers spawned by `mesh_spawn` run with `OPENCODE_MESH_CHILD=1` and skip the
-  server, mDNS and all mesh tools, so a pool of N workers no longer costs N
-  mesh nodes.
-- `mesh_worker_logs` reads only the tail of a worker log instead of loading the
-  whole file on the host's event loop; `mesh_status` caches `tailscale status`
-  for 60s and bounds the subprocess with a 2s timeout.
 
 ### Removed
 
