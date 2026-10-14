@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Peer addresses in the IPv4-mapped IPv6 form (`[::ffff:192.168.1.10]:4399`)
+  are accepted, so a dual-stack resolver's reported address no longer leaves
+  its peer unreachable ("no known address with a port"). Portless and
+  empty-zone forms stay rejected.
+
 ## [0.3.0] - 2026-10-14
 
 ### Added
