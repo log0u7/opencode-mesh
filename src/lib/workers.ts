@@ -78,24 +78,30 @@ export function setWorkerStatus(
   status: WorkerStatus,
   options: { exit_code?: number | null } = {},
 ): void {
+  const finished = TERMINAL_STATUSES.has(status) ? Date.now() : null;
+  const exitCode = "exit_code" in options ? (options.exit_code ?? null) : null;
+  // Guard the transition inside the UPDATE: a concurrent finalize in another
+  // process must not be overwritten by a stale read-then-write. The terminal
+  // list comes from TERMINAL_STATUSES so it cannot drift.
+  const terminals = [...TERMINAL_STATUSES];
+  db.conn.run(
+    `UPDATE workers SET status = ?, exit_code = ?, finished_at = ?
+     WHERE id = ? AND status NOT IN (${terminals.map(() => "?").join(", ")})`,
+    [status, exitCode, finished, id, ...terminals],
+  );
+  const changed =
+    (db.conn.get<{ changes: number }>("SELECT changes() AS changes")?.changes ?? 0) > 0;
+  if (changed) {
+    return;
+  }
+
   const existing = getWorker(db, id);
   if (!existing) {
     throw new Error(`unknown worker: ${id}`);
   }
-  if (TERMINAL_STATUSES.has(existing.status)) {
-    throw new Error(
-      `worker ${id} is in terminal state ${existing.status}; refusing transition to ${status}`,
-    );
-  }
-
-  const finished = TERMINAL_STATUSES.has(status) ? Date.now() : null;
-  const exitCode = "exit_code" in options ? (options.exit_code ?? null) : null;
-  db.conn.run("UPDATE workers SET status = ?, exit_code = ?, finished_at = ? WHERE id = ?", [
-    status,
-    exitCode,
-    finished,
-    id,
-  ]);
+  throw new Error(
+    `worker ${id} is in terminal state ${existing.status}; refusing transition to ${status}`,
+  );
 }
 
 export function deleteWorker(db: MeshDb, id: string): boolean {

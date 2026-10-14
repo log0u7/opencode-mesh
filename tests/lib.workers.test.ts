@@ -87,6 +87,46 @@ describe("workers store", () => {
     db.close();
   });
 
+  it("does not overwrite a terminal row when the pre-read is stale", () => {
+    const db = openMeshDb(":memory:");
+    spawn(db);
+    // Another process finalizes the worker first.
+    db.conn.run("UPDATE workers SET status = 'failed', finished_at = 1 WHERE id = 'w1'");
+
+    // Simulate a stale read: the transition guard must come from the UPDATE,
+    // not from the earlier SELECT.
+    const realGet = db.conn.get.bind(db.conn);
+    db.conn.get = ((sql: string, params?: unknown[]) => {
+      if (sql.includes("FROM workers WHERE id")) {
+        return {
+          id: "w1",
+          task: "t",
+          worktree_path: "/wt",
+          branch: "b",
+          pid: null,
+          session_id: null,
+          status: "running",
+          exit_code: null,
+          started_at: 1,
+          finished_at: null,
+        } as unknown;
+      }
+      return realGet(sql, params);
+    }) as typeof db.conn.get;
+
+    expect(() => setWorkerStatus(db, "w1", "completed", { exit_code: 0 })).toThrow(/terminal/);
+
+    db.conn.get = realGet;
+    expect(getWorker(db, "w1")?.status).toBe("failed");
+    db.close();
+  });
+
+  it("throws for an unknown worker id", () => {
+    const db = openMeshDb(":memory:");
+    expect(() => setWorkerStatus(db, "ghost", "completed")).toThrow(/unknown worker/);
+    db.close();
+  });
+
   it("lists workers newest first and returns null for unknown ids", () => {
     const db = openMeshDb(":memory:");
     spawn(db);

@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `mesh_lock` no longer throws a raw `UNIQUE constraint failed` error when two
+  opencode sessions sharing the same data directory race for the same path. The
+  lock claim is a single atomic `INSERT ... ON CONFLICT DO NOTHING`, and the
+  worker status transition is a single guarded `UPDATE`, so a stale
+  read-then-write can neither raise nor overwrite a concurrently finalized row.
+- The mesh database now records a schema version (`PRAGMA user_version`) and
+  creates indexes for its hot lookups (unread messages, pending pairing tokens,
+  peer tokens, running workers, expired locks).
 - On OpenCode 2.x hosts, `mesh_spawn` and `mesh_worker_remove` no longer hand the
   raw `ctx.worktree` domain to the REST-shaped worktree client. The in-process
   domain (which resolves payloads directly, without the v1 `{ data, error }`

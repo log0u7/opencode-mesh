@@ -97,6 +97,39 @@ describe("locks", () => {
     db.close();
   });
 
+  it("does not throw when a lock appears between the check and the insert", () => {
+    const db = openMeshDb(":memory:");
+    // Another process already owns the path; its row is not expired for now=0.
+    db.conn.run(
+      "INSERT INTO locks (path, owner_node, owner_session, expires_at) VALUES (?, ?, ?, ?)",
+      ["src/api.ts", "n2", "s2", 9_999_999_999],
+    );
+
+    // Simulate the TOCTOU window: a pre-insert existence probe sees nothing.
+    const realGet = db.conn.get.bind(db.conn);
+    let probes = 0;
+    db.conn.get = ((sql: string, params?: unknown[]) => {
+      if (sql.includes("FROM locks WHERE path")) {
+        probes++;
+        if (probes === 1) return null;
+      }
+      return realGet(sql, params);
+    }) as typeof db.conn.get;
+
+    let granted = true;
+    expect(() => {
+      granted = tryLock(db, {
+        path: "src/api.ts",
+        owner_node: "n1",
+        owner_session: "s1",
+        ttl_ms: 1000,
+        now: 0,
+      });
+    }).not.toThrow();
+    expect(granted).toBe(false);
+    db.close();
+  });
+
   it("lists only live locks", () => {
     const db = openMeshDb(":memory:");
 
