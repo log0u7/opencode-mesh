@@ -26,7 +26,29 @@ Restart OpenCode. The package is installed automatically at startup into opencod
 
 ```json
 {
-  "plugin": ["@log0u7/opencode-mesh@0.1.1"]
+  "plugin": ["@log0u7/opencode-mesh@0.2.0"]
+}
+```
+
+### Configuration
+
+All options are optional; see [docs/CONFIGURATION.md](docs/CONFIGURATION.md) for the reference.
+
+On OpenCode 1.x hosts, options travel in a package-and-options tuple:
+
+```json
+{
+  "plugin": [["@log0u7/opencode-mesh", { "port": 4399, "bind": "loopback", "advertise": true }]]
+}
+```
+
+On 2.x hosts the key is `plugins` and each entry is an object:
+
+```json
+{
+  "plugins": [
+    { "package": "@log0u7/opencode-mesh", "options": { "port": 4399, "bind": "lan" } }
+  ]
 }
 ```
 
@@ -81,21 +103,24 @@ Workers run `opencode run --dir <worktree> --format json` headless with `--auto`
 - Pairing offers expire after 5 minutes. A pending token alone grants nothing: the claimed node must already be known to this host (discovered over mDNS, or paired out of band with `mesh_pair`). Both sides run `mesh_pair` to complete a pairing, so a leaked offer cannot install a permanent peer on its own.
 - Peer addresses always carry the advertised port; a portless address is refused instead of being completed with the local port.
 - mDNS TXT records carry node id + fingerprint only, never secrets.
-- Tailnet addresses are surfaced by `mesh_status` when `tailscale` runs, for cross-subnet pools (`"allow_tailnet": true` plugin option, planned).
+- Tailnet addresses are surfaced by `mesh_status` when `tailscale` runs, for cross-subnet pools.
 - Messages travel over plain HTTP: there is no TLS layer. Loopback and trusted networks only.
 
 ## Development
 
-Requires Node >= 22 (mise: `mise install`) and pnpm (corepack).
+Requires Node >= 22.5 (`mise install`) and pnpm (corepack).
 
 ```sh
 pnpm install
-pnpm verify      # biome + typecheck + vitest + Node smoke of dist/
-pnpm build:check # tsc build + pack dry-run
-pnpm smoke:dist  # build, then load dist/ under plain Node (no vitest shims)
+pnpm verify            # biome + typecheck + vitest + Node smoke of dist/
+pnpm typecheck:tests   # typecheck the test suite (also enforced in CI)
+pnpm build:check       # tsc build + pack dry-run
+pnpm smoke:dist        # build, then load dist/ under plain Node (no vitest shims)
 ```
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for the workflow.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the workflow, and the [docs/](docs/) folder for
+[configuration](docs/CONFIGURATION.md), [architecture](docs/ARCHITECTURE.md), and the
+wire [protocol](docs/PROTOCOL.md).
 
 ## License
 

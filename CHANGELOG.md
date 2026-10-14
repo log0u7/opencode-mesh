@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Documentation: `docs/CONFIGURATION.md` (the full options reference), and new
+  architecture and wire protocol docs detailing the process model, worker
+  lifecycle, data-dir layout, and the HTTP/mDNS/pairing protocol. The README
+  links them and documents the plugin options inline.
 - Plugin options are validated at setup. A `port` outside `[0, 65535]` or not an
   integer, a `bind` other than `loopback`/`lan`, a non-boolean `advertise`, or an
   empty/non-string `dataDir` now fails fast with a clear message instead of
@@ -25,6 +29,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The docs no longer claim security behaviour the code does not implement:
+  `SECURITY.md` drops the "refuses entries that look like API-key formats"
+  promise (no such filtering exists) and the umask-077 claim (the data
+  *directory* is created `0700`; the SQLite file itself is not `chmod`ed), and
+  the README drops the non-existent `"allow_tailnet"` option while updating its
+  stale install pin.
 - `mesh_pair` now rejects an empty `node_id` or `token` instead of completing a
   pairing with a credential nobody can present (or that clobbers a peer record).
   A partially-supplied pair (`node_id` without `token`, or vice versa) is an

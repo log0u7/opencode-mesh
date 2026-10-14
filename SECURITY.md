@@ -13,5 +13,12 @@ Use GitHub private vulnerability reporting: repository page -> Security -> Repor
 
 ## Hardening notes
 
-- The store refuses entries that look like common API-key formats, but this is best-effort: do not save credentials through the model.
-- Data path: `~/.local/share/opencode-mesh/mesh.db` (honors `XDG_DATA_HOME`), created with restrictive permissions (umask 077).
+- The mesh has no credential filtering or secret scanning: anything a model
+  writes to `mesh_send` is stored and relayed as-is. Do not save credentials
+  through the model.
+- Data path: `~/.local/share/opencode-mesh/` (honors `XDG_DATA_HOME`). The
+  directory is created with mode `0700` on first run, so access is protected at
+  the directory level. The SQLite file itself is not `chmod`ed: do not point
+  `dataDir` at a shared or group-readable location.
+- Messages travel over plain HTTP between peers: there is no TLS on the wire.
+  Restrict the mesh to loopback or networks you control.
