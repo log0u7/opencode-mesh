@@ -41,6 +41,28 @@ describe("smoke: plugin module", () => {
     ]);
     await hooks.dispose?.();
   });
+
+  it("child processes register no tools and open no server", async () => {
+    const previous = process.env.OPENCODE_MESH_CHILD;
+    process.env.OPENCODE_MESH_CHILD = "1";
+    try {
+      const hooks = await MeshPlugin(fakeInput(), {
+        dataDir: dir,
+        port: 0,
+        advertise: false,
+      });
+      // No mesh node: a spawned worker must not cost a server, mDNS or tools.
+      expect(Object.keys(hooks).sort()).toEqual(["dispose"]);
+      expect(hooks.tool).toBeUndefined();
+      await hooks.dispose?.();
+    } finally {
+      if (previous === undefined) {
+        delete process.env.OPENCODE_MESH_CHILD;
+      } else {
+        process.env.OPENCODE_MESH_CHILD = previous;
+      }
+    }
+  });
 });
 
 function fakeInput() {

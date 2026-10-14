@@ -141,6 +141,20 @@ describe("mesh plugin tool branches", () => {
     await hooks.dispose?.();
   });
 
+  it("mesh_lock advertises its local-only scope", async () => {
+    const hooks = await MeshPlugin(fakeInput(), { dataDir: dir, port: 0, advertise: false });
+    const tools = hooks.tool ?? {};
+
+    // Cross-node lock propagation would be a different product; the tool must
+    // not let the model believe a remote peer will wait.
+    const description = tools.mesh_lock?.description ?? "";
+    expect(description).toContain("THIS MACHINE");
+    expect(description).toContain("Not distributed");
+    expect(description).not.toContain("other sessions wait");
+
+    await hooks.dispose?.();
+  });
+
   it("mesh_send reports peers without addresses and mesh_unlock on unlocked path", async () => {
     const hooks = await MeshPlugin(fakeInput(), { dataDir: dir, port: 0, advertise: false });
     const tools = hooks.tool ?? {};
