@@ -105,7 +105,12 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
       execute: async (args) => {
         const node_id = args.node_id;
         const token = args.token;
-        if (typeof token === "string" && typeof node_id === "string") {
+        const hasNodeId = typeof node_id === "string";
+        const hasToken = typeof token === "string";
+        if (hasNodeId || hasToken) {
+          if (!hasNodeId || !hasToken || node_id.length === 0 || token.length === 0) {
+            return "error: mesh_pair needs a non-empty node_id and token to complete pairing (or neither to emit an offer)";
+          }
           pairWithToken(db, {
             node_id,
             hostname: "manual",

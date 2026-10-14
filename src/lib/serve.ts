@@ -77,11 +77,15 @@ async function handle(db: MeshDb, req: IncomingMessage, res: ServerResponse): Pr
 
   if (req.method === "POST" && url.pathname === "/mail") {
     const body = await readBody(req);
-    if (body === null) {
-      json(res, 413, { error: "body too large" });
+    if ("error" in body) {
+      // A body over the limit is 413; a read failure (client aborted mid-body)
+      // is a malformed request, not an oversized one.
+      json(res, body.error === "too_large" ? 413 : 400, {
+        error: body.error === "too_large" ? "body too large" : "malformed request body",
+      });
       return;
     }
-    const parsed = parseMail(body);
+    const parsed = parseMail(body.body);
     if (!parsed) {
       json(res, 400, { error: "invalid mail body" });
       return;
@@ -132,7 +136,9 @@ function authenticate(
   return peer ? { node_id: peer.node_id } : null;
 }
 
-function readBody(req: IncomingMessage): Promise<string | null> {
+type BodyResult = { body: string } | { error: "too_large" | "read" };
+
+function readBody(req: IncomingMessage): Promise<BodyResult> {
   return new Promise((resolve) => {
     const chunks: Buffer[] = [];
     let size = 0;
@@ -149,8 +155,15 @@ function readBody(req: IncomingMessage): Promise<string | null> {
         chunks.push(chunk);
       }
     });
-    req.on("end", () => resolve(limited ? null : Buffer.concat(chunks).toString("utf8")));
-    req.on("error", () => resolve(null));
+    req.on("end", () =>
+      resolve(limited ? { error: "too_large" } : { body: Buffer.concat(chunks).toString("utf8") }),
+    );
+    // A socket error, an aborted request, or a bare close all end the read
+    // without `end`. `close` is the last-resort fallback; resolving twice is a
+    // no-op, so a normal request that already ended is unaffected.
+    req.on("error", () => resolve({ error: "read" }));
+    req.on("aborted", () => resolve({ error: "read" }));
+    req.on("close", () => resolve({ error: "read" }));
   });
 }
 

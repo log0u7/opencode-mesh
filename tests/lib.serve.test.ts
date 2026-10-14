@@ -5,6 +5,7 @@ import { join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { request } from "node:http";
+import { connect } from "node:net";
 
 import { openMeshDb } from "../src/lib/db.js";
 import { pairWithToken } from "../src/lib/peers.js";
@@ -287,6 +288,41 @@ describe("mesh server body guard", () => {
       req.end();
     });
     expect(status).toBe(413);
+
+    server.close();
+    db.close();
+  });
+
+  it("reports a body read failure as 400, not 413 (socket error)", async () => {
+    const { db, server, url } = await start();
+    pairWithToken(db, {
+      node_id: "peer1",
+      hostname: "laptop",
+      fingerprint: "ff00",
+      token: "tok-peer1",
+    });
+    const token = "tok-peer1";
+    const urlObj = new URL(url);
+
+    const status = await new Promise<number>((resolve, reject) => {
+      const socket = connect({ host: urlObj.hostname, port: Number(urlObj.port) }, () => {
+        // Declare a 100-byte body, send 10, then half-close: the read fails
+        // (aborted/reset) without ever completing.
+        socket.write(
+          `POST /mail HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer ${token}\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n`,
+        );
+        socket.write("0123456789");
+        socket.end();
+      });
+      let raw = "";
+      socket.on("data", (chunk) => {
+        raw += chunk.toString();
+      });
+      socket.on("end", () => resolve(Number(/HTTP\/1\.1 (\d+)/.exec(raw)?.[1] ?? 0)));
+      socket.on("error", reject);
+    });
+
+    expect(status).toBe(400);
 
     server.close();
     db.close();

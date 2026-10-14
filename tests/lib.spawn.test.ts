@@ -7,6 +7,8 @@ import {
   writeFileSync,
   mkdirSync,
 } from "node:fs";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -493,8 +495,6 @@ describe("worker log rotation", () => {
 
 describe("reconcileWorkers", () => {
   it("marks running rows dead when their pid no longer exists", async () => {
-    const { spawn } = await import("node:child_process");
-    const { once } = await import("node:events");
     const db = openMeshDb(":memory:");
 
     // A pid that is guaranteed gone: a child that already exited and was reaped.

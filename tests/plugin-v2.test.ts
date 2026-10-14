@@ -157,6 +157,12 @@ describe("opencode-mesh v2 setup", () => {
     await cleanup?.();
   });
 
+  it("rejects invalid options before opening the server (fail-fast)", async () => {
+    const { ctx } = fakeCtx(tmpDataDir(), { options: { port: -1 } });
+
+    await expect(pluginModule.setup(ctx)).rejects.toThrow(/port/);
+  });
+
   it("mesh_spawn spawns through the injected options.worktreeClient", async () => {
     const create = vi.fn(async () => ({ data: { name: "wt", directory: "/tmp/wt" } }));
     const { ctx, added } = fakeCtx(tmpDataDir(), {

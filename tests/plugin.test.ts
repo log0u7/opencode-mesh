@@ -19,9 +19,9 @@ afterEach(() => {
 
 const WORKTREE = "/work/project";
 
-function ctx(): ToolContext {
+function ctx(sessionID = "s1"): ToolContext {
   return {
-    sessionID: "s1",
+    sessionID,
     messageID: "m1",
     agent: "build",
     directory: WORKTREE,
@@ -131,6 +131,16 @@ describe("mesh plugin tool branches", () => {
       ctx("s1"),
     );
     expect(paired).toBe("paired with peer-remote");
+
+    // Empty credentials must never complete a pairing: an empty token would
+    // clobber a peer record with a credential nobody can present.
+    const emptyToken = await tools.mesh_pair?.execute(
+      { node_id: "peer-remote", token: "" },
+      ctx("s1"),
+    );
+    expect(emptyToken).toContain("error:");
+    const emptyNode = await tools.mesh_pair?.execute({ node_id: "", token: "tok" }, ctx("s1"));
+    expect(emptyNode).toContain("error:");
 
     const missing = await tools.mesh_send?.execute(
       { peer: "ghost", subject: "s", body: "b" },

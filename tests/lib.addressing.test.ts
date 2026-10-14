@@ -35,6 +35,12 @@ describe("resolvePeerUrl", () => {
     const named = pair(["laptop.local:4399"]);
     expect(resolvePeerUrl(named, "node-b")).toBe("http://laptop.local:4399");
     named.close();
+
+    // A link-local IPv6 address carries a zone id (`%eth0`), which must not
+    // disqualify an otherwise well-formed host:port.
+    const zoned = pair(["[fe80::1%eth0]:4399"]);
+    expect(resolvePeerUrl(zoned, "node-b")).toBe("http://[fe80::1%eth0]:4399");
+    zoned.close();
   });
 
   it("refuses to invent a port for a portless address", () => {
