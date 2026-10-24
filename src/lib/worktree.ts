@@ -1,5 +1,3 @@
-import { createOpencodeClient } from "@opencode-ai/sdk/v2";
-
 type WorktreeInfo = {
   name?: string;
   branch?: string;
@@ -52,13 +50,6 @@ export type WorktreeFactory = (
   directory: string,
   fetchOverride?: typeof fetch,
 ) => WorktreeClient;
-
-export const defaultWorktreeFactory: WorktreeFactory = (baseUrl, directory, fetchOverride) =>
-  createOpencodeClient({
-    baseUrl,
-    directory,
-    ...(fetchOverride ? { fetch: fetchOverride } : {}),
-  }) as unknown as WorktreeClient;
 
 // In `opencode run` (in-process server) the plugin's own v1 client carries the
 // custom fetch that routes to the embedded server; reuse it so our v2 client
