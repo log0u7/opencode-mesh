@@ -1,6 +1,3 @@
-import { homedir, tmpdir } from "node:os";
-import { join } from "node:path";
-
 import type { Hooks, Plugin } from "@opencode-ai/plugin";
 import { tool } from "@opencode-ai/plugin";
 import { createOpencodeClient } from "@opencode-ai/sdk/v2";
@@ -10,7 +7,7 @@ import { openMeshDb, type MeshDb } from "./lib/db.js";
 import { advertiseMesh, browseMesh, type AdvertiseHandle } from "./lib/discovery.js";
 import { upsertDiscoveredPeer } from "./lib/peers.js";
 import { loadOrCreateIdentity, type NodeIdentity } from "./lib/identity.js";
-import { nodeSpawn, stopAllWorkers, type SpawnFn } from "./lib/spawn.js";
+import { nodeSpawn, stopAllWorkers } from "./lib/spawn.js";
 import { defaultDataDir, parseOptions, type PluginOptions } from "./options.js";
 import { extractClientFetch, type WorktreeClient, type WorktreeFactory } from "./lib/worktree.js";
 import { reconcileWorkers } from "./lib/workers.js";

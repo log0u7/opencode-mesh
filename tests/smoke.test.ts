@@ -33,6 +33,24 @@ describe("smoke: plugin module", () => {
     await hooks.dispose?.();
   });
 
+  it("resolves server() with no options through the child-process short-circuit", async () => {
+    const previous = process.env.OPENCODE_MESH_CHILD;
+    process.env.OPENCODE_MESH_CHILD = "1";
+    try {
+      // No options at all: the v1 factory short-circuits as a mesh child, so
+      // the wrapper must still resolve, with no port, db or mDNS work.
+      const hooks = await module_.server(fakeInput());
+      expect(Object.keys(hooks).sort()).toEqual(["dispose"]);
+      await hooks.dispose?.();
+    } finally {
+      if (previous === undefined) {
+        delete process.env.OPENCODE_MESH_CHILD;
+      } else {
+        process.env.OPENCODE_MESH_CHILD = previous;
+      }
+    }
+  });
+
   it("plugin factory resolves hooks without network or side effects", async () => {
     const hooks = await MeshPlugin(fakeInput(), { dataDir: dir, port: 0, advertise: false });
     expect(Object.keys(hooks).sort()).toEqual(["dispose", "tool"]);
