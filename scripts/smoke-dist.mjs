@@ -43,7 +43,7 @@ const HOST_PROVIDED = new Set(["@opencode/plugin"]);
 
 // Node builtins resolve everywhere; anything else bare must be declared.
 function isNodeBuiltin(spec) {
-  return spec === "node:module" || spec.startsWith("node:");
+  return spec.startsWith("node:");
 }
 
 function staticAndDynamicSpecs(file) {
