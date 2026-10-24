@@ -11,7 +11,7 @@ import { v2WorktreeDomainClient } from "./lib/worktree.js";
 import { reconcileWorkers } from "./lib/workers.js";
 import { startMeshServer } from "./lib/serve.js";
 import { buildToolSpecs, type ToolSpec } from "./tools.js";
-import { defaultDataDir, parseOptions, type PluginOptions } from "./plugin.js";
+import { defaultDataDir, parseOptions, type PluginOptions } from "./options.js";
 
 const DEFAULT_PORT = 4399;
 

@@ -18,9 +18,19 @@ afterEach(() => {
 });
 
 describe("smoke: plugin module", () => {
-  it("exports a v1 plugin module with id and server", () => {
+  it("exports a v1 plugin module with id and a lazy server entry", async () => {
     expect(module_.id).toBe("@log0u7/opencode-mesh");
-    expect(module_.server).toBe(MeshPlugin);
+    // server() lazily loads the v1 implementation so the v1-only import graph
+    // stays out of the static graph (v2 hosts reject it at load time). The
+    // contract is therefore not identity with MeshPlugin but equivalent hooks.
+    expect(typeof module_.server).toBe("function");
+    const hooks = await module_.server(fakeInput(), {
+      dataDir: dir,
+      port: 0,
+      advertise: false,
+    });
+    expect(Object.keys(hooks).sort()).toEqual(["dispose", "tool"]);
+    await hooks.dispose?.();
   });
 
   it("plugin factory resolves hooks without network or side effects", async () => {

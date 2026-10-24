@@ -3,6 +3,7 @@ import { join } from "node:path";
 
 import type { Hooks, Plugin } from "@opencode-ai/plugin";
 import { tool } from "@opencode-ai/plugin";
+import { createOpencodeClient } from "@opencode-ai/sdk/v2";
 import { Bonjour } from "bonjour-service";
 
 import { openMeshDb, type MeshDb } from "./lib/db.js";
@@ -10,75 +11,28 @@ import { advertiseMesh, browseMesh, type AdvertiseHandle } from "./lib/discovery
 import { upsertDiscoveredPeer } from "./lib/peers.js";
 import { loadOrCreateIdentity, type NodeIdentity } from "./lib/identity.js";
 import { nodeSpawn, stopAllWorkers, type SpawnFn } from "./lib/spawn.js";
-import { defaultWorktreeFactory, extractClientFetch, type WorktreeClient } from "./lib/worktree.js";
+import { defaultDataDir, parseOptions, type PluginOptions } from "./options.js";
+import { extractClientFetch, type WorktreeClient, type WorktreeFactory } from "./lib/worktree.js";
 import { reconcileWorkers } from "./lib/workers.js";
 import { startMeshServer } from "./lib/serve.js";
 import { buildToolSpecs } from "./tools.js";
 
-export type PluginOptions = {
-  dataDir?: string;
-  port?: number;
-  bind?: "loopback" | "lan";
-  advertise?: boolean;
-  worktreeClient?: WorktreeClient;
-  spawnFn?: SpawnFn;
-};
+export { defaultDataDir, parseOptions } from "./options.js";
+export type { PluginOptions } from "./options.js";
+
+// The v1 worktree REST factory lives HERE, not in lib/worktree.ts: it is only
+// reachable from v1 hosts, and it imports `@opencode-ai/sdk/v2`, which only
+// hosts that bundle the v1-era SDK resolve. Keeping it in the lazily loaded v1
+// adapter keeps the SDK out of the package's static import graph, which v2
+// hosts reject at load time (see scripts/smoke-dist.mjs).
+export const defaultWorktreeFactory: WorktreeFactory = (baseUrl, directory, fetchOverride) =>
+  createOpencodeClient({
+    baseUrl,
+    directory,
+    ...(fetchOverride ? { fetch: fetchOverride } : {}),
+  }) as unknown as WorktreeClient;
 
 const DEFAULT_PORT = 4399;
-
-// Validate the host-supplied options once, at the boundary. A typo'd port or
-// bind used to surface as a late, cryptic failure (EADDRINUSE, a bind on the
-// wrong interface, or a data dir at the filesystem root); fail clearly here.
-export function parseOptions(raw: PluginOptions | undefined): PluginOptions {
-  const options: PluginOptions = {};
-  // `null` is treated as "no options" (the old code tolerated it); a non-object
-  // is a programming error. Unknown keys are ignored on purpose: a host may pass
-  // its own option bag, and forward-compat beats rejecting a typo'd `datadir`.
-  if (raw === undefined || raw === null) {
-    return options;
-  }
-  if (typeof raw !== "object") {
-    throw new Error("opencode-mesh: options must be an object");
-  }
-  if (raw.dataDir !== undefined) {
-    if (typeof raw.dataDir !== "string" || raw.dataDir.length === 0) {
-      throw new Error("opencode-mesh: options.dataDir must be a non-empty string");
-    }
-    options.dataDir = raw.dataDir;
-  }
-  if (raw.port !== undefined) {
-    if (
-      typeof raw.port !== "number" ||
-      !Number.isInteger(raw.port) ||
-      raw.port < 0 ||
-      raw.port > 65535
-    ) {
-      throw new Error("opencode-mesh: options.port must be an integer between 0 and 65535");
-    }
-    options.port = raw.port;
-  }
-  if (raw.bind !== undefined) {
-    if (raw.bind !== "loopback" && raw.bind !== "lan") {
-      throw new Error('opencode-mesh: options.bind must be "loopback" or "lan"');
-    }
-    options.bind = raw.bind;
-  }
-  if (raw.advertise !== undefined) {
-    if (typeof raw.advertise !== "boolean") {
-      throw new Error("opencode-mesh: options.advertise must be a boolean");
-    }
-    options.advertise = raw.advertise;
-  }
-  // Opaque collaborators are passed through untouched: the plugin cannot
-  // validate a client or spawn function beyond its nominal type.
-  if (raw.worktreeClient !== undefined) {
-    options.worktreeClient = raw.worktreeClient;
-  }
-  if (raw.spawnFn !== undefined) {
-    options.spawnFn = raw.spawnFn;
-  }
-  return options;
-}
 
 // A worker spawned by mesh_spawn inherits this marker: it must not boot its own
 // mesh server, advertise over mDNS or register mesh tools. A pool of N workers
@@ -186,16 +140,4 @@ function zodShape(
       return [field.name, field.required ? described : described.optional()];
     }),
   );
-}
-
-export function defaultDataDir(): string {
-  const dataHome = process.env.XDG_DATA_HOME || join(homeDir(), ".local", "share");
-  return join(dataHome, "opencode-mesh");
-}
-
-// `os.homedir()` / `os.tmpdir()` replace the old empty-string fallback, which
-// produced a path at the filesystem root (`/.local/share/...`) when HOME was
-// unset or blank.
-function homeDir(): string {
-  return process.env.HOME || homedir() || tmpdir();
 }

@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-10-24
+
+### Fixed
+
+- The package loads under OpenCode 2 again. The v1 implementation imports
+  `@opencode-ai/plugin`, which only v1 hosts resolve, and it sat in the static
+  import graph, so v2 hosts rejected the whole plugin at load time
+  (`Cannot find package '@opencode-ai/plugin'`). The v1 entry is now loaded
+  lazily from `server()`: a v2 host never calls `server()` and therefore never
+  resolves the v1-only packages. The named `MeshPlugin` export is type-only.
+- The v1 worktree REST factory moved from `lib/worktree.ts` into `plugin.ts`
+  for the same reason: it imports `@opencode-ai/sdk/v2`, which must stay out
+  of the static import graph too. Shared option plumbing moved to
+  `options.ts`, imported by both adapters.
+- `smoke:dist` now audits the static import graph of `dist/`: no
+  `@opencode-ai/*` import may be reachable statically, `plugin.js` must only
+  be reached through a dynamic `import()`, and every other bare import must
+  be `@opencode/plugin`, a Node builtin, or a declared runtime dependency.
+
 ## [0.4.0] - 2026-10-14
 
 ### Added

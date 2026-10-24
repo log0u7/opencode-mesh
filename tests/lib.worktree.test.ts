@@ -4,10 +4,10 @@ import {
   createWorkerWorktree,
   removeWorkerWorktree,
   extractClientFetch,
-  defaultWorktreeFactory,
   v2WorktreeDomainClient,
   type WorktreeClient,
 } from "../src/lib/worktree.js";
+import { defaultWorktreeFactory } from "../src/plugin.js";
 
 function fakeClient(createResult: unknown, removeResult: unknown = createResult) {
   return {
