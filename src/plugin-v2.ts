@@ -3,13 +3,15 @@ import { Bonjour } from "bonjour-service";
 
 import { openMeshDb, type MeshDb } from "./lib/db.js";
 import { advertiseMesh, browseMesh, type AdvertiseHandle } from "./lib/discovery.js";
-import { upsertDiscoveredPeer } from "./lib/peers.js";
+import { listLocks } from "./lib/locks.js";
+import { listPeers, upsertDiscoveredPeer } from "./lib/peers.js";
 import { loadOrCreateIdentity, type NodeIdentity } from "./lib/identity.js";
 import { nodeSpawn, stopAllWorkers, type SpawnFn } from "./lib/spawn.js";
 import type { WorktreeClient } from "./lib/worktree.js";
 import { v2WorktreeDomainClient } from "./lib/worktree.js";
 import { reconcileWorkers } from "./lib/workers.js";
 import { startMeshServer } from "./lib/serve.js";
+import { MeshRpc, snapshotFromMesh } from "./rpc.js";
 import { buildToolSpecs, type ToolSpec } from "./tools.js";
 import { defaultDataDir, parseOptions, type PluginOptions } from "./options.js";
 
@@ -93,10 +95,22 @@ export const MeshV2 = Plugin.define({
       }
     });
 
+    // Live snapshot for the TUI sidebar: one compact read over the mesh state.
+    const rpc = await ctx.rpc.register(MeshRpc, {
+      snapshot: async () =>
+        snapshotFromMesh({
+          identity,
+          peers: listPeers(db),
+          locks: listLocks(db, { now: Date.now() }),
+          server: `${address}:${port}`,
+        }),
+    });
+
     const cleanup = async () => {
       stopAllWorkers(db);
       advertiseHandle?.close();
       browseHandle?.close();
+      rpc.dispose();
       await new Promise<void>((resolve) => server.close(() => resolve()));
       db.close();
     };

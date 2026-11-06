@@ -81,6 +81,9 @@ function fakeCtx(
     },
     session: { hook: async () => {} },
     event: { subscribe: () => (async function* () {})() },
+    rpc: {
+      register: async () => ({ dispose: async () => {}, events: { emit: async () => {} } }),
+    },
   } as unknown as Plugin.Context;
 
   return { ctx, added };
