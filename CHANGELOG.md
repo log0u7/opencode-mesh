@@ -5,6 +5,18 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-11-06
+
+### Added
+
+- Themed mesh sidebar: bold header and muted peer lines using the active
+  theme's text colors.
+- Sidebar collapse: the `/mesh` toggle keybind persists its state in durable
+  storage, so the collapsed sidebar survives TUI restarts.
+- Event refresh: the sidebar refreshes immediately (debounced) on server
+  events, with the 15s polling as fallback.
+- `/mesh` now opens a dialog with the full snapshot instead of a toast.
+
 ## [0.6.0] - 2026-11-06
 
 ### Added

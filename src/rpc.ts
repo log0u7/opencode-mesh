@@ -48,6 +48,19 @@ export function formatMeshLines(s: MeshSnapshot): string[] {
   return lines;
 }
 
+/** Collapsible sidebar: when collapsed, one header line with the peer count (plus locks). */
+export function formatMeshSidebar(s: MeshSnapshot, collapsed: boolean): string[] {
+  if (!collapsed) {
+    return formatMeshLines(s);
+  }
+  const self = s.hostname.length > 0 ? s.hostname : s.node_id;
+  const lines = [`mesh: ${self} (${s.peers.length} peers)`];
+  if (s.active_locks > 0) {
+    lines.push(`${s.active_locks} active lock(s)`);
+  }
+  return lines;
+}
+
 export const MeshRpc = Rpc.define({
   id: "mesh",
   methods: {
