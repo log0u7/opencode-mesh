@@ -12,6 +12,34 @@ Each node advertises itself over mDNS, pairs with explicit operator approval (pe
 
 `mesh_lock` is **local to your machine**: it is enforced between OpenCode sessions sharing this host's data directory (`~/.local/share/opencode-mesh/`). Locks are not part of the wire protocol, so a peer on another node does not see or respect them. Remote nodes coordinate through messages (`mesh_send`), not locks.
 
+## Why
+
+One OpenCode instance is one brain. When a task outgrows a single session, or you want to parallelise across machines, sessions need to talk to each other, claim files without stepping on each other, and workers you can spawn and reap. opencode-mesh adds that layer:
+
+- **Same machine:** sessions coordinate through a local registry - messages (`mesh_send` / `mesh_inbox`) and exclusive file claims (`mesh_lock`).
+- **Across the room:** nodes advertise over mDNS and pair with explicit operator approval (per-peer bearer tokens, deny by default). Tailscale IPs are picked up automatically for cross-subnet pools.
+- **Headless workers:** `mesh_spawn` starts an isolated OpenCode worktree per worker, tracks its lifecycle, captures its logs, and cleans up on dispose.
+
+```mermaid
+flowchart LR
+    subgraph lan["LAN or Tailscale tailnet"]
+        N1["Node A - OpenCode + mesh"]
+        N2["Node B - OpenCode + mesh"]
+        N3["Node C - OpenCode + mesh"]
+    end
+    N1 <-- "mDNS discovery (node id + fingerprint only)" --> N2
+    N1 <-- "HTTP + per-peer bearer tokens (mesh_send / mesh_inbox)" --> N2
+    N2 <-- "mDNS + HTTP" --> N3
+    N1 <-- "mDNS + HTTP" --> N3
+```
+
+## Highlights
+
+- **Spawn headless workers in one call.** `mesh_spawn(task, name)` starts an isolated OpenCode worktree per worker; `mesh_workers`, `mesh_worker_logs`, `mesh_worker_stop` and `mesh_worker_remove` track and reap them. A pool of N workers costs N worktrees, not N mesh nodes.
+- **Deny by default.** Every endpoint requires a per-peer bearer token; pairing offers expire after 5 minutes; both sides must run `mesh_pair`; every mail carries an Ed25519 proof, so a leaked offer cannot install or rotate a live credential.
+- **File claims between sessions.** `mesh_lock` gives exclusive claims on paths, enforced between sessions on the same machine, so two agents never edit the same file.
+- **Deliberately simple wire protocol.** mDNS for discovery, bearer tokens for auth, two HTTP routes (`/mail`, `/status`), plain HTTP over loopback and trusted networks.
+
 ## Install
 
 Register the plugin in `opencode.json` (project or global `~/.config/opencode/opencode.json`):
@@ -26,7 +54,7 @@ Restart OpenCode. The package is installed automatically at startup into opencod
 
 ```json
 {
-  "plugin": ["@log0u7/opencode-mesh@0.4.1"]
+  "plugin": ["@log0u7/opencode-mesh@0.5.1"]
 }
 ```
 
@@ -75,7 +103,7 @@ mesh_unlock(path="src/api.ts")
 
 | Tool | Args | Description |
 |---|---|---|
-| `mesh_status` | : local session registry, own address, paired peers, active locks. |
+| `mesh_status` | | Local session registry, own address, paired peers, active locks. |
 | `mesh_pair` | `node_id?`, `token?`, `address?` | No args: emit a pairing offer (5 min ttl). With args: complete the peer's offer. |
 | `mesh_send` | `peer`, `subject`, `body` | Deliver a message to a peer's mailbox. |
 | `mesh_inbox` | `ack?` | Fetch unread messages; ack marks them read. |
@@ -85,6 +113,17 @@ mesh_unlock(path="src/api.ts")
 ### Orchestrator
 
 Spawn headless workers in isolated opencode worktrees (native worktree API), track them, and clean up:
+
+```mermaid
+flowchart TB
+    O["Orchestrator session"]
+    subgraph workers["Headless workers, one worktree each"]
+        W1["Worker parser"]
+        W2["Worker tests"]
+    end
+    O -- "mesh_spawn(task, name)" --> workers
+    workers -- "mesh_workers / mesh_worker_logs / mesh_worker_stop / mesh_worker_remove" --> O
+```
 
 ```
 mesh_spawn(task="implement the parser", name="parser")     # -> worker_id, worktree, branch
@@ -109,6 +148,22 @@ The plugin ships a TUI part (auto-loaded by OpenCode): a toast on load, a `/mesh
 - mDNS TXT records carry node id + fingerprint only, never secrets.
 - Tailnet addresses are surfaced by `mesh_status` when `tailscale` runs, for cross-subnet pools.
 - Messages travel over plain HTTP: there is no TLS layer. Loopback and trusted networks only.
+
+The pairing handshake (both sides must run `mesh_pair`; a leaked offer alone installs nothing):
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant A as Node A
+    participant B as Node B
+    A->>A: mesh_pair() emits an offer (5 min TTL)
+    Note over A,B: The operator relays the offer out of band (chat, not the mesh)
+    B->>A: mesh_pair(node_id, token, address, pk) completes the offer
+    B->>B: mesh_pair() emits its own offer
+    Note over A,B: Relayed out of band again
+    A->>B: mesh_pair(node_id, token, address, pk) completes it
+    Note over A,B: Pairing complete: per-peer bearer tokens on both sides
+```
 
 ## Development
 
