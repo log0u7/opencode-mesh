@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { formatMeshLines, snapshotFromMesh } from "../src/rpc.js";
+import { formatMeshLines, formatMeshSidebar, snapshotFromMesh } from "../src/rpc.js";
 
 describe("snapshotFromMesh", () => {
   it("keeps paired peers only and counts active locks", () => {
@@ -63,5 +63,34 @@ describe("formatMeshLines", () => {
     });
     expect(lines[0]).toBe("mesh: n1");
     expect(lines[1]).toBe("↔ p1");
+  });
+});
+
+describe("formatMeshSidebar", () => {
+  const expanded = {
+    node_id: "n1",
+    hostname: "laptop",
+    peers: [
+      { node_id: "p1", hostname: "desktop" },
+      { node_id: "p2", hostname: "phone" },
+    ],
+    active_locks: 2,
+  };
+
+  it("delegates to formatMeshLines when expanded", () => {
+    expect(formatMeshSidebar(expanded, false)).toEqual(formatMeshLines(expanded));
+  });
+
+  it("collapses to one header line with peer count when collapsed", () => {
+    expect(formatMeshSidebar(expanded, true)).toEqual([
+      "mesh: laptop (2 peers)",
+      "2 active lock(s)",
+    ]);
+  });
+
+  it("shows an empty state in collapsed mode when there are no peers", () => {
+    expect(
+      formatMeshSidebar({ node_id: "n1", hostname: "laptop", peers: [], active_locks: 0 }, true),
+    ).toEqual(["mesh: laptop (0 peers)"]);
   });
 });
