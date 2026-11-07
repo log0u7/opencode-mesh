@@ -1,5 +1,5 @@
+import { Plugin } from "@opencode/plugin/tui";
 import { createStore, produce } from "solid-js/store";
-import type { Plugin } from "@opencode/plugin/tui";
 
 type SidebarState = { collapsed: boolean };
 

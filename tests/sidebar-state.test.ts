@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
+import { Plugin } from "@opencode/plugin/tui";
+
 import { createSidebarState } from "../src/sidebar-state.js";
 
 type Storage = Plugin.Context["storage"];
