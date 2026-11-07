@@ -8,6 +8,7 @@ type Context = Plugin.Context;
 type Theme = Context["theme"];
 
 import { MeshRpc, formatMeshSidebar, type MeshSnapshot } from "./rpc.js";
+import { createSidebarState } from "./sidebar-state.js";
 
 const REFRESH_MS = 15_000;
 /** quota-style event refresh: debounced immediate refresh after activity. */
@@ -54,10 +55,10 @@ export default Plugin.define({
     const theme = context.theme;
     context.ui.toast.show({ message: "opencode-mesh loaded", variant: "info", duration: 2000 });
 
-    // Durable collapse state: persisted to disk, survives restarts and hot reloads.
-    const [store, mutate] = context.storage.store("mesh-sidebar", {
-      initial: { collapsed: false },
-    });
+    // Durable collapse state when the host allows it (scoped plugin ids hit a
+    // host-side segment validation error — anomalyco/opencode#62634); in-memory
+    // fallback otherwise: sidebar works, collapse not persisted across restarts.
+    const [store, mutate] = createSidebarState(context.storage);
     const [snapshot, setSnapshot] = createSignal<MeshSnapshot | null>(null);
     const [lines, setLines] = createSignal<string[] | null>(null);
 
