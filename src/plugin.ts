@@ -58,6 +58,7 @@ export const MeshPlugin: Plugin = async (input, rawOptions?: PluginOptions) => {
     db,
     port: options.port ?? DEFAULT_PORT,
     ...(options.bind !== undefined ? { bind: options.bind } : {}),
+    self: { node_id: identity.node_id, pk: identity.public_key, hostname: identity.hostname },
   });
   const worktreeClient: WorktreeClient =
     options.worktreeClient ??

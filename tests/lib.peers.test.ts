@@ -3,6 +3,7 @@ import { generateKeyPairSync } from "node:crypto";
 import { describe, expect, it } from "vitest";
 
 import { openMeshDb } from "../src/lib/db.js";
+import { PAIRING_TOKEN_TTL_MS } from "../src/lib/peers.js";
 import { pairingProofPayload, signPairingProof, verifyPairingProof } from "../src/lib/identity.js";
 import {
   authenticateToken,
@@ -11,8 +12,6 @@ import {
   pairWithToken,
   upsertDiscoveredPeer,
 } from "../src/lib/peers.js";
-
-const PAIRING_TTL_MS = 5 * 60_000;
 
 // A test-held Ed25519 identity for node-b: proofs are signed like a real peer.
 function nodeBKeys() {
@@ -52,10 +51,12 @@ describe("pairing token rules", () => {
     );
 
     // Rewind the token: it must now be treated as expired, not as a credential.
-    db.conn.run("UPDATE pending_tokens SET created_at = ?", [Date.now() - PAIRING_TTL_MS - 1]);
+    db.conn.run("UPDATE pending_tokens SET created_at = ?", [
+      Date.now() - PAIRING_TOKEN_TTL_MS - 1,
+    ]);
     const expired = createPairingToken(db);
     db.conn.run("UPDATE pending_tokens SET created_at = ? WHERE token = ?", [
-      Date.now() - PAIRING_TTL_MS - 1,
+      Date.now() - PAIRING_TOKEN_TTL_MS - 1,
       expired,
     ]);
 

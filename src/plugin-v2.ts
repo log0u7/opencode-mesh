@@ -60,6 +60,7 @@ export const MeshV2 = Plugin.define({
       port: options.port ?? DEFAULT_PORT,
       ...(options.bind !== undefined ? { bind: options.bind } : {}),
       fanout,
+      self: { node_id: identity.node_id, pk: identity.public_key, hostname: identity.hostname },
     });
     // Prefer an injected client (tests, hosts that pass one), then adapt the
     // 2.x in-process worktree domain to the REST-shaped WorktreeClient. The
