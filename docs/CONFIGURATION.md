@@ -39,9 +39,10 @@ On OpenCode 2.x hosts the key is `plugins` and each entry is an object with
 | `wakeIntervalMs` | `number` | `5000` | Wake poll interval in ms. Must be a positive integer. |
 
 Multi-host pools (0.10.0) add no options: `"bind": "lan"` on every node,
-`mesh_pair` run on both hosts (mDNS does not cross hosts), and the mesh port
-(default 4399) open between them — see [ORGANIZATION.md](ORGANIZATION.md),
-Model 5.
+`mesh_pair()` on one host and `mesh_pair(code="...", address="host:port")` on
+the other (the 6-digit code flow — mDNS does not cross hosts, so the address
+is given explicitly), and the mesh port (default 4399) open between them — see
+[ORGANIZATION.md](ORGANIZATION.md), Model 5.
 
 Mailbox binding has two coexisting paths:
 

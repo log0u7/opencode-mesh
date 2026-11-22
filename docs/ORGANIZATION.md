@@ -160,9 +160,10 @@ and a host that is down simply misses the broadcasts sent while it was away.
 
 Prerequisites (no new options, see [CONFIGURATION.md](CONFIGURATION.md)):
 
-- Both sides run `mesh_pair`, and the addresses are exchanged out of band:
+- Pair with the code flow: `mesh_pair()` on one host emits a 6-digit code
+  (30 min), the other completes `mesh_pair(code="...", address="host:port")`.
   mDNS discovery does not cross hosts (multicast stays on the local segment),
-  so automatic discovery stops at each machine's network boundary.
+  so the address must be given across subnets.
 - Every mesh server binds `"bind": "lan"` (loopback only reaches itself), and
   the mesh port (default 4399) is open between the hosts.
 
