@@ -36,9 +36,9 @@ flowchart LR
 ## Highlights
 
 - **Spawn headless workers in one call.** `mesh_spawn(task, name)` starts an isolated OpenCode worktree per worker; `mesh_workers`, `mesh_worker_logs`, `mesh_worker_stop` and `mesh_worker_remove` track and reap them. A pool of N workers costs N worktrees, not N mesh nodes.
-- **Deny by default.** Every endpoint requires a per-peer bearer token; pairing offers expire after 5 minutes; both sides must run `mesh_pair`; every mail carries an Ed25519 proof, so a leaked offer cannot install or rotate a live credential.
+- **Deny by default.** Every endpoint requires a per-peer bearer token except the rate-limited pairing bootstrap; pairing codes and offers expire after 30 minutes; pairing is one `mesh_pair` call per side; every mail carries an Ed25519 proof, so a leaked offer or code alone cannot install or rotate a live credential.
 - **File claims between sessions.** `mesh_lock` gives exclusive claims on paths, enforced between sessions on the same machine, so two agents never edit the same file.
-- **Deliberately simple wire protocol.** mDNS for discovery, bearer tokens for auth, three HTTP routes (`/mail`, `/status`, `/pools`), plain HTTP over loopback and trusted networks.
+- **Deliberately simple wire protocol.** mDNS for discovery, bearer tokens for auth, four HTTP routes (`/mail`, `/status`, `/pools`, `/pair-code`), plain HTTP over loopback and trusted networks.
 
 ## Install
 
@@ -101,6 +101,21 @@ mesh_lock(path="src/api.ts", ttl=300)   # claim a file before editing (this mach
 mesh_unlock(path="src/api.ts")
 ```
 
+### Pairing across machines (code)
+
+```
+mesh_pair()                                # host A: emit a 6-digit code, valid 30 min
+mesh_pair(code="482913")                   # host B: same LAN, mDNS finds the address
+mesh_pair(code="482913", address="192.168.1.10:4399")   # host B: cross-subnet
+```
+
+One call per side, both paired: the `/pair-code` exchange on host A binds host
+B and returns a counter-offer that B binds automatically. The 6-digit code is
+a capability, not a secret — trust stays on the pinned Ed25519 proof
+([PROTOCOL.md](docs/PROTOCOL.md)). For agents and files,
+`mesh_pair(offer="MESH1-...")` completes a whole offer blob in one string;
+older mesh versions still accept the legacy `node_id` / `token` completion.
+
 ### Mailboxes and pools (multi-session routing)
 
 All sessions on one machine used to share a single mailbox, so every session
@@ -147,7 +162,7 @@ ad-hoc squads) is documented in [docs/ORGANIZATION.md](docs/ORGANIZATION.md).
 |---|---|---|
 | `mesh_status` | | Local session registry, named mailboxes (role, pools, presence), paired peers, active locks. |
 | `mesh_register` | `name`, `role?` | Bind this session to a named mailbox (one box per session, re-register = handoff). |
-| `mesh_pair` | `node_id?`, `token?`, `address?` | No args: emit a pairing offer (5 min ttl). With args: complete the peer's offer. |
+| `mesh_pair` | `code?`, `address?`, `offer?`, `node_id?`, `token?`, `pk?` | No args: emit a 6-digit pairing code (30 min). `code=`: complete pairing — LAN autodiscovers the address, cross-subnet adds `address=`; both sides end up paired. `offer=`: complete a `MESH1-` blob. Legacy `node_id`/`token` accepted. |
 | `mesh_send` | `peer?`, `to?`, `subject`, `body`, `reply_to?` | Deliver mail: `to` a mailbox / `team:<pool>` / `all` locally, and/or `peer` on another node. |
 | `mesh_inbox` | `ack?` | Fetch unread messages addressed to this session's mailbox; ack marks them read. |
 | `mesh_wait` | `id`, `timeout?` | Block until a reply (`reply_to`) to message `id` arrives, return it. |
@@ -188,26 +203,25 @@ The plugin ships a TUI part (auto-loaded by OpenCode): a toast on load, a `/mesh
 ### Security model
 
 - The HTTP mesh server binds to `127.0.0.1` by default. Set `"bind": "lan"` in the plugin options to listen on all interfaces for a LAN pool.
-- Every endpoint requires a per-peer bearer token; nothing is open by default.
-- Pairing offers expire after 5 minutes. A pending token alone grants nothing: the claimed node must already be known to this host (discovered over mDNS, or paired out of band with `mesh_pair`). Both sides run `mesh_pair` to complete a pairing, so a leaked offer cannot install a permanent peer on its own.
+- Every endpoint requires a per-peer bearer token except the pairing bootstrap; nothing else is open by default.
+- Pairing codes and offers expire after 30 minutes. The 6-digit code is a capability naming a pending offer, not a secret; `POST /pair-code` is the only unauthenticated route and is rate-limited (5 attempts per 5 minutes per source). On the mail path a pending token alone grants nothing: the claimed node must already be known to this host. Pairing is one `mesh_pair` call per side, so a leaked offer or code alone cannot install a permanent peer.
 - Peer addresses always carry the advertised port; a portless address is refused instead of being completed with the local port.
 - mDNS TXT records carry node id + fingerprint only, never secrets.
 - Tailnet addresses are surfaced by `mesh_status` when `tailscale` runs, for cross-subnet pools.
 - Messages travel over plain HTTP: there is no TLS layer. Loopback and trusted networks only.
 
-The pairing handshake (both sides must run `mesh_pair`; a leaked offer alone installs nothing):
+The code pairing handshake (one `mesh_pair` call per side; a leaked offer or code alone installs nothing):
 
 ```mermaid
 sequenceDiagram
     autonumber
     participant A as Node A
     participant B as Node B
-    A->>A: mesh_pair() emits an offer (5 min TTL)
-    Note over A,B: The operator relays the offer out of band (chat, not the mesh)
-    B->>A: mesh_pair(node_id, token, address, pk) completes the offer
-    B->>B: mesh_pair() emits its own offer
-    Note over A,B: Relayed out of band again
-    A->>B: mesh_pair(node_id, token, address, pk) completes it
+    A->>A: mesh_pair() emits a 6-digit code (30 min TTL)
+    Note over A,B: The operator relays the code out of band (chat, not the mesh)
+    B->>A: mesh_pair(code=...) — POST /pair-code with B's offer blob
+    A->>A: binds B, mints a counter-offer
+    A-->>B: counter_offer (B binds it automatically)
     Note over A,B: Pairing complete: per-peer bearer tokens on both sides
 ```
 

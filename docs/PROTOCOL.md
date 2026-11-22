@@ -1,7 +1,7 @@
 # Protocol
 
 How mesh nodes talk. The mesh is deliberately simple: mDNS for discovery,
-bearer tokens for auth, three HTTP routes.
+bearer tokens for auth, four HTTP routes.
 
 ## Discovery (mDNS)
 
@@ -31,6 +31,34 @@ the `node_id` is preserved so peers stay recognised). The key is distributed
 two ways: the pairing offer carries it (`pk="..."`), and mDNS TXT advertises it
 as `pk`. A peer row pins the key of the node it paired with (`peers.public_key`).
 
+**Code pairing (0.10.2, default).** One 6-digit code per pairing:
+
+1. Host A runs `mesh_pair` with no args: the host generates a pending token
+   (32 random bytes, base64url, stored in `pending_tokens` with `created_at`,
+   a 6-digit `code` and the emitter's `hostname`) and prints
+   `pairing code: 482913 (valable 30 min)` plus the command to run on the peer.
+2. Host B runs `mesh_pair(code="482913")`. On the same LAN the candidate
+   addresses come from mDNS discovery; across subnets pass
+   `address="host:port"`.
+3. B sends both offers to A in one `POST /pair-code` call: A consumes its
+   pending offer, binds B from B's offer blob (hostname, socket address as
+   peer address) and returns a fresh counter-offer blob. B binds it
+   automatically — one command per side, both paired.
+
+The code is a capability naming the pending offer, not a secret: it grants
+nothing on its own and dies with the offer after 30 minutes. Trust stays
+anchored on the Ed25519 proof: the offer's `pk` is pinned at completion. The
+blob carries the emitter's hostname, so paired peers display their real name
+instead of the `manual` placeholder (legacy manual rows are labeled
+`id@address`).
+
+**Offer blob.** `MESH1-<base64url JSON>` decoding to
+`{node_id, token, pk, address?, hostname?}`: the whole handshake payload in
+one copyable string. `mesh_pair(offer="MESH1-...")` completes it directly
+(agent-to-agent flows: files, DMs); it is also the `/pair-code` request body.
+
+**Legacy completion (node_id/token, older mesh versions).**
+
 1. Either side runs `mesh_pair` with no args: the host generates a token
    (32 random bytes, base64url, stored in `pending_tokens` with a `created_at`
    timestamp) and prints something like
@@ -54,7 +82,8 @@ as `pk`. A peer row pins the key of the node it paired with (`peers.public_key`)
      completion without `pk`) refuse remote rebinding entirely; rotation goes
      through the operator re-running `mesh_pair`.
 
-Offer tokens expire after 5 minutes (`PAIRING_TOKEN_TTL_MS`) and are pruned on
+Offer tokens expire after 30 minutes (`PAIRING_TOKEN_TTL_MS`, raised from
+5 minutes in 0.10.2) and are pruned on
 every auth check that reaches the pending lookup (a valid paired token short-
 circuits earlier). Completing a pairing consumes the pending token and
 upserts the peer record `paired = 1` with the token per node id (one token per
@@ -67,14 +96,16 @@ cannot swap its trust anchor).
 ## HTTP API
 
 Every endpoint requires `Authorization: Bearer <token>`; nothing is open by
-default. Tokens are matched against `peers.token` (`paired = 1`) and, for the
-pending path, the node must already be known.
+default except the pairing bootstrap `POST /pair-code` (rate-limited). Tokens
+are matched against `peers.token` (`paired = 1`) and, for the pending path,
+the node must already be known.
 
 | Method | Path | Auth | Body | Response |
 |---|---|---|---|---|
 | `POST` | `/mail` | peer token | `{"from": "...", "subject": "...", "body": "...", "proof"?: "<pk>.<sig>", "to"?: "<mailbox or team:<pool> or all>", "from_box"?: "<sender mailbox>", "reply_to"?: "<message id>", "via"?: ["<node id>", ...], "origin_id"?: "<message id>"}` | `200 {"ok": true, "unread": N, "delivered": M}` |
 | `GET` | `/status` | peer token | none | `200 {"node_id": "...", "unread": N}` |
 | `GET` | `/pools` | peer token | none | `200 {"pools": {"<pool>": ["<mailbox>", ...]}}` |
+| `POST` | `/pair-code` | none (bootstrap) | `{"code": "482913", "offer": "MESH1-..."}` | `200 {"ok": true, "counter_offer": "MESH1-..."}` |
 
 The optional mail fields (`to`, `from_box`, `reply_to`, `via`, `origin_id`)
 carry mailbox routing across nodes. A receiving node that recognizes the
@@ -94,17 +125,25 @@ by a local session or received from a peer — forwards it to paired peers with
 at least one member in that pool (discovered via `GET /pools`, cached 60 s);
 `via` + `origin_id` keep the fanout to a single delivery per node.
 
+`POST /pair-code` is the pairing bootstrap: no bearer token, the 6-digit code
+is the capability. It consumes the pending offer matching `code`, binds the
+caller from its `MESH1-` offer blob, and returns a counter-offer blob the
+caller binds to complete the pairing.
+
 Status codes:
 
 - `400`: malformed mail body (the receiver could not parse `{from, subject,
   body}` as strings) or a body read failure (socket error, abort mid-body).
 - `401`: missing/unknown token, or the mail `from` does not match the token's
   node id.
-- `404`: unknown route. `/lock`, `/locks`, `/unlock`, `/announce` are
+- `404`: unknown route, or an unknown/expired pairing code on `/pair-code`.
+  `/lock`, `/locks`, `/unlock`, `/announce` are
   deliberately absent: locks are local-only and never part of the wire protocol
   (a regression test guards this).
 - `405`: wrong method for an existing route.
 - `413`: body over the 64 KiB limit, by header or by counting.
+- `429`: `/pair-code` rate limit exceeded — 5 attempts per 5 minutes per
+  source address.
 
 - Sender binding: a paired token from one node id cannot mail as another node
   id (`from` is checked against the token row).
