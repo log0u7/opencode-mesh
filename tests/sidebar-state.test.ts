@@ -8,7 +8,7 @@ type Storage = Plugin.Context["storage"];
 
 describe("createSidebarState", () => {
   it("uses durable storage when the host accepts scoped plugin keys", async () => {
-    const target = { collapsed: false };
+    const target = { collapsed: true };
     const store = vi.fn(
       () =>
         [
@@ -21,7 +21,7 @@ describe("createSidebarState", () => {
     const storage = { store, memory: vi.fn() } as unknown as Storage;
 
     const [state, mutate] = createSidebarState(storage);
-    expect(store).toHaveBeenCalledWith("mesh-sidebar", { initial: { collapsed: false } });
+    expect(store).toHaveBeenCalledWith("mesh-sidebar", { initial: { collapsed: true } });
     await mutate((draft) => {
       draft.collapsed = true;
     });
@@ -39,7 +39,7 @@ describe("createSidebarState", () => {
     } as unknown as Storage;
 
     const [state, mutate] = createSidebarState(storage);
-    expect(state.collapsed).toBe(false);
+    expect(state.collapsed).toBe(true);
     await expect(
       mutate((draft) => {
         draft.collapsed = true;
@@ -59,14 +59,15 @@ describe("createSidebarState", () => {
     } as unknown as Storage;
 
     const [state, mutate] = createSidebarState(storage);
-    await mutate((draft) => {
-      draft.collapsed = !draft.collapsed;
-    });
     expect(state.collapsed).toBe(true);
     await mutate((draft) => {
       draft.collapsed = !draft.collapsed;
     });
     expect(state.collapsed).toBe(false);
+    await mutate((draft) => {
+      draft.collapsed = !draft.collapsed;
+    });
+    expect(state.collapsed).toBe(true);
   });
 
   it("persists toggles over RPC when the host rejects scoped plugin keys", async () => {

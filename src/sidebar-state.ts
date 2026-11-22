@@ -26,9 +26,9 @@ export function createSidebarState(
   (mutation: (draft: SidebarState) => void) => Promise<void>,
 ] {
   try {
-    return storage.store("mesh-sidebar", { initial: { collapsed: false } });
+    return storage.store("mesh-sidebar", { initial: { collapsed: true } });
   } catch {
-    const [store, setStore] = createStore<SidebarState>({ collapsed: false });
+    const [store, setStore] = createStore<SidebarState>({ collapsed: true });
     if (mesh) {
       // Adopt the persisted state once it arrives; the sidebar renders
       // expanded for the first frames, which is harmless.

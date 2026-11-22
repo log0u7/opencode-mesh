@@ -5,6 +5,18 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0] - 2026-11-22
+
+### Added
+
+- Sidebar v2 (quota-style): collapsible header with toggle (click or
+  `mesh.toggleSidebar`), collapsed by default showing `N unread · M agents ·
+  K pools`; expanded shows my mailbox with unread count, one line per pool
+  with per-member presence (`●` fresh < 2 min, `○` warm < 15 min), peers and
+  locks. The snapshot RPC takes an optional `sessionID` (from the
+  `sidebar.content` slot input) and resolves the asking session's mailbox,
+  per-mailbox presence ages and the pool membership map.
+
 ## [0.8.1] - 2026-11-22
 
 ### Fixed
