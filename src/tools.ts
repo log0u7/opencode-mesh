@@ -61,6 +61,10 @@ export type MeshContext = {
   dataDir: string;
   serverAddress: string;
   port: number;
+  /** Instance binding key (project id + directory): mesh_register stamps it so
+   * a later TUI bind from the same instance re-binds the box to its live
+   * session (restart-proof wake). */
+  bindKey: string;
   worktreeClient: WorktreeClient;
   spawnFn: SpawnFn;
 };
@@ -87,7 +91,7 @@ function sessionID(context: ToolContext): string {
 }
 
 export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
-  const { db, identity, dataDir, serverAddress, port, worktreeClient, spawnFn } = mesh;
+  const { db, identity, dataDir, serverAddress, port, bindKey, worktreeClient, spawnFn } = mesh;
   return [
     {
       name: "mesh_status",
@@ -181,6 +185,7 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
           name,
           session_id: sid,
           ...(typeof args.role === "string" && args.role.length > 0 ? { role: args.role } : {}),
+          bind_key: bindKey,
           now: Date.now(),
         });
         return `mailbox ${name} registered for this session`;

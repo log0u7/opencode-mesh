@@ -4,7 +4,13 @@ import { Bonjour } from "bonjour-service";
 import { openMeshDb, type MeshDb } from "./lib/db.js";
 import { advertiseMesh, browseMesh, type AdvertiseHandle } from "./lib/discovery.js";
 import { listLocks } from "./lib/locks.js";
-import { listMailboxes, mailboxBySession, registerMailbox, unreadBoxCount } from "./lib/mail.js";
+import {
+  listMailboxes,
+  mailboxByBindKey,
+  mailboxBySession,
+  registerMailbox,
+  unreadBoxCount,
+} from "./lib/mail.js";
 import { listPeers, upsertDiscoveredPeer } from "./lib/peers.js";
 import { loadOrCreateIdentity, type NodeIdentity } from "./lib/identity.js";
 import { nodeSpawn, stopAllWorkers, type SpawnFn } from "./lib/spawn.js";
@@ -55,6 +61,9 @@ export const MeshV2 = Plugin.define({
     const worktreeClient: WorktreeClient =
       options.worktreeClient ?? v2WorktreeDomainClient(ctx.worktree, ctx.location.project.id);
     const spawnFn: SpawnFn = options.spawnFn ?? nodeSpawn;
+    // Instance binding key: the box stamped at mesh_register follows this
+    // instance across restarts (TUI bind re-binds it to the live session).
+    const bindKey = `${ctx.location.project.id}:${ctx.location.directory}`;
 
     const sessionRef: { sessionID: string | null } = { sessionID: null };
 
@@ -86,6 +95,7 @@ export const MeshV2 = Plugin.define({
         dataDir,
         serverAddress: address,
         port,
+        bindKey,
         worktreeClient,
         spawnFn,
       })) {
@@ -173,14 +183,16 @@ export const MeshV2 = Plugin.define({
             : undefined;
         if (typeof sessionID === "string" && sessionID.length > 0) {
           sessionRef.sessionID = sessionID;
-          // A declarative mailbox re-binds to the live session on every
-          // start: after a restart the box would otherwise stay bound to the
-          // dead session id and the wake loop would never find it.
-          if (options.mailbox !== undefined) {
+          // Re-bind every mailbox this instance registered (same project key):
+          // after a restart a box would otherwise stay bound to the dead
+          // session id and the wake loop would never find it. Last binder
+          // wins (handoff when two instances share one project key).
+          for (const box of mailboxByBindKey(db, bindKey)) {
             registerMailbox(db, {
-              name: options.mailbox,
+              name: box.name,
               session_id: sessionID,
-              ...(options.mailboxRole !== undefined ? { role: options.mailboxRole } : {}),
+              role: box.role,
+              bind_key: bindKey,
               now: Date.now(),
             });
           }

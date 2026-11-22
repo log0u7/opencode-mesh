@@ -237,25 +237,28 @@ describe("opencode-mesh v2 setup", () => {
     await cleanup?.();
   });
 
-  it("wakes an idle restarted session via declarative mailbox + TUI bind", async () => {
+  it("wakes an idle restarted session via dynamic instance binding (no static config)", async () => {
     const dir = tmpDataDir();
-    // Declarative mailbox in plugin options: the box follows the instance
-    // across restarts with no tool call and no manual mesh_register.
     const { ctx, added, rpcHandlers, prompts } = fakeCtx(dir, {
-      options: { wakeIntervalMs: 20, mailbox: "a", mailboxRole: "pair" },
+      options: { wakeIntervalMs: 20 },
     });
     const cleanup = await pluginModule.setup(ctx as never);
 
-    const bind = rpcHandlers.bind;
-    await bind?.({ sessionID: "s1" });
+    // The agent registered its mailbox in an earlier turn: mesh_register
+    // stamps the instance binding key (project id + directory).
+    const register = added.find((t) => t.name === "mesh_register");
+    await register?.execute({ name: "a", role: "pair" }, { sessionID: "s-old" });
+
+    // The session restarts; the TUI binds the new session id and the box
+    // follows it (same project key) — no config, no re-registration needed.
+    await rpcHandlers.bind?.({ sessionID: "s1" });
 
     const meshStatus = added.find((t) => t.name === "mesh_status");
     const rawStatus = await meshStatus?.execute({}, { sessionID: "s1" });
     const statusOut = JSON.parse(
       typeof rawStatus === "string" ? rawStatus : (rawStatus?.content ?? "{}"),
-    ) as { server: string; mailboxes: Array<{ name: string; role: string | null }> };
+    ) as { server: string; mailboxes: Array<{ name: string; session_id?: string }> };
     expect(statusOut.mailboxes[0]?.name).toBe("a");
-    expect(statusOut.mailboxes[0]?.role).toBe("pair");
 
     // Pair a remote node so the HTTP mail authenticates, then deliver from
     // OUTSIDE this process: no tool call may run before the wake.

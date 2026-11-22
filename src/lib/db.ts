@@ -10,7 +10,7 @@ export type MeshDb = {
 
 // Bump when a schema change needs a migration step; the version anchors future
 // migrations that cannot be expressed as idempotent `CREATE ... IF NOT EXISTS`.
-const SCHEMA_VERSION = 3;
+const SCHEMA_VERSION = 4;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS peers (
@@ -38,6 +38,7 @@ CREATE TABLE IF NOT EXISTS mailboxes (
   session_id TEXT NOT NULL UNIQUE,
   role TEXT,
   pools TEXT NOT NULL DEFAULT '[]',
+  bind_key TEXT,
   last_seen INTEGER NOT NULL,
   created_at INTEGER NOT NULL
 );
@@ -107,6 +108,13 @@ function migrate(conn: SqliteConn): void {
   }
   if (!messageColumns.includes("reply_to")) {
     conn.exec("ALTER TABLE messages ADD COLUMN reply_to TEXT");
+  }
+  // v4: mailboxes.bind_key (instance binding for restart-proof wake).
+  const mailboxColumns = conn
+    .all<{ name: string }>("PRAGMA table_info(mailboxes)")
+    .map((row) => row.name);
+  if (!mailboxColumns.includes("bind_key")) {
+    conn.exec("ALTER TABLE mailboxes ADD COLUMN bind_key TEXT");
   }
   conn.exec(INDEXES_V3);
   conn.run(`PRAGMA user_version = ${SCHEMA_VERSION}`);

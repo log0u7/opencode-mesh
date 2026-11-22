@@ -12,11 +12,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Wake reliability: the wake loop only knew the session's id after the first
   mesh tool call, so a freshly restarted (or long-idle) session never woke on
   incoming mail, and a mailbox stayed bound to the dead pre-restart session id.
-  The TUI now binds the session id at mount (new `bind` RPC method), and a
-  declarative `mailbox` / `mailboxRole` option re-binds the box to the live
-  session on every start. Verified against the host source: `Session.prompt`
-  wakes an idle session (`packages/core/src/session/session.ts`,
-  `execution.wake`), so a bound idle session reacts to incoming mail.
+  Now fully dynamic, no configuration: `mesh_register` stamps the mailbox with
+  the instance binding key (project id + directory), and the TUI `bind` RPC
+  re-binds every stamped box to the live session at mount. Verified against
+  the host source: `Session.prompt` wakes an idle session
+  (`packages/core/src/session/session.ts`, `execution.wake`), so a bound idle
+  session reacts to incoming mail.
 
 ## [0.9.0] - 2026-11-22
 

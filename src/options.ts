@@ -13,12 +13,6 @@ export type PluginOptions = {
   port?: number;
   bind?: "loopback" | "lan";
   advertise?: boolean;
-  /** Declarative mailbox for this instance: bound at TUI bind time and
-   * re-bound on every session start (the box follows the instance across
-   * restarts without any tool call). */
-  mailbox?: string;
-  /** Informational role stored with the declarative mailbox. */
-  mailboxRole?: string;
   /** Disable the mailbox wake loop (default: enabled). */
   wake?: boolean;
   /** Wake poll interval in ms (default 5000). */
@@ -75,20 +69,6 @@ export function parseOptions(raw: PluginOptions | undefined): PluginOptions {
       throw new Error("opencode-mesh: options.wake must be a boolean");
     }
     options.wake = raw.wake;
-  }
-  if (raw.mailbox !== undefined) {
-    if (typeof raw.mailbox !== "string" || !/^[A-Za-z0-9._-]{1,64}$/.test(raw.mailbox)) {
-      throw new Error(
-        "opencode-mesh: options.mailbox must be 1-64 chars of letters, digits, . _ -",
-      );
-    }
-    options.mailbox = raw.mailbox;
-  }
-  if (raw.mailboxRole !== undefined) {
-    if (typeof raw.mailboxRole !== "string" || raw.mailboxRole.length === 0) {
-      throw new Error("opencode-mesh: options.mailboxRole must be a non-empty string");
-    }
-    options.mailboxRole = raw.mailboxRole;
   }
   if (raw.wakeIntervalMs !== undefined) {
     if (

@@ -96,6 +96,7 @@ export const MeshPlugin: Plugin = async (input, rawOptions?: PluginOptions) => {
         dataDir,
         serverAddress: address,
         port,
+        bindKey: `v1:${dataDir}`,
         worktreeClient,
         spawnFn,
       }).map((spec) => [
