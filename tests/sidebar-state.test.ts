@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { Plugin } from "@opencode/plugin/tui";
+import type { Plugin } from "@opencode/plugin/tui";
 
 import { createSidebarState } from "../src/sidebar-state.js";
 

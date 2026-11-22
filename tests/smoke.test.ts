@@ -56,12 +56,17 @@ describe("smoke: plugin module", () => {
     expect(Object.keys(hooks).sort()).toEqual(["dispose", "tool"]);
     expect(Object.keys(hooks.tool ?? {}).sort()).toEqual([
       "mesh_inbox",
+      "mesh_join",
+      "mesh_leave",
       "mesh_lock",
       "mesh_pair",
+      "mesh_pools",
+      "mesh_register",
       "mesh_send",
       "mesh_spawn",
       "mesh_status",
       "mesh_unlock",
+      "mesh_wait",
       "mesh_worker_logs",
       "mesh_worker_remove",
       "mesh_worker_stop",

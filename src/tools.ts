@@ -3,7 +3,22 @@ import { sendMail } from "./lib/client.js";
 import type { MeshDb } from "./lib/db.js";
 import { tailnetAddresses } from "./lib/discovery.js";
 import { pairingProof, type NodeIdentity } from "./lib/identity.js";
-import { ackMessages, unreadMessages } from "./lib/mail.js";
+import {
+  ackInbox,
+  ackMessages,
+  ackReply,
+  deliverMessage,
+  firstReply,
+  inboxRows,
+  joinPool,
+  leavePool,
+  listMailboxes,
+  mailboxBySession,
+  registerMailbox,
+  touchMailbox,
+  unreadCount,
+  unreadMessages,
+} from "./lib/mail.js";
 import { listLocks, releaseLock, tryLock } from "./lib/locks.js";
 import {
   createPairingToken,
@@ -62,6 +77,15 @@ function bool(name: string, description: string): ToolField {
   return { name, type: "boolean", required: false, description };
 }
 
+// The host normally always provides a session id; normalizing keeps tools
+// usable in contexts without one (tests, exotic hosts) instead of crashing
+// on a SQLite bind with undefined.
+function sessionID(context: ToolContext): string {
+  return typeof context?.sessionID === "string" && context.sessionID.length > 0
+    ? context.sessionID
+    : "";
+}
+
 export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
   const { db, identity, dataDir, serverAddress, port, worktreeClient, spawnFn } = mesh;
   return [
@@ -72,6 +96,7 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
       execute: async () => {
         const peers = listPeers(db);
         const tailnet = await tailnetAddresses();
+        const now = Date.now();
         return JSON.stringify(
           {
             node_id: identity.node_id,
@@ -85,6 +110,14 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
               paired: p.paired,
               addresses: p.addresses,
             })),
+            mailboxes: listMailboxes(db).map((b) => ({
+              name: b.name,
+              role: b.role,
+              pools: b.pools,
+              last_seen: b.last_seen,
+              age_s: Math.round((now - b.last_seen) / 1000),
+            })),
+            unread: unreadCount(db),
             locks: listLocks(db, { now: Date.now() }),
           },
           null,
@@ -128,54 +161,206 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
     },
 
     {
-      name: "mesh_send",
-      description: "Send a message to a paired peer's mailbox.",
+      name: "mesh_register",
+      description:
+        "Register this session's mailbox under a name so other sessions and pools can route mail to it.",
       fields: [
-        str("peer", "Peer node id or hostname"),
+        str("name", "Mailbox name: letters, digits, . _ - (max 64 chars)"),
+        str("role", "Informational role, e.g. manager", false),
+      ],
+      execute: async (args, context) => {
+        const name = String(args.name);
+        if (!/^[A-Za-z0-9._-]{1,64}$/.test(name)) {
+          return "error: mailbox name must be 1-64 chars of letters, digits, . _ -";
+        }
+        const sid = sessionID(context);
+        if (sid.length === 0) {
+          return "error: no session context; cannot register a mailbox";
+        }
+        registerMailbox(db, {
+          name,
+          session_id: sid,
+          ...(typeof args.role === "string" && args.role.length > 0 ? { role: args.role } : {}),
+          now: Date.now(),
+        });
+        return `mailbox ${name} registered for this session`;
+      },
+    },
+
+    {
+      name: "mesh_send",
+      description:
+        "Send a message: to a mailbox name, 'team:<pool>' or 'all' on this node, or to a paired peer on another node.",
+      fields: [
+        str("peer", "Peer node id or hostname (remote send)", false),
+        str("to", "Mailbox name, 'team:<pool>' or 'all' (local delivery)", false),
         str("subject", "Short subject"),
         str("body", "Message body"),
+        str("reply_to", "Message id this message answers, from mesh_send output", false),
       ],
-      execute: async (args) => {
-        const peer = String(args.peer);
-        const target = findSendablePeer(db, peer);
-        if (target === null) {
-          return `error: no paired peer matching ${peer}; run mesh_status`;
+      execute: async (args, context) => {
+        const peer = typeof args.peer === "string" ? args.peer : null;
+        const to = typeof args.to === "string" ? args.to : null;
+        if (peer === null && to === null) {
+          return "error: mesh_send needs a peer (remote) or a to (mailbox, team:<pool> or all)";
         }
-        const url = resolvePeerUrl(db, peer);
-        if (url === null) {
-          return `error: peer ${target.node_id} has no known address with a port; have it run mesh_pair to share its address, or wait for discovery`;
+        const from_box = mailboxBySession(db, sessionID(context))?.name ?? null;
+        touchMailbox(db, sessionID(context), Date.now());
+        const extras = {
+          ...(to !== null ? { to } : {}),
+          ...(typeof args.reply_to === "string" ? { reply_to: args.reply_to } : {}),
+          ...(from_box !== null ? { from_box } : {}),
+        };
+        if (peer !== null) {
+          const target = findSendablePeer(db, peer);
+          if (target === null) {
+            return `error: no paired peer matching ${peer}; run mesh_status`;
+          }
+          const url = resolvePeerUrl(db, peer);
+          if (url === null) {
+            return `error: peer ${target.node_id} has no known address with a port; have it run mesh_pair to share its address, or wait for discovery`;
+          }
+          // Every mail carries a pairing proof signed by this node's key: it is
+          // what lets the receiving side bind (or rotate) a pairing to us without
+          // trusting the bearer token alone.
+          const result = await sendMail({
+            url,
+            token: target.token ?? "",
+            from: identity.node_id,
+            subject: String(args.subject),
+            body: String(args.body),
+            proof: pairingProof(identity, target.token ?? ""),
+            ...extras,
+          });
+          return `sent to ${target.node_id}: ${result}`;
         }
-        // Every mail carries a pairing proof signed by this node's key: it is
-        // what lets the receiving side bind (or rotate) a pairing to us without
-        // trusting the bearer token alone.
-        const result = await sendMail({
-          url,
-          token: target.token ?? "",
+        const result = deliverMessage(db, {
           from: identity.node_id,
+          from_box,
+          to_box: to!,
           subject: String(args.subject),
           body: String(args.body),
-          proof: pairingProof(identity, target.token ?? ""),
+          reply_to: typeof args.reply_to === "string" ? args.reply_to : null,
         });
-        return `sent to ${target.node_id}: ${result}`;
+        if (!result.ok) {
+          return result.error === "unknown_mailbox"
+            ? `error: unknown mailbox/pool ${to}`
+            : `error: broadcast ${to} has no recipients`;
+        }
+        return JSON.stringify({ id: result.id, recipients: result.recipients }, null, 2);
       },
     },
 
     {
       name: "mesh_inbox",
-      description: "List unread messages from peers and mark them read.",
+      description:
+        "List unread messages for this session's mailbox (unregistered sessions see the legacy global feed) and mark them read.",
       fields: [bool("ack", "Mark messages read (default true)")],
-      execute: async (args) => {
-        const messages = unreadMessages(db);
-        if (messages.length === 0) {
+      execute: async (args, context) => {
+        const sid = sessionID(context);
+        touchMailbox(db, sid, Date.now());
+        const rows = inboxRows(db, sid);
+        if (rows.length === 0) {
           return "inbox empty";
         }
         if (args.ack !== false) {
+          ackInbox(
+            db,
+            rows.map((r) => r.delivery_id),
+          );
+          // Legacy global rows have no delivery: ack the message rows instead.
           ackMessages(
             db,
-            messages.map((m) => m.id),
+            rows.filter((r) => r.delivery_id === "").map((r) => r.id),
           );
         }
-        return JSON.stringify(messages, null, 2);
+        return JSON.stringify(
+          rows.map((r) => ({
+            id: r.id,
+            delivery_id: r.delivery_id,
+            from: r.from,
+            from_box: r.from_box,
+            subject: r.subject,
+            body: r.body,
+            reply_to: r.reply_to,
+            created_at: r.created_at,
+          })),
+          null,
+          2,
+        );
+      },
+    },
+
+    {
+      name: "mesh_wait",
+      description:
+        "Wait for a reply to one of your sent messages (matching its reply_to) and return it. Blocks the agent turn by design: request/response completes within one turn.",
+      fields: [
+        str("id", "Message id to wait a reply for, from mesh_send output"),
+        num("timeout", "Seconds to wait (default 120)"),
+      ],
+      execute: async (args, context) => {
+        const sid = sessionID(context);
+        touchMailbox(db, sid, Date.now());
+        const seconds = typeof args.timeout === "number" ? args.timeout : 120;
+        const deadline = Date.now() + seconds * 1000;
+        while (Date.now() < deadline) {
+          const row = firstReply(db, String(args.id), sid);
+          if (row) {
+            ackReply(db, row);
+            return JSON.stringify(row, null, 2);
+          }
+          await new Promise((r) => setTimeout(r, 250));
+        }
+        return `timeout: no reply to ${String(args.id)} within ${seconds}s`;
+      },
+    },
+
+    {
+      name: "mesh_join",
+      description: "Join a pool (e.g. team:x) so broadcasts to that pool reach this mailbox.",
+      fields: [str("pool", "Pool id, e.g. team:x")],
+      execute: async (args, context) => {
+        const box = mailboxBySession(db, sessionID(context));
+        if (!box) {
+          return "error: run mesh_register first";
+        }
+        const pool = String(args.pool);
+        joinPool(db, box.name, pool);
+        return `joined ${pool}`;
+      },
+    },
+
+    {
+      name: "mesh_leave",
+      description: "Leave a pool joined with mesh_join.",
+      fields: [str("pool", "Pool id, e.g. team:x")],
+      execute: async (args, context) => {
+        const box = mailboxBySession(db, sessionID(context));
+        if (!box) {
+          return "error: run mesh_register first";
+        }
+        const pool = String(args.pool);
+        leavePool(db, box.name, pool);
+        return `left ${pool}`;
+      },
+    },
+
+    {
+      name: "mesh_pools",
+      description: "List pools and their member mailboxes.",
+      fields: [],
+      execute: async () => {
+        const pools: Record<string, string[]> = {};
+        for (const box of listMailboxes(db)) {
+          for (const pool of box.pools) {
+            if (!pools[pool]) {
+              pools[pool] = [];
+            }
+            pools[pool].push(box.name);
+          }
+        }
+        return JSON.stringify(pools, null, 2);
       },
     },
 

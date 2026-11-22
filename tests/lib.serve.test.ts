@@ -10,6 +10,13 @@ import { request } from "node:http";
 import { connect } from "node:net";
 
 import { openMeshDb } from "../src/lib/db.js";
+import {
+  inboxRows,
+  MESSAGE_TTL_MS,
+  receiveMessage,
+  registerMailbox,
+  unreadMessages,
+} from "../src/lib/mail.js";
 import { pairingProof, pairingProofPayload, signPairingProof } from "../src/lib/identity.js";
 import { pairWithToken, upsertDiscoveredPeer, createPairingToken } from "../src/lib/peers.js";
 import { startMeshServer } from "../src/lib/serve.js";
@@ -456,6 +463,102 @@ describe("mesh server status auth", () => {
 
     const response = await fetch(`${url}/status`, { headers: { authorization: "Bearer wrong" } });
     expect(response.status).toBe(401);
+
+    server.close();
+    db.close();
+  });
+});
+
+describe("mesh server mailboxes", () => {
+  it("routes remote mail with a known to-box into that box's deliveries only", async () => {
+    const { db, server, url } = await start();
+    pairWithToken(db, {
+      node_id: "peer1",
+      hostname: "laptop",
+      fingerprint: "ff00",
+      token: "tok-peer1",
+    });
+    registerMailbox(db, { name: "dev", session_id: "sess-dev", now: Date.now() });
+
+    const response = await post(
+      url,
+      "/mail",
+      { subject: "task", body: "hello box", from: "peer1", to: "dev" },
+      "tok-peer1",
+    );
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { ok: boolean; unread: number; delivered: number };
+    expect(body).toEqual({ ok: true, unread: 1, delivered: 1 });
+
+    const inbox = inboxRows(db, "sess-dev");
+    expect(inbox).toHaveLength(1);
+    expect(inbox[0]?.subject).toBe("task");
+    expect(inbox[0]?.from).toBe("peer1");
+    // Targeted mail never lands in the legacy global inbox too.
+    expect(unreadMessages(db)).toHaveLength(0);
+
+    server.close();
+    db.close();
+  });
+
+  it("falls back to the global inbox when the addressed box is unknown", async () => {
+    const { db, server, url } = await start();
+    pairWithToken(db, {
+      node_id: "peer1",
+      hostname: "laptop",
+      fingerprint: "ff00",
+      token: "tok-peer1",
+    });
+
+    const response = await post(
+      url,
+      "/mail",
+      { subject: "stray", body: "no box here", from: "peer1", to: "ghost" },
+      "tok-peer1",
+    );
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { ok: boolean; unread: number; delivered: number };
+    expect(body).toEqual({ ok: true, unread: 1, delivered: 0 });
+
+    const inbox = unreadMessages(db);
+    expect(inbox).toHaveLength(1);
+    expect(inbox[0]?.subject).toBe("stray");
+
+    server.close();
+    db.close();
+  });
+
+  it("reports delivered: 0 (not an error) for a broadcast with no local members", async () => {
+    const { db, server, url } = await start();
+    pairWithToken(db, {
+      node_id: "peer1",
+      hostname: "laptop",
+      fingerprint: "ff00",
+      token: "tok-peer1",
+    });
+
+    const response = await post(
+      url,
+      "/mail",
+      { subject: "all", body: "to everyone", from: "peer1", to: "all" },
+      "tok-peer1",
+    );
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { ok: boolean; unread: number; delivered: number };
+    expect(body).toEqual({ ok: true, unread: 0, delivered: 0 });
+
+    server.close();
+    db.close();
+  });
+
+  it("sweeps messages older than 7 days when the server boots", async () => {
+    const db = openMeshDb(":memory:");
+    receiveMessage(db, { from: "n0", subject: "old", body: "b" });
+    db.conn.run("UPDATE messages SET created_at = ?", [Date.now() - MESSAGE_TTL_MS - 1]);
+    receiveMessage(db, { from: "n0", subject: "fresh", body: "b" });
+
+    const { server } = await startMeshServer({ db, port: 0 });
+    expect(unreadMessages(db).map((m) => m.subject)).toEqual(["fresh"]);
 
     server.close();
     db.close();

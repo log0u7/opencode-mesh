@@ -3,7 +3,13 @@ import { createServer } from "node:http";
 
 import type { MeshDb } from "./db.js";
 import { authenticateToken } from "./peers.js";
-import { receiveMessage, unreadCount } from "./mail.js";
+import {
+  deliverMessage,
+  MESSAGE_TTL_MS,
+  purgeExpired,
+  receiveMessage,
+  unreadCount,
+} from "./mail.js";
 
 const BODY_LIMIT = 64 * 1024;
 
@@ -26,6 +32,9 @@ export type MeshServer = {
 // port is taken (two mesh nodes on one machine, e.g. a spawned worker loading
 // the same plugin), fall back to an ephemeral port instead of crashing.
 export async function startMeshServer(options: MeshServerOptions): Promise<MeshServer> {
+  // Messages older than 7 days are swept at boot.
+  purgeExpired(options.db, MESSAGE_TTL_MS, Date.now());
+
   const host = options.bind === "lan" ? "0.0.0.0" : DEFAULT_BIND;
   const server = createServer((req, res) => {
     void handle(options.db, req, res);
@@ -102,8 +111,34 @@ async function handle(db: MeshDb, req: IncomingMessage, res: ServerResponse): Pr
       json(res, 401, { error: "from does not match token" });
       return;
     }
-    receiveMessage(db, parsed);
-    json(res, 200, { ok: true, unread: unreadCount(db) });
+    // Addressed mail first: a known box routes to per-box deliveries, an
+    // unknown box falls back to the legacy global inbox so remote mail is
+    // never lost, and a broadcast with no local members is not an error.
+    const result = deliverMessage(db, {
+      from: parsed.from,
+      from_box: parsed.from_box ?? null,
+      to_box: parsed.to ?? null,
+      subject: parsed.subject,
+      body: parsed.body,
+      reply_to: parsed.reply_to ?? null,
+    });
+    let delivered = 0;
+    if (!result.ok && result.error === "unknown_mailbox") {
+      receiveMessage(db, {
+        from: parsed.from,
+        subject: parsed.subject,
+        body: parsed.body,
+        ...(parsed.from_box !== undefined ? { from_box: parsed.from_box } : {}),
+        ...(parsed.reply_to !== undefined ? { reply_to: parsed.reply_to } : {}),
+      });
+    } else if (result.ok) {
+      delivered = result.recipients.length;
+    }
+    json(res, 200, {
+      ok: true,
+      unread: unreadCount(db) + unreadDeliveries(db),
+      delivered,
+    });
     return;
   }
 
@@ -169,6 +204,16 @@ function readBody(req: IncomingMessage): Promise<BodyResult> {
   });
 }
 
+// Unread deliveries across every box, added to the legacy global count for
+// the /mail and /status unread totals.
+function unreadDeliveries(db: MeshDb): number {
+  return (
+    db.conn.get<{ count: number }>(
+      "SELECT COUNT(*) AS count FROM deliveries WHERE status = 'unread'",
+    )?.count ?? 0
+  );
+}
+
 function parseMail(raw: string): MailBody | null {
   try {
     const parsed = JSON.parse(raw) as Partial<MailBody>;
@@ -184,6 +229,9 @@ function parseMail(raw: string): MailBody | null {
       subject: parsed.subject,
       body: parsed.body,
       ...(typeof parsed.proof === "string" ? { proof: parsed.proof } : {}),
+      ...(typeof parsed.to === "string" ? { to: parsed.to } : {}),
+      ...(typeof parsed.from_box === "string" ? { from_box: parsed.from_box } : {}),
+      ...(typeof parsed.reply_to === "string" ? { reply_to: parsed.reply_to } : {}),
     };
   } catch {
     return null;
@@ -195,6 +243,9 @@ type MailBody = {
   subject: string;
   body: string;
   proof?: string;
+  to?: string;
+  from_box?: string;
+  reply_to?: string;
 };
 
 function json(res: ServerResponse, status: number, body: unknown): void {

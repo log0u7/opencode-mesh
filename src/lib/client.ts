@@ -4,6 +4,12 @@ export type SendTarget = {
   from: string;
   subject: string;
   body: string;
+  /** Target mailbox on the peer, when the mail is addressed to a box. */
+  to?: string;
+  /** The sending node's own mailbox name, when it has one. */
+  from_box?: string;
+  /** Message id this mail replies to. */
+  reply_to?: string;
   /** `<base64 spki>.<base64 ed25519 signature>` over node_id:token. */
   proof?: string;
 };
@@ -24,6 +30,9 @@ export async function sendMail(target: SendTarget): Promise<SendResult> {
         from: target.from,
         subject: target.subject,
         body: target.body,
+        ...(target.to !== undefined ? { to: target.to } : {}),
+        ...(target.from_box !== undefined ? { from_box: target.from_box } : {}),
+        ...(target.reply_to !== undefined ? { reply_to: target.reply_to } : {}),
         ...(target.proof !== undefined ? { proof: target.proof } : {}),
       }),
       signal: AbortSignal.timeout(5000),
