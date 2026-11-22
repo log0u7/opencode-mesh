@@ -5,7 +5,15 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.10.3] - 2026-11-22
+## [0.10.4] - 2026-11-22
+
+### Fixed
+
+- The 0.10.3 mailboxes rebuild (drop `UNIQUE(session_id)`) was dead code on
+  existing databases: `SCHEMA_VERSION` was not bumped, so v5 stores skipped
+  the migration entirely and multi-box stayed broken on every pre-0.10.3
+  database. Version bumped to 6 — the rebuild now runs on open. New databases
+  were unaffected (fresh schema already correct).
 
 ### Fixed
 
