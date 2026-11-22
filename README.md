@@ -6,11 +6,9 @@
 [![Node.js](https://img.shields.io/node/v/@log0u7/opencode-mesh?logo=node.js&logoColor=white)](https://www.npmjs.com/package/@log0u7/opencode-mesh)
 [![npm](https://img.shields.io/npm/v/@log0u7/opencode-mesh)](https://www.npmjs.com/package/@log0u7/opencode-mesh)
 
-Coordination for [OpenCode](https://opencode.ai): multiple sessions working together on one machine, and a peer pool across a LAN or a Tailscale tailnet.
+opencode-mesh turns your machines into a fleet of (almost) autonomous agents: named mailboxes, team pools, automatic wake for idle sessions, an anchored shared memory, and a playbook of roles.
 
-Each node advertises itself over mDNS, pairs with explicit operator approval (per-peer bearer tokens, deny by default), then sessions can exchange messages (`mesh_send` / `mesh_inbox`) and coordinate on shared work (`mesh_lock` / `mesh_unlock`). Tailscale IPs are picked up automatically when `tailscale status` works, for cross-subnet pools.
-
-`mesh_lock` is **local to your machine**: it is enforced between OpenCode sessions sharing this host's data directory (`~/.local/share/opencode-mesh/`). Locks are not part of the wire protocol, so a peer on another node does not see or respect them. Remote nodes coordinate through messages (`mesh_send`), not locks.
+Sessions coordinate on one machine, and pools federate across a LAN or a Tailscale tailnet: agents self-enroll at their first turn, wake on incoming work, and report `status:` to their team so an orchestrator can consolidate the state of the fleet. Security stays deny-by-default: pairing requires explicit operator approval with per-peer bearer tokens, and every mail carries an Ed25519 proof.
 
 ## Why
 
@@ -35,10 +33,26 @@ flowchart LR
 
 ## Highlights
 
+- **Named mailboxes, one per agent hat.** `mesh_register` binds a session to a named box; one session can wear several hats (one box per role); a restart re-binds the stamped boxes automatically, and re-registering a name from another session is a handoff (last binder wins).
+- **Team pools with broadcast.** `team:*` pools carry announcements (`status:` / `decision:` / `alert:`), while discussion stays in DMs; `mesh_wait(id, timeout)` closes a request/response within one turn.
+- **Wake idle agents.** A host-side loop watches mailboxes (5 s poll, 60 s per-mailbox cooldown) and injects a prompt into idle sessions, so an agent reacts to incoming work without a human relaying the message.
+- **Multi-host federation.** Pair hosts with a 6-digit code; `team:*` broadcasts fan out to paired peers with anti-loop `via[]` and `origin_id` dedup, and each host keeps master of its own boxes and wake.
+- **Anchored shared memory.** The fleet ledger lives in [opencode-memory](https://www.npmjs.com/package/@log0u7/opencode-memory) 0.11+: epics and tasks anchored to the code they touch self-stale when the code moves, and `supersedes` (0.12+) keeps one truth per decision instead of stacking duplicates.
 - **Spawn headless workers in one call.** `mesh_spawn(task, name)` starts an isolated OpenCode worktree per worker; `mesh_workers`, `mesh_worker_logs`, `mesh_worker_stop` and `mesh_worker_remove` track and reap them. A pool of N workers costs N worktrees, not N mesh nodes.
-- **Deny by default.** Every endpoint requires a per-peer bearer token except the rate-limited pairing bootstrap; pairing codes and offers expire after 30 minutes; pairing is one `mesh_pair` call per side; every mail carries an Ed25519 proof, so a leaked offer or code alone cannot install or rotate a live credential.
-- **File claims between sessions.** `mesh_lock` gives exclusive claims on paths, enforced between sessions on the same machine, so two agents never edit the same file.
+- **Deny by default.** Every endpoint requires a per-peer bearer token except the rate-limited pairing bootstrap; pairing codes and offers expire after 30 minutes; every mail carries an Ed25519 proof, so a leaked offer or code alone cannot install or rotate a live credential.
+- **File claims between sessions.** `mesh_lock` gives exclusive claims on paths, enforced between sessions on the same machine (not part of the wire protocol), so two agents never edit the same file.
 - **Deliberately simple wire protocol.** mDNS for discovery, bearer tokens for auth, four HTTP routes (`/mail`, `/status`, `/pools`, `/pair-code`), plain HTTP over loopback and trusted networks.
+
+## Fleet in 10 minutes
+
+1. **Install the plugin on every host.** See [Install](#install) below, then restart OpenCode.
+2. **Pair the hosts.** `mesh_pair()` on host A emits a 6-digit code (30 min); `mesh_pair(code="...")` on host B completes it. One call per side, both paired.
+3. **Paste a role prompt.** Pick a role from the [playbook](docs/PLAYBOOK.md) (orchestrator, team lead, bridge, ops, worker pair) into each agent's instructions.
+4. **Let the agents self-enroll.** At their first turn they run `mesh_register` / `mesh_join` and confirm by DM to their lead; after a restart, TUI sessions re-bind their boxes automatically.
+5. **Wake does the relaying.** Idle agents are prompted when mail lands in their box; leads post `status:` per team; discussions stay in DMs.
+6. **The orchestrator consolidates.** It maintains the global TODO as opencode-memory entries anchored to the code they touch, and posts a daily digest per team.
+
+Roles, enrollment lifecycle and rituals: [docs/PLAYBOOK.md](docs/PLAYBOOK.md). Multi-team wiring models: [docs/ORGANIZATION.md](docs/ORGANIZATION.md).
 
 ## Install
 
@@ -154,7 +168,9 @@ draining the inbox ate everyone's messages. Mailboxes fix the routing:
 - Retention: messages older than 7 days are swept at server boot.
 
 Multi-team wiring (flat teams, a `tower` orchestrator, a manager hierarchy,
-ad-hoc squads) is documented in [docs/ORGANIZATION.md](docs/ORGANIZATION.md).
+ad-hoc squads) is documented in [docs/ORGANIZATION.md](docs/ORGANIZATION.md),
+and the role prompts plus the enrollment lifecycle in
+[docs/PLAYBOOK.md](docs/PLAYBOOK.md).
 
 ### Tools
 
@@ -238,7 +254,8 @@ pnpm smoke:dist        # build, then load dist/ under plain Node (no vitest shim
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the workflow, and the [docs/](docs/) folder for
-[configuration](docs/CONFIGURATION.md), [architecture](docs/ARCHITECTURE.md), and the
+[configuration](docs/CONFIGURATION.md), [architecture](docs/ARCHITECTURE.md), the
+[organization models](docs/ORGANIZATION.md), the fleet [playbook](docs/PLAYBOOK.md), and the
 wire [protocol](docs/PROTOCOL.md).
 
 ## License
