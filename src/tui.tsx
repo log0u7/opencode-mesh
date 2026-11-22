@@ -14,14 +14,17 @@ const REFRESH_MS = 15_000;
 /** quota-style event refresh: debounced immediate refresh after activity. */
 const EVENT_DEBOUNCE_MS = 150;
 
-function themedSidebar(theme: Theme, lines: () => string[] | null): JSX.Element {
+function themedBody(theme: Theme, lines: () => string[] | null, unread: number): JSX.Element {
   return (
     <Show when={lines()} keyed>
       {(current) => (
-        <box>
+        <box gap={0}>
           <For each={current}>
             {(line, index) => (
-              <text fg={index() === 0 ? theme.text.base : theme.text.muted} wrapMode="none">
+              <text
+                fg={index() === 0 && unread > 0 ? theme.text.base : theme.text.muted}
+                wrapMode="none"
+              >
                 {line}
               </text>
             )}
@@ -66,11 +69,16 @@ export default Plugin.define({
     const [lines, setLines] = createSignal<string[] | null>(null);
 
     // Live sidebar: poll the server-side snapshot over RPC. On a v1 host (no
-    // RPC) or while the server is unreachable, the slot stays hidden.
+    // RPC) or while the server is unreachable, the slot stays hidden. The
+    // sessionID arrives with the slot input (see register below).
     const mesh = context.client.rpc(MeshRpc);
+    const sessionId = createSignal<string | null>(null);
     const refresh = async () => {
       try {
-        const snap = (await mesh.snapshot({})) as MeshSnapshot;
+        const sid = sessionId[0]();
+        const snap = (await mesh.snapshot({
+          ...(sid !== null ? { sessionID: sid } : {}),
+        })) as MeshSnapshot;
         setSnapshot(snap);
         setLines(formatMeshSidebar(snap, store.collapsed));
       } catch {
@@ -100,7 +108,37 @@ export default Plugin.define({
 
     const unregister = context.ui.slot({
       append: "sidebar.content",
-      render: () => themedSidebar(theme, lines),
+      render: (input) => {
+        if (input.sessionID !== sessionId[0]()) {
+          sessionId[1](input.sessionID);
+          schedule();
+        }
+        const unread = snapshot()?.me?.unread ?? 0;
+        return (
+          <box gap={0}>
+            <box flexDirection="row">
+              <text
+                fg={theme.text.base}
+                onMouseDown={() => {
+                  void mutate((draft) => {
+                    draft.collapsed = !draft.collapsed;
+                  }).then(() => void refresh());
+                }}
+              >
+                <b>{store.collapsed ? "▶ Mesh" : "▼ Mesh"}</b>
+              </text>
+              <Show when={store.collapsed}>
+                <text fg={theme.text.muted}>
+                  {unread > 0
+                    ? ` (${unread} unread)`
+                    : ` (${snapshot()?.mailboxes.length ?? 0} agents)`}
+                </text>
+              </Show>
+            </box>
+            <box gap={0}>{themedBody(theme, lines, unread)}</box>
+          </box>
+        );
+      },
     });
 
     // Keymap layers are disposed with the plugin; no manual disposer here.

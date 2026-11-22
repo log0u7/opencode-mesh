@@ -1,8 +1,15 @@
 import { Rpc } from "@opencode/plugin/rpc";
 
 // The TUI sidebar reads one compact snapshot per tick over RPC. The pure helpers
-// (snapshotFromMesh, formatMeshLines) are testable without a renderer; the
+// (snapshotFromMesh, formatMeshSidebar) are testable without a renderer; the
 // definition itself carries the wire schema.
+
+export type MailboxInfo = {
+  name: string;
+  role: string | null;
+  pools: string[];
+  age_s: number;
+};
 
 export type MeshSnapshot = {
   node_id: string;
@@ -10,6 +17,12 @@ export type MeshSnapshot = {
   /** Paired peers only: discovery alone never makes a peer sendable. */
   peers: Array<{ node_id: string; hostname: string }>;
   active_locks: number;
+  /** The mailbox bound to the session that asked (null when unregistered). */
+  me: { name: string; role: string | null; unread: number } | null;
+  /** Every registered mailbox on this node, oldest first. */
+  mailboxes: MailboxInfo[];
+  /** pool id -> member mailbox names. */
+  pools: Record<string, string[]>;
 };
 
 /** Structural input: the mesh context (identity, listPeers, listLocks) satisfies this. */
@@ -18,6 +31,9 @@ export type SnapshotInput = {
   peers: ReadonlyArray<{ node_id: string; hostname: string; paired: boolean }>;
   locks: ReadonlyArray<unknown>;
   server: string;
+  my: { name: string; role: string | null; unread: number } | null;
+  mailboxes: ReadonlyArray<MailboxInfo>;
+  pools: Record<string, string[]>;
 };
 
 export function snapshotFromMesh(data: SnapshotInput): MeshSnapshot {
@@ -28,13 +44,60 @@ export function snapshotFromMesh(data: SnapshotInput): MeshSnapshot {
       .filter((p) => p.paired)
       .map((p) => ({ node_id: p.node_id, hostname: p.hostname })),
     active_locks: data.locks.length,
+    me: data.my,
+    mailboxes: [...data.mailboxes],
+    pools: { ...data.pools },
   };
 }
 
-/** Sidebar lines: the node, one line per paired peer, the active lock count. */
+// Presence thresholds: fresh under 2 minutes, warm under 15.
+export const PRESENCE_FRESH_S = 120;
+export const PRESENCE_WARM_S = 900;
+
+export function presenceMark(age_s: number): string {
+  if (age_s <= PRESENCE_FRESH_S) return "●";
+  if (age_s <= PRESENCE_WARM_S) return "○";
+  return "";
+}
+
+export function formatAge(age_s: number): string {
+  if (age_s < 60) return `${age_s}s`;
+  return `${Math.floor(age_s / 60)}m`;
+}
+
+function formatMember(m: MailboxInfo): string {
+  const mark = presenceMark(m.age_s);
+  const age = formatAge(m.age_s);
+  return mark ? `${mark} ${m.name} ${age}` : `${m.name} ${age}`;
+}
+
+function formatPoolLine(pool: string, members: string[], byName: Map<string, MailboxInfo>): string {
+  const parts: string[] = [];
+  for (const name of members.slice(0, 4)) {
+    const box = byName.get(name);
+    parts.push(box ? formatMember(box) : name);
+  }
+  if (members.length > 4) {
+    parts.push(`+${members.length - 4}`);
+  }
+  return `${pool}: ${parts.join(" · ")}`;
+}
+
+/** Sidebar lines: my mailbox (unread first), one line per pool, peers, locks. */
 export function formatMeshLines(s: MeshSnapshot): string[] {
-  const self = s.hostname.length > 0 ? s.hostname : s.node_id;
-  const lines = [`mesh: ${self}`];
+  const lines: string[] = [];
+  if (s.me) {
+    const role = s.me.role ? ` (${s.me.role})` : "";
+    const unread = s.me.unread > 0 ? ` ● ${s.me.unread} unread` : "";
+    lines.push(`${s.me.name}${role}${unread}`);
+  } else {
+    lines.push("no mailbox — mesh_register");
+  }
+  const byName = new Map(s.mailboxes.map((m) => [m.name, m]));
+  for (const [pool, members] of Object.entries(s.pools)) {
+    if (members.length === 0) continue;
+    lines.push(formatPoolLine(pool, members, byName));
+  }
   if (s.peers.length === 0) {
     lines.push("no paired peers");
   } else {
@@ -48,24 +111,31 @@ export function formatMeshLines(s: MeshSnapshot): string[] {
   return lines;
 }
 
-/** Collapsible sidebar: when collapsed, one header line with the peer count (plus locks). */
+/** Collapsed: header summary is rendered by the component; this returns the
+ * counts it needs (unread, agents, pools) as one muted line. */
 export function formatMeshSidebar(s: MeshSnapshot, collapsed: boolean): string[] {
   if (!collapsed) {
     return formatMeshLines(s);
   }
-  const self = s.hostname.length > 0 ? s.hostname : s.node_id;
-  const lines = [`mesh: ${self} (${s.peers.length} peers)`];
-  if (s.active_locks > 0) {
-    lines.push(`${s.active_locks} active lock(s)`);
-  }
-  return lines;
+  const unread = s.me?.unread ?? 0;
+  const parts: string[] = [];
+  if (unread > 0) parts.push(`${unread} unread`);
+  parts.push(`${s.mailboxes.length} agents`);
+  parts.push(`${Object.keys(s.pools).length} pools`);
+  return [parts.join(" · ")];
 }
 
 export const MeshRpc = Rpc.define({
   id: "mesh",
   methods: {
     snapshot: {
-      input: { type: "object", properties: {}, additionalProperties: false },
+      input: {
+        type: "object",
+        properties: {
+          sessionID: { type: "string", description: "The session asking (resolves its mailbox)" },
+        },
+        additionalProperties: false,
+      },
       output: {
         type: "object",
         properties: {
@@ -85,8 +155,39 @@ export const MeshRpc = Rpc.define({
             description: "Paired peers",
           },
           active_locks: { type: "number", description: "Active local file locks" },
+          me: {
+            type: ["object", "null"],
+            properties: {
+              name: { type: "string" },
+              role: { type: ["string", "null"] },
+              unread: { type: "number" },
+            },
+            required: ["name", "role", "unread"],
+            additionalProperties: false,
+            description: "The asking session's mailbox, null when unregistered",
+          },
+          mailboxes: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: {
+                name: { type: "string" },
+                role: { type: ["string", "null"] },
+                pools: { type: "array", items: { type: "string" } },
+                age_s: { type: "number" },
+              },
+              required: ["name", "role", "pools", "age_s"],
+              additionalProperties: false,
+            },
+            description: "Registered mailboxes on this node",
+          },
+          pools: {
+            type: "object",
+            additionalProperties: { type: "array", items: { type: "string" } },
+            description: "Pool id -> member mailbox names",
+          },
         },
-        required: ["node_id", "hostname", "peers", "active_locks"],
+        required: ["node_id", "hostname", "peers", "active_locks", "me", "mailboxes", "pools"],
         additionalProperties: false,
       },
     },

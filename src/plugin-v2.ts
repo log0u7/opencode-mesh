@@ -4,6 +4,7 @@ import { Bonjour } from "bonjour-service";
 import { openMeshDb, type MeshDb } from "./lib/db.js";
 import { advertiseMesh, browseMesh, type AdvertiseHandle } from "./lib/discovery.js";
 import { listLocks } from "./lib/locks.js";
+import { listMailboxes, mailboxBySession, unreadBoxCount } from "./lib/mail.js";
 import { listPeers, upsertDiscoveredPeer } from "./lib/peers.js";
 import { loadOrCreateIdentity, type NodeIdentity } from "./lib/identity.js";
 import { nodeSpawn, stopAllWorkers, type SpawnFn } from "./lib/spawn.js";
@@ -125,13 +126,45 @@ export const MeshV2 = Plugin.define({
     // (anomalyco/opencode#62634).
     const sidebarPersist = createDurableStore(ctx.storage, "@log0u7/opencode-mesh", "mesh-sidebar");
     const rpc = await ctx.rpc.register(MeshRpc, {
-      snapshot: async () =>
-        snapshotFromMesh({
+      snapshot: async (input: unknown) => {
+        const sessionID =
+          typeof input === "object" && input !== null && "sessionID" in input
+            ? (input as { sessionID: unknown }).sessionID
+            : undefined;
+        const myBox =
+          typeof sessionID === "string" && sessionID.length > 0
+            ? mailboxBySession(db, sessionID)
+            : null;
+        const boxes = listMailboxes(db);
+        const pools: Record<string, string[]> = {};
+        for (const box of boxes) {
+          for (const pool of box.pools) {
+            const members = pools[pool] ?? [];
+            members.push(box.name);
+            pools[pool] = members;
+          }
+        }
+        return snapshotFromMesh({
           identity,
           peers: listPeers(db),
           locks: listLocks(db, { now: Date.now() }),
           server: `${address}:${port}`,
-        }),
+          my: myBox
+            ? {
+                name: myBox.name,
+                role: myBox.role,
+                unread: unreadBoxCount(db, myBox.name),
+              }
+            : null,
+          mailboxes: boxes.map((box) => ({
+            name: box.name,
+            role: box.role,
+            pools: [...box.pools],
+            age_s: Math.max(0, Math.round((Date.now() - box.last_seen) / 1000)),
+          })),
+          pools,
+        });
+      },
       sidebar: async () => {
         const state = await sidebarPersist.load<{ collapsed: boolean }>();
         return { collapsed: state?.collapsed === true };
