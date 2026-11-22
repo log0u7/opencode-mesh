@@ -5,6 +5,21 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.4] - 2026-11-22
+
+### Fixed
+
+- No more stale wake prompts for mid-turn sessions. The prompt was queued
+  (`delivery: "queue"`) with the unread count baked in at creation time: a
+  session running a long turn acked the mail during the turn, then received
+  the queued prompt claiming unread messages that were already read (the
+  orchestrator's recurring "false positives"). The plugin now tracks running
+  sessions from the host's durable execution events
+  (`session.execution.started/succeeded/failed/interrupted`) and the wake loop
+  skips them — their turn-start check-in reads the box anyway. Prompts fire
+  only for idle sessions, so the count is fresh at delivery. When the event
+  stream is unavailable, the loop falls back to the previous behavior.
+
 ## [0.9.3] - 2026-11-22
 
 ### Fixed
