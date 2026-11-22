@@ -103,6 +103,7 @@ export const MeshV2 = Plugin.define({
         serverAddress: address,
         port,
         bindKey,
+        fanout,
         worktreeClient,
         spawnFn,
       })) {
