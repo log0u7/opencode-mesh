@@ -108,6 +108,13 @@ draining the inbox ate everyone's messages. Mailboxes fix the routing:
 
 - `mesh_register(name, role?)` binds this session to a named mailbox. One box
   per session; re-registering the same name from another session is a handoff.
+  The box is stamped with an instance binding key (project id + directory): at
+  every session start the TUI re-binds stamped boxes to the live session, so a
+  restart or a replacement session picks its mailboxes back up with no
+  configuration and no re-registration. A static `mailbox` / `mailboxRole`
+  plugin option is available for permanent agents (see
+  [CONFIGURATION.md](docs/CONFIGURATION.md)); on a name collision the last
+  act wins.
 - `mesh_send(to=...)` routes locally by mailbox name, or broadcasts with
   `team:<pool>` (members of a pool) or `all` (every registered box except the
   sender). `peer=...` still sends to a remote node; `to` is honored on the
@@ -126,6 +133,9 @@ draining the inbox ate everyone's messages. Mailboxes fix the routing:
   without a human relaying the message. Disable with `wake: false` in the
   plugin options.
 - Retention: messages older than 7 days are swept at server boot.
+
+Multi-team wiring (flat teams, a `tower` orchestrator, a manager hierarchy,
+ad-hoc squads) is documented in [docs/ORGANIZATION.md](docs/ORGANIZATION.md).
 
 ### Tools
 

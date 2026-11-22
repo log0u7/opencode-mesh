@@ -13,9 +13,8 @@ export type PluginOptions = {
   port?: number;
   bind?: "loopback" | "lan";
   advertise?: boolean;
-  /** Declarative mailbox for this instance: bound at TUI bind time and
-   * re-bound on every session start (the box follows the instance across
-   * restarts without any tool call). */
+  /** Optional declarative mailbox for this instance (re-bound at every TUI
+   * bind, after the dynamic instance-keyed boxes: last act wins). */
   mailbox?: string;
   /** Informational role stored with the declarative mailbox. */
   mailboxRole?: string;

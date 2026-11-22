@@ -93,6 +93,28 @@ concurrency (two opencode sessions in the same repository) is protected by:
 - ephemeral-port fallback: a second node on one machine binds a new port, so
   two nodes never collide, they coexist (see `port-collision.test.ts`).
 
+## Session binding and wake
+
+Each OpenCode instance binds its session to its mailboxes at mount:
+
+1. `mesh_register` stamps the box with an **instance binding key**: the host
+   project id + directory (schema v4, `mailboxes.bind_key`).
+2. The TUI part reports the session id at mount over the `bind` RPC (before
+   any mesh tool call), and the setup side re-binds every box stamped with the
+   same key to the live session.
+3. The optional static `mailbox` option re-binds its box last: on a name
+   collision, configuration wins (last act). Two instances sharing one
+   project key = handoff (last binder wins).
+
+Without this, the wake loop could not fire for a freshly restarted session:
+it only knew the session id from mesh tool calls, and the box stayed bound to
+the dead pre-restart session id. The host side is sound: `Session.prompt`
+always calls `execution.wake` when `resume !== false`
+(`packages/core/src/session/session.ts`), and the run coordinator starts an
+idle execution and promotes queued input — a bound idle session reacts to
+incoming mail within one poll interval (`wakeIntervalMs`, 5 s default, 60 s
+cooldown between prompts).
+
 ## Data directory layout
 
 ```

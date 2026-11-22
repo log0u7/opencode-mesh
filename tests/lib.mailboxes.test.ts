@@ -271,7 +271,14 @@ describe("presence and purge", () => {
 
     const boxes = listMailboxes(d);
     expect(boxes).toEqual([
-      { name: "qm", session_id: "s1", role: "manager", pools: ["team:x"], last_seen: 1000 },
+      {
+        name: "qm",
+        session_id: "s1",
+        role: "manager",
+        pools: ["team:x"],
+        bind_key: null,
+        last_seen: 1000,
+      },
     ]);
     d.close();
   });

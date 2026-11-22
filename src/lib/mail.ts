@@ -14,6 +14,7 @@ export type Mailbox = {
   session_id: string;
   role: string | null;
   pools: string[];
+  bind_key: string | null;
   last_seen: number;
 };
 
@@ -21,6 +22,9 @@ export type RegisterMailboxInput = {
   name: string;
   session_id: string;
   role?: string | null;
+  /** Instance binding: the registering instance's project key. A later bind
+   * from an instance with the same key re-binds the box to its live session. */
+  bind_key?: string | null;
   now: number;
 };
 
@@ -67,6 +71,7 @@ function rowToMailbox(row: MailboxRow): Mailbox {
     session_id: row.session_id,
     role: row.role ?? null,
     pools: parsePools(row.pools),
+    bind_key: row.bind_key ?? null,
     last_seen: row.last_seen,
   };
 }
@@ -76,6 +81,7 @@ type MailboxRow = {
   session_id: string;
   role: string | null;
   pools: string;
+  bind_key: string | null;
   last_seen: number;
   created_at: number;
 };
@@ -101,17 +107,32 @@ export function registerMailbox(db: MeshDb, input: RegisterMailboxInput): Mailbo
     input.name,
   ]);
   db.conn.run(
-    `INSERT INTO mailboxes (name, session_id, role, pools, last_seen, created_at)
-     VALUES (?, ?, ?, '[]', ?, ?)
+    `INSERT INTO mailboxes (name, session_id, role, pools, bind_key, last_seen, created_at)
+     VALUES (?, ?, ?, '[]', ?, ?, ?)
      ON CONFLICT(name) DO UPDATE SET session_id = excluded.session_id,
-       role = excluded.role, last_seen = excluded.last_seen`,
-    [input.name, input.session_id, input.role ?? null, input.now, input.now],
+       role = excluded.role,
+       bind_key = COALESCE(excluded.bind_key, mailboxes.bind_key),
+       last_seen = excluded.last_seen`,
+    [
+      input.name,
+      input.session_id,
+      input.role ?? null,
+      input.bind_key ?? null,
+      input.now,
+      input.now,
+    ],
   );
   const row = db.conn.get<MailboxRow>("SELECT * FROM mailboxes WHERE name = ?", [input.name]);
   if (!row) {
     throw new Error("registerMailbox: row missing after upsert");
   }
   return rowToMailbox(row);
+}
+
+export function mailboxByBindKey(db: MeshDb, bind_key: string): Mailbox[] {
+  return db.conn
+    .all<MailboxRow>("SELECT * FROM mailboxes WHERE bind_key = ?", [bind_key])
+    .map(rowToMailbox);
 }
 
 export function mailboxBySession(db: MeshDb, session_id: string): Mailbox | null {

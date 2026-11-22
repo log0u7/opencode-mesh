@@ -5,18 +5,34 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.9.2] - 2026-11-22
 
 ### Fixed
 
 - Wake reliability: the wake loop only knew the session's id after the first
   mesh tool call, so a freshly restarted (or long-idle) session never woke on
   incoming mail, and a mailbox stayed bound to the dead pre-restart session id.
-  The TUI now binds the session id at mount (new `bind` RPC method), and a
-  declarative `mailbox` / `mailboxRole` option re-binds the box to the live
-  session on every start. Verified against the host source: `Session.prompt`
-  wakes an idle session (`packages/core/src/session/session.ts`,
-  `execution.wake`), so a bound idle session reacts to incoming mail.
+  Two coexisting binding paths fix it:
+  - **Dynamic**: `mesh_register` stamps the mailbox with an instance binding
+    key (project id + directory), and the TUI `bind` RPC re-binds every
+    stamped box to the live session at mount — restarts and handoffs need no
+    configuration and no re-registration.
+  - **Static (optional)**: `mailbox` / `mailboxRole` plugin options re-bind
+    their box at every mount; on a name collision the last act wins.
+  Verified against the host source: `Session.prompt` wakes an idle session
+  (`packages/core/src/session/session.ts`, `execution.wake`), so a bound idle
+  session reacts to incoming mail within one poll interval.
+
+### Added
+
+- `docs/ORGANIZATION.md`: four multi-team reference models (flat teams with
+  bridges, a centralized `tower` orchestrator, a manager hierarchy, ad-hoc
+  squads) with mermaid diagrams and the pools-are-announcements convention.
+- `wakeIntervalMs` option (default 5000) to tune the wake poll interval.
+
+### Changed
+
+- Schema v4: `mailboxes.bind_key` (instance binding), migrated in place.
 
 ## [0.9.0] - 2026-11-22
 
