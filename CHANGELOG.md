@@ -5,6 +5,19 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- Wake reliability: the wake loop only knew the session's id after the first
+  mesh tool call, so a freshly restarted (or long-idle) session never woke on
+  incoming mail, and a mailbox stayed bound to the dead pre-restart session id.
+  The TUI now binds the session id at mount (new `bind` RPC method), and a
+  declarative `mailbox` / `mailboxRole` option re-binds the box to the live
+  session on every start. Verified against the host source: `Session.prompt`
+  wakes an idle session (`packages/core/src/session/session.ts`,
+  `execution.wake`), so a bound idle session reacts to incoming mail.
+
 ## [0.9.0] - 2026-11-22
 
 ### Added

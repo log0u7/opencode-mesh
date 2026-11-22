@@ -111,6 +111,9 @@ export default Plugin.define({
       render: (input) => {
         if (input.sessionID !== sessionId[0]()) {
           sessionId[1](input.sessionID);
+          // Bind BEFORE any mesh tool call: a fresh idle session must wake on
+          // incoming mail, and only the TUI knows the sessionID that early.
+          void meshRpc.bind({ sessionID: input.sessionID }).catch(() => {});
           schedule();
         }
         const unread = snapshot()?.me?.unread ?? 0;

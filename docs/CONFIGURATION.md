@@ -33,6 +33,10 @@ On OpenCode 2.x hosts the key is `plugins` and each entry is an object with
 | `port` | `number` | `4399` | Port the mesh HTTP server listens on. Not an integer in `[0, 65535]`: setup fails. When taken (two OpenCode sessions on one machine), the server falls back to an ephemeral port instead of colliding. |
 | `bind` | `"loopback" \| "lan"` | `"loopback"` | `"loopback"` binds `127.0.0.1` (the mesh API stays local); `"lan"` binds `0.0.0.0` for a LAN or tailnet pool. Anything else fails setup. |
 | `advertise` | `boolean` | `true` | Advertise over mDNS (and browse for peers). `false` disables both: the node then pairs only through exchanged `mesh_pair` offers. |
+| `mailbox` | `string` | none | Declarative mailbox for this instance (1-64 chars of letters, digits, `. _ -`). Bound when the TUI mounts and re-bound on every session start: the box follows the instance across restarts, so the wake loop works with no tool call and no manual `mesh_register`. Last binder wins (handoff). |
+| `mailboxRole` | `string` | none | Informational role stored with the declarative mailbox. |
+| `wake` | `boolean` | `true` | The wake loop polls this session's mailbox every `wakeIntervalMs` and injects a prompt (via `ctx.session.prompt`, delivery `queue`) when unread mail arrives, so an idle agent reacts without a human relaying. `false` disables it. |
+| `wakeIntervalMs` | `number` | `5000` | Wake poll interval in ms. Must be a positive integer. |
 | `worktreeClient` | object | none | **Test/injection only.** A REST-shaped worktree client the tools use instead of the host's worktree domain. Not a supported user option. |
 | `spawnFn` | function | `nodeSpawn` | **Test/injection only.** Replaces the child-process spawn for workers. Not a supported user option. |
 

@@ -4,7 +4,7 @@ import { Bonjour } from "bonjour-service";
 import { openMeshDb, type MeshDb } from "./lib/db.js";
 import { advertiseMesh, browseMesh, type AdvertiseHandle } from "./lib/discovery.js";
 import { listLocks } from "./lib/locks.js";
-import { listMailboxes, mailboxBySession, unreadBoxCount } from "./lib/mail.js";
+import { listMailboxes, mailboxBySession, registerMailbox, unreadBoxCount } from "./lib/mail.js";
 import { listPeers, upsertDiscoveredPeer } from "./lib/peers.js";
 import { loadOrCreateIdentity, type NodeIdentity } from "./lib/identity.js";
 import { nodeSpawn, stopAllWorkers, type SpawnFn } from "./lib/spawn.js";
@@ -112,6 +112,7 @@ export const MeshV2 = Plugin.define({
       db,
       sessionID: () => sessionRef.sessionID,
       ...(options.wake === false ? { intervalMs: 0 } : {}),
+      ...(options.wakeIntervalMs !== undefined ? { intervalMs: options.wakeIntervalMs } : {}),
       prompt: (text) =>
         ctx.session.prompt({
           sessionID: sessionRef.sessionID!,
@@ -164,6 +165,27 @@ export const MeshV2 = Plugin.define({
           })),
           pools,
         });
+      },
+      bind: async (input: unknown) => {
+        const sessionID =
+          typeof input === "object" && input !== null && "sessionID" in input
+            ? (input as { sessionID: unknown }).sessionID
+            : undefined;
+        if (typeof sessionID === "string" && sessionID.length > 0) {
+          sessionRef.sessionID = sessionID;
+          // A declarative mailbox re-binds to the live session on every
+          // start: after a restart the box would otherwise stay bound to the
+          // dead session id and the wake loop would never find it.
+          if (options.mailbox !== undefined) {
+            registerMailbox(db, {
+              name: options.mailbox,
+              session_id: sessionID,
+              ...(options.mailboxRole !== undefined ? { role: options.mailboxRole } : {}),
+              now: Date.now(),
+            });
+          }
+        }
+        return { bound: true };
       },
       sidebar: async () => {
         const state = await sidebarPersist.load<{ collapsed: boolean }>();

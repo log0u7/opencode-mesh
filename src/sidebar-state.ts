@@ -5,6 +5,7 @@ type SidebarState = { collapsed: boolean };
 
 /** RPC client subset used for the durable fallback (see below). */
 export type SidebarRpc = {
+  bind: (input: { sessionID: string }) => Promise<{ bound: boolean }>;
   sidebar: (input: Record<string, never>) => Promise<{ collapsed: boolean }>;
   set_sidebar: (input: { collapsed: boolean }) => Promise<{ collapsed: boolean }>;
 };
