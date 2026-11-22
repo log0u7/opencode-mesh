@@ -115,10 +115,37 @@ export const MeshV2 = Plugin.define({
       }
     });
 
+    // Sessions currently mid-turn, tracked from the host's durable execution
+    // events: a queued wake prompt would fire with a stale unread count after
+    // the turn acked the mail (the orchestrator's "false positives").
+    const running = new Set<string>();
+    const trackExecutions = async () => {
+      try {
+        for await (const event of ctx.event.subscribe()) {
+          const type = (event as { type?: string }).type ?? "";
+          const sessionID = (event as { data?: { sessionID?: string } }).data?.sessionID;
+          if (typeof sessionID !== "string") continue;
+          if (type === "session.execution.started") {
+            running.add(sessionID);
+          } else if (
+            type === "session.execution.succeeded" ||
+            type === "session.execution.failed" ||
+            type === "session.execution.interrupted"
+          ) {
+            running.delete(sessionID);
+          }
+        }
+      } catch {
+        // Event stream unavailable: the wake loop then treats every existing
+        // session as idle (pre-0.9.4 behavior).
+      }
+    };
+    void trackExecutions();
+
     // Wake: when unread mail lands in a mailbox whose session lives on this
     // host, inject a prompt so the idle agent reacts without a human relaying.
     // Host-wide: one opencode process (e.g. `opencode serve`) hosts many
-    // sessions, each with its own mailbox.
+    // sessions, each with its own mailbox. Mid-turn sessions are skipped.
     const wake = startWakeLoop({
       db,
       ...(options.wake === false ? { intervalMs: 0 } : {}),
@@ -130,6 +157,7 @@ export const MeshV2 = Plugin.define({
           return false;
         }
       },
+      sessionRunning: (sessionID) => running.has(sessionID),
       prompt: (sessionID, text) =>
         ctx.session.prompt({
           sessionID,

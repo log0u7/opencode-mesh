@@ -165,4 +165,29 @@ describe("wake loop", () => {
     expect(calls).toBeGreaterThanOrEqual(2);
     db.close();
   });
+
+  it("skips a mid-turn session and prompts it once idle", async () => {
+    const { db, prompt, prompts } = setup(["s1"]);
+    registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
+    const running = new Set<string>(["s1"]);
+    const handle = startWakeLoop({
+      db,
+      prompt,
+      sessionExists: async () => true,
+      sessionRunning: (sessionID) => running.has(sessionID),
+      intervalMs: 10,
+      cooldownMs: 5000,
+    });
+    deliverMessage(db, { from: "n", to_box: "a", subject: "s", body: "b", created_at: 1000 });
+    await new Promise((r) => setTimeout(r, 50));
+    expect(prompt).not.toHaveBeenCalled();
+
+    running.delete("s1");
+    await new Promise((r) => setTimeout(r, 50));
+    handle.stop();
+
+    expect(prompts).toHaveLength(1);
+    expect(prompts[0]?.sessionID).toBe("s1");
+    db.close();
+  });
 });
