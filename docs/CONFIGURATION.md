@@ -38,6 +38,11 @@ On OpenCode 2.x hosts the key is `plugins` and each entry is an object with
 | `wake` | `boolean` | `true` | The wake loop polls this session's mailbox every `wakeIntervalMs` and injects a prompt (via `ctx.session.prompt`, delivery `queue`) when unread mail arrives, so an idle agent reacts without a human relaying. `false` disables it. |
 | `wakeIntervalMs` | `number` | `5000` | Wake poll interval in ms. Must be a positive integer. |
 
+Multi-host pools (0.10.0) add no options: `"bind": "lan"` on every node,
+`mesh_pair` run on both hosts (mDNS does not cross hosts), and the mesh port
+(default 4399) open between them — see [ORGANIZATION.md](ORGANIZATION.md),
+Model 5.
+
 Mailbox binding has two coexisting paths:
 
 - **Dynamic (default path, no configuration).** `mesh_register` stamps the box

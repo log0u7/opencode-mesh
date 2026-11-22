@@ -1,6 +1,8 @@
 import { basename } from "node:path";
+import { randomUUID } from "node:crypto";
 import { sendMail } from "./lib/client.js";
 import type { MeshDb } from "./lib/db.js";
+import type { Fanout } from "./lib/fanout.js";
 import { tailnetAddresses } from "./lib/discovery.js";
 import { pairingProof, type NodeIdentity } from "./lib/identity.js";
 import {
@@ -61,6 +63,8 @@ export type MeshContext = {
   dataDir: string;
   serverAddress: string;
   port: number;
+  /** Pool federation (optional): forwards local broadcasts to paired peers. */
+  fanout?: Fanout;
   /** Instance binding key (project id + directory): mesh_register stamps it so
    * a later TUI bind from the same instance re-binds the box to its live
    * session (restart-proof wake). */
@@ -91,7 +95,8 @@ function sessionID(context: ToolContext): string {
 }
 
 export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
-  const { db, identity, dataDir, serverAddress, port, bindKey, worktreeClient, spawnFn } = mesh;
+  const { db, identity, dataDir, serverAddress, port, bindKey, fanout, worktreeClient, spawnFn } =
+    mesh;
   return [
     {
       name: "mesh_status",
@@ -211,12 +216,74 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
         }
         const from_box = mailboxBySession(db, sessionID(context))?.name ?? null;
         touchMailbox(db, sessionID(context), Date.now());
+        const selfSendLocal = async (): Promise<string> => {
+          const result = deliverMessage(db, {
+            from: identity.node_id,
+            from_box,
+            to_box: to!,
+            subject: String(args.subject),
+            body: String(args.body),
+            reply_to: typeof args.reply_to === "string" ? args.reply_to : null,
+          });
+          // Federation: a broadcast with no LOCAL recipients (the sender is
+          // often the only member of its team on this node) must still reach
+          // the remote members — synthesize an origin id and forward.
+          if (!result.ok && fanout && result.error === "empty_broadcast") {
+            const origin = randomUUID();
+            const forwardedOnly = await fanout.fanout({
+              to_box: to!,
+              origin_id: origin,
+              from: identity.node_id,
+              from_box,
+              subject: String(args.subject),
+              body: String(args.body),
+              via: [],
+            });
+            return JSON.stringify(
+              { id: origin, recipients: [], forwarded: forwardedOnly },
+              null,
+              2,
+            );
+          }
+          if (!result.ok) {
+            return result.error === "unknown_mailbox"
+              ? `error: unknown mailbox/pool ${to}`
+              : `error: broadcast ${to} has no recipients`;
+          }
+          // Federation: forward the broadcast to paired peers holding members.
+          let forwarded: string[] = [];
+          if (fanout && result.recipients.length > 0) {
+            forwarded = await fanout.fanout({
+              to_box: to!,
+              origin_id: result.id,
+              from: identity.node_id,
+              from_box,
+              subject: String(args.subject),
+              body: String(args.body),
+              via: [],
+            });
+          }
+          return JSON.stringify(
+            { id: result.id, recipients: result.recipients, forwarded },
+            null,
+            2,
+          );
+        };
         const extras = {
           ...(to !== null ? { to } : {}),
           ...(typeof args.reply_to === "string" ? { reply_to: args.reply_to } : {}),
           ...(from_box !== null ? { from_box } : {}),
         };
         if (peer !== null) {
+          // Same-machine sessions share this node: a "peer" send to the own
+          // node id is a local delivery in disguise. Route by mailbox instead
+          // of letting the mail fall into the global feed unread.
+          if (peer === identity.node_id) {
+            if (to === null) {
+              return `error: ${peer} is THIS node — use to=<mailbox> (see mesh_status mailboxes) for a local delivery`;
+            }
+            return await selfSendLocal();
+          }
           const target = findSendablePeer(db, peer);
           if (target === null) {
             return `error: no paired peer matching ${peer}; run mesh_status`;
@@ -239,20 +306,7 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
           });
           return `sent to ${target.node_id}: ${result}`;
         }
-        const result = deliverMessage(db, {
-          from: identity.node_id,
-          from_box,
-          to_box: to!,
-          subject: String(args.subject),
-          body: String(args.body),
-          reply_to: typeof args.reply_to === "string" ? args.reply_to : null,
-        });
-        if (!result.ok) {
-          return result.error === "unknown_mailbox"
-            ? `error: unknown mailbox/pool ${to}`
-            : `error: broadcast ${to} has no recipients`;
-        }
-        return JSON.stringify({ id: result.id, recipients: result.recipients }, null, 2);
+        return await selfSendLocal();
       },
     },
 

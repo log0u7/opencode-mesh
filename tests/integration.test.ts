@@ -171,4 +171,96 @@ describe("two-node integration", () => {
     });
     expect(result).toBe("unreachable");
   });
+
+  it("federates a pool broadcast across three nodes (fanout + dedup)", async () => {
+    const { MeshPlugin } = await import("../src/plugin.js");
+    const dir = mkdtempSync(join(tmpdir(), "opencode-mesh-federate-"));
+    const mk = async (name: string, mailbox: string, pool: string) => {
+      const hooks = await MeshPlugin(input(), {
+        dataDir: join(dir, name),
+        port: 0,
+        advertise: false,
+      });
+      // Local member.
+      await hooks.tool?.mesh_register?.execute({ name: mailbox, role: "pair" }, {
+        sessionID: `sess-${name}`,
+      } as never);
+      await hooks.tool?.mesh_join?.execute({ pool }, { sessionID: `sess-${name}` } as never);
+      return hooks;
+    };
+    const a = await mk("a", "ops", "team:infra");
+    const b = await mk("b", "sre", "team:infra");
+    const c = await mk("c", "sre", "team:infra");
+
+    // Fully pair the three nodes.
+    const offer = async (hooks: Awaited<ReturnType<typeof MeshPlugin>>) =>
+      String(await hooks.tool?.mesh_pair?.execute({}, {} as never));
+    const statusOf = async (hooks: Awaited<ReturnType<typeof MeshPlugin>>) =>
+      JSON.parse(String(await hooks.tool?.mesh_status?.execute({}, {} as never))) as {
+        node_id: string;
+        server: string;
+      };
+    const sa = await statusOf(a);
+    const sb = await statusOf(b);
+    const sc = await statusOf(c);
+    const field = (offerText: string, name: string) =>
+      new RegExp(`${name}="([^"]*)"`).exec(offerText.slice(offerText.indexOf(`${name}=`)))?.[1] ??
+      "";
+    const oA = await offer(a);
+    const oB = await offer(b);
+    const oC = await offer(c);
+    await b.tool?.mesh_pair?.execute(
+      { node_id: sa.node_id, token: field(oA, "token"), address: sa.server, pk: field(oA, "pk") },
+      {} as never,
+    );
+    await a.tool?.mesh_pair?.execute(
+      { node_id: sb.node_id, token: field(oB, "token"), address: sb.server, pk: field(oB, "pk") },
+      {} as never,
+    );
+    await c.tool?.mesh_pair?.execute(
+      { node_id: sb.node_id, token: field(oB, "token"), address: sb.server, pk: field(oB, "pk") },
+      {} as never,
+    );
+    await b.tool?.mesh_pair?.execute(
+      { node_id: sc.node_id, token: field(oC, "token"), address: sc.server, pk: field(oC, "pk") },
+      {} as never,
+    );
+    await c.tool?.mesh_pair?.execute(
+      { node_id: sa.node_id, token: field(oA, "token"), address: sa.server, pk: field(oA, "pk") },
+      {} as never,
+    );
+    await a.tool?.mesh_pair?.execute(
+      { node_id: sc.node_id, token: field(oC, "token"), address: sc.server, pk: field(oC, "pk") },
+      {} as never,
+    );
+
+    // ops (node a) broadcasts to team:infra: sre on b AND c must receive it.
+    const sent = String(
+      await a.tool?.mesh_send?.execute(
+        { to: "team:infra", subject: "status: fanout", body: "hello infra" },
+        { sessionID: "sess-a" } as never,
+      ),
+    );
+    expect(JSON.parse(sent) as { recipients: unknown }).toBeTruthy();
+
+    await new Promise((r) => setTimeout(r, 300));
+    const { inboxRows } = await import("../src/lib/mail.js");
+    // The plugin hooks expose no db: open the per-node SQLite files directly.
+    const bDb = openMeshDb(join(dir, "b", "mesh.db"));
+    const cDb = openMeshDb(join(dir, "c", "mesh.db"));
+    const bRows = inboxRows(bDb, "sess-b");
+    const cRows = inboxRows(cDb, "sess-c");
+    expect(bRows.map((r) => r.subject)).toContain("status: fanout");
+    expect(cRows.map((r) => r.subject)).toContain("status: fanout");
+    // Exactly one copy each (origin_id dedup across the two fanout paths).
+    expect(bRows).toHaveLength(1);
+    expect(cRows).toHaveLength(1);
+
+    await a.dispose?.();
+    await b.dispose?.();
+    await c.dispose?.();
+    bDb.close();
+    cDb.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
 });

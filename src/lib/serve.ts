@@ -5,11 +5,13 @@ import type { MeshDb } from "./db.js";
 import { authenticateToken } from "./peers.js";
 import {
   deliverMessage,
+  listMailboxes,
   MESSAGE_TTL_MS,
   purgeExpired,
   receiveMessage,
   unreadCount,
 } from "./mail.js";
+import type { Fanout } from "./fanout.js";
 
 const BODY_LIMIT = 64 * 1024;
 
@@ -21,6 +23,8 @@ export type MeshServerOptions = {
   db: MeshDb;
   port: number;
   bind?: "loopback" | "lan";
+  /** Pool federation: forwards local broadcasts to paired peers. */
+  fanout?: Fanout;
 };
 
 export type MeshServer = {
@@ -37,7 +41,7 @@ export async function startMeshServer(options: MeshServerOptions): Promise<MeshS
 
   const host = options.bind === "lan" ? "0.0.0.0" : DEFAULT_BIND;
   const server = createServer((req, res) => {
-    void handle(options.db, req, res);
+    void handle(options, req, res);
   });
 
   let onListen: () => void = () => {};
@@ -70,7 +74,12 @@ function serverAddressPort(server: Server, fallback: number): number {
   return address !== null && typeof address !== "string" ? address.port : fallback;
 }
 
-async function handle(db: MeshDb, req: IncomingMessage, res: ServerResponse): Promise<void> {
+async function handle(
+  options: MeshServerOptions,
+  req: IncomingMessage,
+  res: ServerResponse,
+): Promise<void> {
+  const { db, fanout } = options;
   const url = new URL(req.url ?? "/", "http://localhost");
 
   const contentLength = Number(req.headers["content-length"] ?? "0");
@@ -121,6 +130,7 @@ async function handle(db: MeshDb, req: IncomingMessage, res: ServerResponse): Pr
       subject: parsed.subject,
       body: parsed.body,
       reply_to: parsed.reply_to ?? null,
+      origin_id: parsed.origin_id ?? null,
     });
     let delivered = 0;
     if (!result.ok && result.error === "unknown_mailbox") {
@@ -134,11 +144,50 @@ async function handle(db: MeshDb, req: IncomingMessage, res: ServerResponse): Pr
     } else if (result.ok) {
       delivered = result.recipients.length;
     }
+    // Federation: a broadcast that produced local deliveries is forwarded to
+    // the paired peers that also hold members (dedup via origin_id + via).
+    if (
+      fanout &&
+      result.ok &&
+      delivered > 0 &&
+      parsed.to !== undefined &&
+      (parsed.to === "all" || parsed.to.startsWith("team:"))
+    ) {
+      void fanout
+        .fanout({
+          to_box: parsed.to,
+          origin_id: parsed.origin_id ?? result.id,
+          from: parsed.from,
+          from_box: parsed.from_box ?? null,
+          subject: parsed.subject,
+          body: parsed.body,
+          via: parsed.via ?? null,
+        })
+        .catch(() => {});
+    }
     json(res, 200, {
       ok: true,
       unread: unreadCount(db) + unreadDeliveries(db),
       delivered,
     });
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/pools") {
+    const peer = authenticate(db, req);
+    if (!peer) {
+      json(res, 401, { error: "unauthorized" });
+      return;
+    }
+    const pools: Record<string, string[]> = {};
+    for (const box of listMailboxes(db)) {
+      for (const pool of box.pools) {
+        const members = pools[pool] ?? [];
+        members.push(box.name);
+        pools[pool] = members;
+      }
+    }
+    json(res, 200, { pools });
     return;
   }
 
@@ -229,6 +278,10 @@ function parseMail(raw: string): MailBody | null {
       subject: parsed.subject,
       body: parsed.body,
       ...(typeof parsed.proof === "string" ? { proof: parsed.proof } : {}),
+      ...(typeof parsed.origin_id === "string" ? { origin_id: parsed.origin_id } : {}),
+      ...(Array.isArray(parsed.via)
+        ? { via: parsed.via.filter((v): v is string => typeof v === "string") }
+        : {}),
       ...(typeof parsed.to === "string" ? { to: parsed.to } : {}),
       ...(typeof parsed.from_box === "string" ? { from_box: parsed.from_box } : {}),
       ...(typeof parsed.reply_to === "string" ? { reply_to: parsed.reply_to } : {}),
@@ -246,6 +299,8 @@ type MailBody = {
   to?: string;
   from_box?: string;
   reply_to?: string;
+  via?: string[];
+  origin_id?: string;
 };
 
 function json(res: ServerResponse, status: number, body: unknown): void {

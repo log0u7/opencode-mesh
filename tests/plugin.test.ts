@@ -174,14 +174,15 @@ describe("mesh plugin tool branches", () => {
     const hooks = await MeshPlugin(fakeInput(), { dataDir: dir, port: 0, advertise: false });
     const tools = hooks.tool ?? {};
 
-    // Pair through the token flow, without an address: sendable but unreachable list.
+    // Pair through the token flow, then a FOREIGN peer without an address:
+    // sendable (paired) but unreachable until announce/discovery fills it.
     const offer = String(await tools.mesh_pair?.execute({}, ctx("s1")));
     const token = /token="([^"]+)"/.exec(offer)?.[1];
     const nodeId = /node_id="([^"]+)"/.exec(offer)?.[1];
     await tools.mesh_pair?.execute({ node_id: nodeId, token }, ctx("s1"));
-    // The just-paired peer has no address until announce/discovery fills it.
+    await tools.mesh_pair?.execute({ node_id: "foreign-node", token: "foreign-token" }, ctx("s1"));
     const noAddress = await tools.mesh_send?.execute(
-      { peer: nodeId, subject: "s", body: "b" },
+      { peer: "foreign-node", subject: "s", body: "b" },
       ctx("s1"),
     );
     expect(noAddress).toContain("no known address");

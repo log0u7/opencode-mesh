@@ -1,7 +1,8 @@
 # Organization patterns
 
-How to wire multi-team agent organizations on the mesh. Four reference models,
-from flat to hierarchical — all built from the same primitives: named
+How to wire multi-team agent organizations on the mesh. Five reference models,
+from flat to hierarchical to pools spread across hosts — all built from the
+same primitives: named
 mailboxes (`mesh_register`), pools (`mesh_join` / `mesh_leave` / `team:*`
 broadcasts), direct messages (`mesh_send` to a mailbox), synchronous
 request/response (`mesh_wait` with `reply_to`), presence (`●` fresh, `○`
@@ -15,6 +16,9 @@ Two invariants hold in every model:
 - **Discussion is direct.** Questions, brainstorms and tasks are DMs between
   mailboxes; the sender can block on `mesh_wait(id, timeout)` for a
   synchronous answer within one turn.
+
+Pools federate across paired hosts since 0.10.0 (Model 5), but each host
+remains master of its mailboxes and its wake loop.
 
 ## Model 1 — Flat teams, no central coordination
 
@@ -121,6 +125,59 @@ flowchart LR
 
 Fits: cross-team urgent work that must not pollute the permanent pools.
 
+## Model 5 — Pools spread across hosts
+
+The same pools, members on different machines: a laptop and a workstation, a
+host and a WSL2 box, nodes across a tailnet. `team:infra` has `ops` on
+host-alpha and `sre` on host-beta; `team:dev` has `dev` on host-alpha and `qa`
+on host-beta.
+
+```mermaid
+flowchart LR
+    subgraph alpha["host-alpha"]
+        ops["ops (team:infra, lead)"] --- dev["dev (team:dev)"]
+    end
+    subgraph beta["host-beta"]
+        sre["sre (team:infra)"] --- qa["qa (team:dev)"]
+    end
+    alpha <--> |"paired: mesh_pair both sides"| beta
+    ops -. "team:infra broadcast (federated)" .-> sre
+    dev -. "team:dev broadcast (federated)" .-> qa
+```
+
+A `team:*` or `all` broadcast is federated: when a node delivers the mail
+locally (sent by a local session or received from a peer), it also forwards it
+to paired peers that host at least one member of the pool — learned from the
+peers' `GET /pools` (peer-token auth, result cached 60 s). The forward keeps
+`to` and `from_box` and carries two extra wire fields: `via` (node ids already
+traversed; each forwarder appends itself and skips peers already listed, so a
+cycle of paired nodes cannot loop) and `origin_id` (the original message id;
+a receiver that already holds that id skips the second delivery).
+
+Delivery stays strictly local: each host owns its mailboxes and its wake loop
+(0.9.3) fires only for its own sessions. Boxes never migrate between hosts,
+and a host that is down simply misses the broadcasts sent while it was away.
+
+Prerequisites (no new options, see [CONFIGURATION.md](CONFIGURATION.md)):
+
+- Both sides run `mesh_pair`, and the addresses are exchanged out of band:
+  mDNS discovery does not cross hosts (multicast stays on the local segment),
+  so automatic discovery stops at each machine's network boundary.
+- Every mesh server binds `"bind": "lan"` (loopback only reaches itself), and
+  the mesh port (default 4399) is open between the hosts.
+
+WSL2 adds a NAT boundary: the Windows host and the WSL VM sit on different
+network segments. Three paths, pick one:
+
+```text
+WSL2 mesh reachable from the other host?
+├─ tailscale on both sides → install it; tailnet IPs are picked up automatically
+├─ Windows 11 22H2+ and you control .wslconfig
+│    → mirrored networking mode: the VM shares the Windows network stack
+│      (treat it as a LAN host; firewall still applies)
+└─ otherwise → a TCP tunnel (cloudflared, frp) pointing at the WSL mesh port
+```
+
 ## Choosing
 
 | Signal | Model |
@@ -129,6 +186,7 @@ Fits: cross-team urgent work that must not pollute the permanent pools.
 | Many agents, lead absent, task triage needed | 2 — orchestrator |
 | Several projects, several teams, isolation matters | 3 — hierarchy |
 | One-shot cross-team effort | 4 — ad-hoc squad |
+| Pools spread across several hosts (LAN + WSL + tailnet) | 5 — multi-hosts |
 
 Models compose: a hierarchical org (3) can spawn ad-hoc squads (4), and a
 `tower` orchestrator (2) can be added to model 1 later without changing any

@@ -14,7 +14,7 @@ offloading; source under `src/`.
 | Identity | `src/lib/identity.ts` | `node.json` (`{node_id, hostname, public_key, private_key}`) with id continuity across migration; corrupt file fails loud, never remints. The Ed25519 keypair signs pairing proofs. |
 | Peers | `src/lib/peers.ts` | Peer rows, pairing tokens, bearer-token auth, address resolution, pairing proofs (sender must sign with its pinned key to bind or rotate a row). |
 | Mail | `src/lib/mail.ts` | Append-only messages (`unread`/`read`), unread counters, acks. |
-| Server | `src/lib/serve.ts` | HTTP `/mail` + `/status`, loopback binding with an ephemeral fallback. |
+| Server | `src/lib/serve.ts` | HTTP `/mail` + `/status` + `/pools`, loopback binding with an ephemeral fallback. |
 | Discovery | `src/lib/discovery.ts` | mDNS advertise/browse (TXT: id + fingerprint), tailnet IPs. |
 | Workers | `src/lib/spawn.ts`, `src/lib/workers.ts`, `src/lib/worktree.ts` | Headless opencode run in a fresh worktree: lifecycle, logs, kill escalation, reconciliation. |
 | Locks | `src/lib/locks.ts` | Local-only file claims with TTL, atomic claim. |
@@ -26,7 +26,7 @@ opencode (host)
 └── plugin (MeshPlugin / MeshV2)
     ├── identity        node.json                 dir 0700, file 0600
     ├── sqlite          mesh.db (WAL)             locks, messages, peers, tokens, workers
-    ├── http server     127.0.0.1:port            /mail  /status
+    ├── http server     127.0.0.1:port            /mail  /status  /pools
     ├── bonjour         advertise + browse        _opencode-mesh._tcp
     └── tools           mesh_*                    exposed to every session
         └── worker      opencode run --dir <wt>   OPENCODE_MESH_CHILD=1
@@ -114,6 +114,39 @@ always calls `execution.wake` when `resume !== false`
 idle execution and promotes queued input — a bound idle session reacts to
 incoming mail within one poll interval (`wakeIntervalMs`, 5 s default, 60 s
 cooldown between prompts).
+
+## Pool federation
+
+Pools are local state; broadcasts cross hosts (0.10.0). When a node delivers a
+`team:<pool>` or `all` mail locally — sent by a local session or received from
+a peer — it asks each paired peer which mailboxes it hosts (`GET /pools`,
+result cached 60 s) and forwards the mail to the peers with at least one
+member of that pool. The forward keeps `to` and `from_box` and adds `via`
+(node ids already traversed; each forwarder appends itself and skips peers
+already listed) and `origin_id` (the original message id; a receiver that
+already holds it drops the copy). An unknown `to` still falls back to the
+node's global inbox.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant ops as ops (host-alpha)
+    participant A as host-alpha mesh
+    participant B as host-beta mesh
+    participant sre as sre (host-beta)
+    ops->>A: mesh_send(to="team:infra")
+    A->>A: deliver to local members of team:infra
+    A->>B: GET /pools (peer token)
+    B-->>A: {"pools": {"team:infra": ["sre"]}}
+    A->>B: POST /mail (to="team:infra", via=["host-alpha"], origin_id)
+    B->>B: no prior message with that origin_id: deliver
+    B->>sre: mailbox delivery, wake fires locally
+```
+
+Boxes and wake stay strictly local: a host owns its mailboxes, and its wake
+loop (0.9.3) wakes only its own sessions. The coupling between hosts is one
+read-only endpoint plus forwarded mail, so a host that is down just misses the
+broadcasts sent while it was away — nothing else on either side degrades.
 
 ## Data directory layout
 

@@ -5,6 +5,38 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.0] - 2026-11-22
+
+### Added
+
+- Pool federation across paired hosts. A broadcast (`to: "team:<pool>"` or
+  `to: "all"`) that produced local deliveries is forwarded to the paired peers
+  that also hold members of that pool (discovered over a new authenticated
+  `GET /pools` endpoint, cached 60 s), where the host-wide wake loop (0.9.3)
+  prompts the local members. Boîtes and wake stay local per host — only mail
+  travels.
+
+### Fixed
+
+- `mesh_send(peer=<own node id>)` — same-machine sessions share one node —
+  used to fall into the global feed unread. It now routes as a local delivery
+  when `to` is given, and errors with guidance otherwise.
+- A pool broadcast whose only member is the sender (empty local recipients)
+  no longer errors when federation can carry it: the origin id is synthesized
+  and the mail is forwarded to the remote members.
+- Forwarded mail now carries the pairing proof: first contact after a fresh
+  pairing (peer token not yet bound on our side) would 401 before the drive-by
+  binding had a chance to fire.
+
+### Security
+
+- Broadcast fanout is loop- and duplicate-safe: the wire gains `via`
+  (node ids already traversed — a relay never forwards to a listed peer) and
+  `origin_id` (a receiver that already stored the broadcast turns the second
+  arrival into a no-op).
+- New authenticated route `GET /pools` returns the node's local pool map.
+- Schema v5: `messages.origin_id`, migrated in place.
+
 ## [0.9.4] - 2026-11-22
 
 ### Fixed
