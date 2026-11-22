@@ -17,6 +17,7 @@ import {
   leavePool,
   listMailboxes,
   mailboxesBySession,
+  mailboxByName,
   mailboxBySession,
   registerMailbox,
   touchMailbox,
@@ -92,6 +93,14 @@ function bool(name: string, description: string): ToolField {
 // The host normally always provides a session id; normalizing keeps tools
 // usable in contexts without one (tests, exotic hosts) instead of crashing
 // on a SQLite bind with undefined.
+/** The session's most recently touched box: the natural default after a
+ * mesh_register (CLI flows register then join/send on the same box). */
+function defaultBoxName(db: MeshDb, sessionID: string): string | null {
+  const boxes = mailboxesBySession(db, sessionID);
+  if (boxes.length === 0) return null;
+  return [...boxes].sort((a, b) => b.last_seen - a.last_seen)[0]?.name ?? null;
+}
+
 function peerLabelShort(nodeId: string, hostname?: string | null): string {
   const host =
     hostname !== null && hostname !== undefined && hostname.length > 0 ? hostname : nodeId;
@@ -475,10 +484,17 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
 
     {
       name: "mesh_join",
-      description: "Join a pool (e.g. team:x) so broadcasts to that pool reach this mailbox.",
-      fields: [str("pool", "Pool id, e.g. team:x")],
+      description:
+        "Join a pool (e.g. team:x) so broadcasts to that pool reach this mailbox. Defaults to the most recently touched box of this session.",
+      fields: [
+        str("pool", "Pool id, e.g. team:x"),
+        str("box", "Which of YOUR mailboxes joins (multi-box sessions)", false),
+      ],
       execute: async (args, context) => {
-        const box = mailboxBySession(db, sessionID(context));
+        const box =
+          typeof args.box === "string" && args.box.length > 0
+            ? mailboxByName(db, args.box)
+            : mailboxByName(db, defaultBoxName(db, sessionID(context)) ?? "");
         if (!box) {
           return "error: run mesh_register first";
         }
@@ -490,10 +506,16 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
 
     {
       name: "mesh_leave",
-      description: "Leave a pool joined with mesh_join.",
-      fields: [str("pool", "Pool id, e.g. team:x")],
+      description: "Leave a pool joined with mesh_join. Defaults to the most recently touched box.",
+      fields: [
+        str("pool", "Pool id, e.g. team:x"),
+        str("box", "Which of YOUR mailboxes leaves (multi-box sessions)", false),
+      ],
       execute: async (args, context) => {
-        const box = mailboxBySession(db, sessionID(context));
+        const box =
+          typeof args.box === "string" && args.box.length > 0
+            ? mailboxByName(db, args.box)
+            : mailboxByName(db, defaultBoxName(db, sessionID(context)) ?? "");
         if (!box) {
           return "error: run mesh_register first";
         }
