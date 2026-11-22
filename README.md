@@ -38,7 +38,7 @@ flowchart LR
 - **Spawn headless workers in one call.** `mesh_spawn(task, name)` starts an isolated OpenCode worktree per worker; `mesh_workers`, `mesh_worker_logs`, `mesh_worker_stop` and `mesh_worker_remove` track and reap them. A pool of N workers costs N worktrees, not N mesh nodes.
 - **Deny by default.** Every endpoint requires a per-peer bearer token; pairing offers expire after 5 minutes; both sides must run `mesh_pair`; every mail carries an Ed25519 proof, so a leaked offer cannot install or rotate a live credential.
 - **File claims between sessions.** `mesh_lock` gives exclusive claims on paths, enforced between sessions on the same machine, so two agents never edit the same file.
-- **Deliberately simple wire protocol.** mDNS for discovery, bearer tokens for auth, two HTTP routes (`/mail`, `/status`), plain HTTP over loopback and trusted networks.
+- **Deliberately simple wire protocol.** mDNS for discovery, bearer tokens for auth, three HTTP routes (`/mail`, `/status`, `/pools`), plain HTTP over loopback and trusted networks.
 
 ## Install
 
@@ -124,6 +124,10 @@ draining the inbox ate everyone's messages. Mailboxes fix the routing:
 - Pools are dynamic and persisted server-side: `mesh_join` / `mesh_leave`, and
   the membership survives session restarts (a replacement session
   re-registering the same name finds its pools intact).
+- Pools federate across paired hosts (0.10.0): a `team:*` broadcast reaches
+  members on paired hosts (fanout with anti-loop `via[]` and `origin_id`
+  dedup); each host keeps its own boxes and wake. See
+  [ORGANIZATION.md](docs/ORGANIZATION.md), Model 5.
 - `mesh_wait(id, timeout)` completes a request/response within one turn: it
   blocks the agent turn until a message with `reply_to: id` arrives.
 - Presence: every tool interaction refreshes the mailbox `last_seen`;

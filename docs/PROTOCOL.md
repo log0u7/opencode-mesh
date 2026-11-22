@@ -1,7 +1,7 @@
 # Protocol
 
 How mesh nodes talk. The mesh is deliberately simple: mDNS for discovery,
-bearer tokens for auth, two HTTP routes.
+bearer tokens for auth, three HTTP routes.
 
 ## Discovery (mDNS)
 
@@ -72,14 +72,27 @@ pending path, the node must already be known.
 
 | Method | Path | Auth | Body | Response |
 |---|---|---|---|---|
-| `POST` | `/mail` | peer token | `{"from": "...", "subject": "...", "body": "...", "proof"?: "<pk>.<sig>", "to"?: "<mailbox or team:<pool> or all>", "from_box"?: "<sender mailbox>", "reply_to"?: "<message id>"}` | `200 {"ok": true, "unread": N, "delivered": M}` |
+| `POST` | `/mail` | peer token | `{"from": "...", "subject": "...", "body": "...", "proof"?: "<pk>.<sig>", "to"?: "<mailbox or team:<pool> or all>", "from_box"?: "<sender mailbox>", "reply_to"?: "<message id>", "via"?: ["<node id>", ...], "origin_id"?: "<message id>"}` | `200 {"ok": true, "unread": N, "delivered": M}` |
 | `GET` | `/status` | peer token | none | `200 {"node_id": "...", "unread": N}` |
+| `GET` | `/pools` | peer token | none | `200 {"pools": {"<pool>": ["<mailbox>", ...]}}` |
 
-The optional mail fields (`to`, `from_box`, `reply_to`) carry mailbox routing
-across nodes. A receiving node that recognizes the addressed mailbox delivers
-the mail into that box; an unknown `to` falls back to the node's global inbox
-so mail is never silently dropped. Older receivers ignore the extra fields
-entirely (global inbox), which keeps mixed-version pools working.
+The optional mail fields (`to`, `from_box`, `reply_to`, `via`, `origin_id`)
+carry mailbox routing across nodes. A receiving node that recognizes the
+addressed mailbox delivers the mail into that box; an unknown `to` falls back
+to the node's global inbox so mail is never silently dropped (unchanged by
+federation). Older receivers ignore the extra fields entirely (global inbox),
+which keeps mixed-version pools working.
+
+Two fields exist for broadcast fanout (0.10.0): `via` is the anti-loop list —
+every node that forwards a broadcast appends its node id and never forwards to
+a peer already listed; `origin_id` is the original message id — a receiver
+that already holds a message with that `origin_id` skips the second delivery.
+
+`GET /pools` returns the node's local pool membership (one mailbox list per
+pool). A node that delivers a `team:<pool>` or `all` broadcast locally — sent
+by a local session or received from a peer — forwards it to paired peers with
+at least one member in that pool (discovered via `GET /pools`, cached 60 s);
+`via` + `origin_id` keep the fanout to a single delivery per node.
 
 Status codes:
 

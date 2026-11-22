@@ -35,6 +35,10 @@ export type DeliverInput = {
   subject: string;
   body: string;
   reply_to?: string | null;
+  /** Cross-host dedup: the origin message's id. When a message with this
+   * origin_id already exists locally, the delivery is skipped (the fanout
+   * can hand the same broadcast to a node through several paths). */
+  origin_id?: string | null;
   created_at?: number;
 };
 
@@ -181,6 +185,18 @@ export function deliverMessage(db: MeshDb, input: DeliverInput): DeliverResult {
   const id = randomUUID();
   const created_at = input.created_at ?? Date.now();
 
+  // Cross-host dedup: the same broadcast can arrive through several fanout
+  // paths; the origin id makes the second arrival a no-op.
+  if (input.origin_id) {
+    const existing = db.conn.get<{ id: string }>(
+      "SELECT id FROM messages WHERE origin_id = ? LIMIT 1",
+      [input.origin_id],
+    );
+    if (existing) {
+      return { ok: true, id: existing.id, recipients: [] };
+    }
+  }
+
   // Resolve first: a legacy global mail or a failure never leaves a message row.
   const global = input.to_box == null;
   let recipients: string[];
@@ -198,10 +214,11 @@ export function deliverMessage(db: MeshDb, input: DeliverInput): DeliverResult {
   }
 
   db.conn.run(
-    `INSERT INTO messages (id, from_node, from_box, subject, body, reply_to, status, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO messages (id, origin_id, from_node, from_box, subject, body, reply_to, status, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       id,
+      input.origin_id ?? id,
       input.from,
       input.from_box ?? null,
       input.subject,

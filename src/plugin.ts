@@ -7,6 +7,7 @@ import { openMeshDb, type MeshDb } from "./lib/db.js";
 import { advertiseMesh, browseMesh, type AdvertiseHandle } from "./lib/discovery.js";
 import { upsertDiscoveredPeer } from "./lib/peers.js";
 import { loadOrCreateIdentity, type NodeIdentity } from "./lib/identity.js";
+import { createFanout } from "./lib/fanout.js";
 import { nodeSpawn, stopAllWorkers } from "./lib/spawn.js";
 import { defaultDataDir, parseOptions, type PluginOptions } from "./options.js";
 import { extractClientFetch, type WorktreeClient, type WorktreeFactory } from "./lib/worktree.js";
@@ -97,6 +98,7 @@ export const MeshPlugin: Plugin = async (input, rawOptions?: PluginOptions) => {
         serverAddress: address,
         port,
         bindKey: `v1:${dataDir}`,
+        fanout: createFanout({ db, identity }),
         worktreeClient,
         spawnFn,
       }).map((spec) => [

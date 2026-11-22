@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { openMeshDb } from "../src/lib/db.js";
 import type { NodeIdentity } from "../src/lib/identity.js";
-import { deliverMessage } from "../src/lib/mail.js";
+import { deliverMessage, inboxRows, registerMailbox } from "../src/lib/mail.js";
 import { buildToolSpecs, type MeshContext, type ToolSpec } from "../src/tools.js";
 
 function setup() {
@@ -194,5 +194,28 @@ describe("mesh_status", () => {
     expect(box.last_seen).toBeGreaterThan(0);
     expect(box.age_s).toBe(0);
     expect(status.unread).toBe(0);
+  });
+
+  it("routes mesh_send with peer=<own node id> as a local delivery when to= is given", async () => {
+    const { db, call } = setup();
+    registerMailbox(db, { name: "orchestrator", session_id: "s-orch", now: 1000 });
+    registerMailbox(db, { name: "qm", session_id: "s-qm", now: 1000 });
+
+    const out = await call(
+      "mesh_send",
+      { peer: "n1", to: "orchestrator", subject: "re: x", body: "answer" },
+      "s-qm",
+    );
+    const parsed = JSON.parse(out) as { recipients: string[] };
+    expect(parsed.recipients).toEqual(["orchestrator"]);
+    expect(inboxRows(db, "s-orch")[0]?.subject).toBe("re: x");
+    db.close();
+  });
+
+  it("errors with guidance when peer=<own node id> and no to=", async () => {
+    const { call } = setup();
+    const out = await call("mesh_send", { peer: "n1", subject: "s", body: "b" }, "s1");
+    expect(out).toContain("is THIS node");
+    expect(out).toContain("to=<mailbox>");
   });
 });

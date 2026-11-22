@@ -10,7 +10,7 @@ export type MeshDb = {
 
 // Bump when a schema change needs a migration step; the version anchors future
 // migrations that cannot be expressed as idempotent `CREATE ... IF NOT EXISTS`.
-const SCHEMA_VERSION = 4;
+const SCHEMA_VERSION = 5;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS peers (
@@ -25,6 +25,7 @@ CREATE TABLE IF NOT EXISTS peers (
 );
 CREATE TABLE IF NOT EXISTS messages (
   id TEXT PRIMARY KEY,
+  origin_id TEXT,
   from_node TEXT NOT NULL,
   from_box TEXT,
   subject TEXT NOT NULL,
@@ -116,7 +117,12 @@ function migrate(conn: SqliteConn): void {
   if (!mailboxColumns.includes("bind_key")) {
     conn.exec("ALTER TABLE mailboxes ADD COLUMN bind_key TEXT");
   }
+  // v5: messages.origin_id (cross-host broadcast dedup).
+  if (!messageColumns.includes("origin_id")) {
+    conn.exec("ALTER TABLE messages ADD COLUMN origin_id TEXT");
+  }
   conn.exec(INDEXES_V3);
+  conn.exec("CREATE INDEX IF NOT EXISTS idx_messages_origin ON messages(origin_id);");
   conn.run(`PRAGMA user_version = ${SCHEMA_VERSION}`);
 }
 

@@ -19,6 +19,7 @@ import { v2WorktreeDomainClient } from "./lib/worktree.js";
 import { reconcileWorkers } from "./lib/workers.js";
 import { startMeshServer } from "./lib/serve.js";
 import { createDurableStore } from "./lib/persist.js";
+import { createFanout } from "./lib/fanout.js";
 import { startWakeLoop } from "./lib/wake.js";
 import { MeshRpc, snapshotFromMesh } from "./rpc.js";
 import { buildToolSpecs, type ToolSpec } from "./tools.js";
@@ -50,10 +51,15 @@ export const MeshV2 = Plugin.define({
     // in-memory map is gone: mark dead pids before anything else uses the table.
     reconcileWorkers(db);
 
+    // Pool federation: shared by the tools (local broadcasts) and the server
+    // (relayed broadcasts arriving from peers).
+    const fanout = createFanout({ db, identity });
+
     const { server, port, address } = await startMeshServer({
       db,
       port: options.port ?? DEFAULT_PORT,
       ...(options.bind !== undefined ? { bind: options.bind } : {}),
+      fanout,
     });
     // Prefer an injected client (tests, hosts that pass one), then adapt the
     // 2.x in-process worktree domain to the REST-shaped WorktreeClient. The
