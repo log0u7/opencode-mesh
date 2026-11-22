@@ -16,6 +16,7 @@ import {
   joinPool,
   leavePool,
   listMailboxes,
+  mailboxesBySession,
   mailboxBySession,
   registerMailbox,
   touchMailbox,
@@ -298,6 +299,7 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
         str("subject", "Short subject"),
         str("body", "Message body"),
         str("reply_to", "Message id this message answers, from mesh_send output", false),
+        str("box", "Which of YOUR mailboxes sends (multi-box sessions)", false),
       ],
       execute: async (args, context) => {
         const peer = typeof args.peer === "string" ? args.peer : null;
@@ -305,7 +307,11 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
         if (peer === null && to === null) {
           return "error: mesh_send needs a peer (remote) or a to (mailbox, team:<pool> or all)";
         }
-        const from_box = mailboxBySession(db, sessionID(context))?.name ?? null;
+        const sessionBoxes = mailboxesBySession(db, sessionID(context));
+        const from_box =
+          typeof args.box === "string" && args.box.length > 0
+            ? (sessionBoxes.find((b) => b.name === args.box)?.name ?? args.box)
+            : (sessionBoxes[0]?.name ?? null);
         touchMailbox(db, sessionID(context), Date.now());
         const selfSendLocal = async (): Promise<string> => {
           const result = deliverMessage(db, {
@@ -428,6 +434,7 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
           rows.map((r) => ({
             id: r.id,
             delivery_id: r.delivery_id,
+            ...(r.box !== undefined && r.box !== null ? { box: r.box } : {}),
             from: r.from,
             from_box: r.from_box,
             subject: r.subject,

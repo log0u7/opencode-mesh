@@ -5,6 +5,24 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.3] - 2026-11-22
+
+### Fixed
+
+- **Multi-box sessions**: one TUI wearing several agent hats used to drop the
+  previous mailbox at every new enrollment (one-box-per-session rule) — pools
+  and roles churned as roles rotated. A session now owns SEVERAL mailboxes:
+  `mesh_register` never deletes another box, `mesh_inbox` aggregates all the
+  session's boxes (each row labeled with its box), the wake loop aggregates
+  per session (one prompt listing the boxes), and `mesh_send` gains an
+  optional `box=` to choose the sending mailbox.
+- **Sidebar per session**: switching tabs now shows THAT session's state
+  instantly (snapshots cached per session id instead of one shared "latest").
+
+### Changed
+
+- Schema v6: `mailboxes` loses `UNIQUE(session_id)` (rebuild migration).
+
 ## [0.10.2] - 2026-11-22
 
 ### Added

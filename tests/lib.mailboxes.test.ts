@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { openMeshDb } from "../src/lib/db.js";
 import {
   ackInbox,
+  mailboxesBySession,
   deliverMessage,
   firstReply,
   inboxRows,
@@ -31,13 +32,13 @@ describe("mailbox registration", () => {
     d.close();
   });
 
-  it("keeps one box per session: re-registering under a new name drops the old row", () => {
+  it("a session may own several boxes (one TUI, several agent hats)", () => {
     const d = db();
     registerMailbox(d, { name: "a", session_id: "s1", now: 1000 });
     registerMailbox(d, { name: "b", session_id: "s1", now: 2000 });
 
-    expect(mailboxByName(d, "a")).toBeNull();
-    expect(mailboxBySession(d, "s1")?.name).toBe("b");
+    expect(mailboxByName(d, "a")?.session_id).toBe("s1");
+    expect(mailboxByName(d, "b")?.session_id).toBe("s1");
     d.close();
   });
 
@@ -304,6 +305,33 @@ describe("presence and purge", () => {
     purgeExpired(d, 10_000, 500_000);
     const subjects = inboxRows(d, "s1").map((r) => r.subject);
     expect(subjects).toEqual(["fresh"]);
+    d.close();
+  });
+});
+
+describe("multi-box sessions", () => {
+  it("inboxRows aggregates all the session's boxes and labels them", () => {
+    const d = db();
+    registerMailbox(d, { name: "a", session_id: "s1", now: 1000 });
+    registerMailbox(d, { name: "b", session_id: "s1", now: 2000 });
+    deliverMessage(d, { from: "n", to_box: "a", subject: "for a", body: "1", created_at: 3000 });
+    deliverMessage(d, { from: "n", to_box: "b", subject: "for b", body: "2", created_at: 4000 });
+
+    const rows = inboxRows(d, "s1");
+    expect(rows).toHaveLength(2);
+    const bySubject = new Map(rows.map((r) => [r.subject, r]));
+    expect(bySubject.get("for a")?.box).toBe("a");
+    expect(bySubject.get("for b")?.box).toBe("b");
+    d.close();
+  });
+
+  it("single-box sessions keep unlabeled rows (compat)", () => {
+    const d = db();
+    registerMailbox(d, { name: "solo", session_id: "s1", now: 1000 });
+    deliverMessage(d, { from: "n", to_box: "solo", subject: "s", body: "b", created_at: 1000 });
+    const rows = inboxRows(d, "s1");
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.box).toBeUndefined();
     d.close();
   });
 });
