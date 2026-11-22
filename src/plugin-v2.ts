@@ -114,6 +114,7 @@ export const MeshV2 = Plugin.define({
             // wake loop can find this session's mailbox (and prompt it).
             if (typeof context?.sessionID === "string" && context.sessionID.length > 0) {
               sessionRef.sessionID = context.sessionID;
+              sessionsSeen.add(context.sessionID);
             }
             return { content: await spec.execute(args as Record<string, unknown>, context) };
           },
@@ -121,6 +122,10 @@ export const MeshV2 = Plugin.define({
       }
     });
 
+    // Sessions this instance has seen since boot (mesh tool calls + TUI bind):
+    // the wake loop's liveness test. Session records outlive their process —
+    // ctx.session.get would call a dead pre-restart session "alive".
+    const sessionsSeen = new Set<string>();
     // Sessions currently mid-turn, tracked from the host's durable execution
     // events: a queued wake prompt would fire with a stale unread count after
     // the turn acked the mail (the orchestrator's "false positives").
@@ -156,13 +161,7 @@ export const MeshV2 = Plugin.define({
       db,
       ...(options.wake === false ? { intervalMs: 0 } : {}),
       ...(options.wakeIntervalMs !== undefined ? { intervalMs: options.wakeIntervalMs } : {}),
-      sessionExists: async (sessionID) => {
-        try {
-          return (await ctx.session.get({ sessionID })) !== undefined;
-        } catch {
-          return false;
-        }
-      },
+      sessionKnown: (sessionID) => sessionsSeen.has(sessionID),
       sessionRunning: (sessionID) => running.has(sessionID),
       prompt: (sessionID, text) =>
         ctx.session.prompt({
@@ -224,6 +223,7 @@ export const MeshV2 = Plugin.define({
             : undefined;
         if (typeof sessionID === "string" && sessionID.length > 0) {
           sessionRef.sessionID = sessionID;
+          sessionsSeen.add(sessionID);
           // Re-bind every mailbox this instance registered (same project key):
           // after a restart a box would otherwise stay bound to the dead
           // session id and the wake loop would never find it. Last binder

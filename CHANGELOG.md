@@ -5,6 +5,20 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.1] - 2026-11-22
+
+### Fixed
+
+- Wrong-mailbox wake attribution after a restart. Session records outlive
+  their process: `ctx.session.get` called a dead pre-restart session "alive",
+  so the host-wide loop prompted it with mail that belonged to other
+  mailboxes (6admin pinged forever over quartermaster's unread delivery,
+  while its own `mesh_inbox` read empty — the box was bound to the dead
+  session id). The wake loop now only trusts sessions this instance has
+  actually SEEN since boot (a mesh tool call or a TUI bind); an unseen
+  session's mailbox waits for the agent's first turn, which re-registers and
+  re-binds the box per the AGENTS.md check-in convention.
+
 ## [0.10.0] - 2026-11-22
 
 ### Added
