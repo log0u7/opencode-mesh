@@ -115,17 +115,24 @@ export const MeshV2 = Plugin.define({
       }
     });
 
-    // Wake: when unread mail lands in this session's mailbox (another session
-    // or a remote peer addressing it), inject a prompt so an idle agent reacts
-    // without a human relaying the message.
+    // Wake: when unread mail lands in a mailbox whose session lives on this
+    // host, inject a prompt so the idle agent reacts without a human relaying.
+    // Host-wide: one opencode process (e.g. `opencode serve`) hosts many
+    // sessions, each with its own mailbox.
     const wake = startWakeLoop({
       db,
-      sessionID: () => sessionRef.sessionID,
       ...(options.wake === false ? { intervalMs: 0 } : {}),
       ...(options.wakeIntervalMs !== undefined ? { intervalMs: options.wakeIntervalMs } : {}),
-      prompt: (text) =>
+      sessionExists: async (sessionID) => {
+        try {
+          return (await ctx.session.get({ sessionID })) !== undefined;
+        } catch {
+          return false;
+        }
+      },
+      prompt: (sessionID, text) =>
         ctx.session.prompt({
-          sessionID: sessionRef.sessionID!,
+          sessionID,
           text,
           delivery: "queue",
         }),

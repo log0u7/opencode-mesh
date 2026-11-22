@@ -86,7 +86,10 @@ function fakeCtx(
     },
     session: {
       hook: async () => {},
-      prompt: vi.fn(async (input: { text: string }) => {
+      get: vi.fn(async (input: { sessionID: string }) =>
+        input.sessionID === "s1" ? { sessionID: input.sessionID } : undefined,
+      ),
+      prompt: vi.fn(async (input: { sessionID: string; text: string }) => {
         prompts.push(input.text);
       }),
     },
