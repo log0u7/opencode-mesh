@@ -8,14 +8,15 @@ import {
   DEFAULT_WAKE_COOLDOWN_MS,
 } from "../src/lib/wake.js";
 
-function setup() {
+function setup(hostSessions: string[]) {
   const db = openMeshDb(":memory:");
-  registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
-  const prompts: string[] = [];
-  const prompt = vi.fn(async (text: string) => {
-    prompts.push(text);
+  const live = new Set(hostSessions);
+  const prompts: Array<{ sessionID: string; text: string }> = [];
+  const prompt = vi.fn(async (sessionID: string, text: string) => {
+    prompts.push({ sessionID, text });
   });
-  return { db, prompt, prompts };
+  const sessionExists = vi.fn(async (sessionID: string) => live.has(sessionID));
+  return { db, prompt, prompts, sessionExists };
 }
 
 describe("wake loop", () => {
@@ -25,41 +26,77 @@ describe("wake loop", () => {
   });
 
   it("is inert with intervalMs <= 0", async () => {
-    const { db, prompt } = setup();
+    const { db, prompt } = setup(["s1"]);
+    registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
     deliverMessage(db, { from: "n", to_box: "a", subject: "s", body: "b", created_at: 1000 });
-    const handle = startWakeLoop({ db, sessionID: "s1", prompt, intervalMs: 0 });
+    const handle = startWakeLoop({ db, prompt, sessionExists: async () => true, intervalMs: 0 });
     await new Promise((r) => setTimeout(r, 30));
     handle.stop();
     expect(prompt).not.toHaveBeenCalled();
     db.close();
   });
 
-  it("prompts once when unread mail arrives", async () => {
-    const { db, prompt, prompts } = setup();
-    const handle = startWakeLoop({
-      db,
-      sessionID: "s1",
-      prompt,
-      intervalMs: 10,
-      cooldownMs: 5000,
-    });
+  it("wakes the bound session when its mailbox receives mail", async () => {
+    const { db, prompt, prompts } = setup(["s1"]);
+    registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
+    const handle = startWakeLoop({ db, prompt, sessionExists, intervalMs: 10, cooldownMs: 5000 });
     deliverMessage(db, { from: "n", to_box: "a", subject: "s", body: "b", created_at: 1000 });
     await new Promise((r) => setTimeout(r, 50));
     handle.stop();
 
     expect(prompt).toHaveBeenCalledTimes(1);
-    expect(prompts[0]).toContain('mailbox "a"');
-    expect(prompts[0]).toContain("1 unread");
+    expect(prompts[0]?.sessionID).toBe("s1");
+    expect(prompts[0]?.text).toContain('mailbox "a"');
+    expect(prompts[0]?.text).toContain("1 unread");
     db.close();
   });
 
-  it("does not spam while unread count is unchanged (cooldown)", async () => {
-    const { db, prompt } = setup();
+  function sessionExists(sessionID: string): Promise<boolean> {
+    return Promise.resolve(sessionID === "s1");
+  }
+
+  it("skips mailboxes whose session does not live on this host", async () => {
+    const { db, prompt } = setup([]);
+    registerMailbox(db, { name: "far", session_id: "s-elsewhere", now: 1000 });
+    deliverMessage(db, { from: "n", to_box: "far", subject: "s", body: "b", created_at: 1000 });
+    const handle = startWakeLoop({ db, prompt, sessionExists, intervalMs: 10, cooldownMs: 10 });
+    await new Promise((r) => setTimeout(r, 60));
+    handle.stop();
+
+    expect(prompt).not.toHaveBeenCalled();
+    db.close();
+  });
+
+  it("wakes only the addressed mailbox in a multi-session host", async () => {
+    const { db, prompt, prompts } = setup(["s1", "s2"]);
+    registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
+    registerMailbox(db, { name: "b", session_id: "s2", now: 1000 });
+    const handle = startWakeLoop({
+      db,
+      prompt,
+      sessionExists: async () => true,
+      intervalMs: 10,
+      cooldownMs: 5000,
+    });
+    deliverMessage(db, { from: "n", to_box: "a", subject: "one", body: "b", created_at: 1000 });
+    await new Promise((r) => setTimeout(r, 40));
+    deliverMessage(db, { from: "n", to_box: "b", subject: "two", body: "b", created_at: 2000 });
+    await new Promise((r) => setTimeout(r, 40));
+    handle.stop();
+
+    expect(prompts.map((p) => p.sessionID)).toEqual(["s1", "s2"]);
+    expect(prompts[1]?.text).toContain('mailbox "b"');
+    db.close();
+  });
+
+  it("does not spam while unread count is unchanged (per-mailbox cooldown)", async () => {
+    const { db, prompt } = setup(["s1"]);
+    registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
     deliverMessage(db, { from: "n", to_box: "a", subject: "s", body: "b", created_at: 1000 });
     const handle = startWakeLoop({
       db,
-      sessionID: "s1",
       prompt,
+      sessionExists: async () => true,
       intervalMs: 10,
       cooldownMs: 5000,
     });
@@ -70,12 +107,13 @@ describe("wake loop", () => {
     db.close();
   });
 
-  it("prompts again when new mail arrives during the cooldown", async () => {
-    const { db, prompt } = setup();
+  it("prompts again when new mail arrives during the cooldown of another mailbox only", async () => {
+    const { db, prompt, prompts } = setup(["s1"]);
+    registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
     const handle = startWakeLoop({
       db,
-      sessionID: "s1",
       prompt,
+      sessionExists: async () => true,
       intervalMs: 10,
       cooldownMs: 5000,
     });
@@ -89,12 +127,12 @@ describe("wake loop", () => {
     db.close();
   });
 
-  it("stays silent for a session without a registered mailbox", async () => {
-    const { db, prompt } = setup();
+  it("stays silent for an unregistered mailbox", async () => {
+    const { db, prompt } = setup(["s1"]);
     const handle = startWakeLoop({
       db,
-      sessionID: "nobody",
       prompt,
+      sessionExists: async () => true,
       intervalMs: 10,
       cooldownMs: 10,
     });
@@ -107,15 +145,16 @@ describe("wake loop", () => {
   });
 
   it("swallows prompt failures and keeps polling", async () => {
-    const { db } = setup();
+    const { db } = setup(["s1"]);
+    registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
     let calls = 0;
     const handle = startWakeLoop({
       db,
-      sessionID: "s1",
       prompt: async () => {
         calls += 1;
         throw new Error("host refused");
       },
+      sessionExists: async () => true,
       intervalMs: 10,
       cooldownMs: 0,
     });
