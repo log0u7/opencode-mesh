@@ -55,6 +55,8 @@ export type InboxRow = {
   body: string;
   reply_to: string | null;
   created_at: number;
+  /** Present when the session owns several mailboxes: which box got it. */
+  box?: string | null;
 };
 
 // 7 days: read or not, a message older than this is swept at server boot.
@@ -104,12 +106,8 @@ type MessageRow = {
 // ---- registration and presence ----
 
 export function registerMailbox(db: MeshDb, input: RegisterMailboxInput): Mailbox {
-  // One box per session: registering under a new name releases the old one.
+  // A session may own SEVERAL mailboxes (one TUI, several agent hats).
   // Re-registering an existing name rebinds it to this session (handoff).
-  db.conn.run("DELETE FROM mailboxes WHERE session_id = ? AND name != ?", [
-    input.session_id,
-    input.name,
-  ]);
   db.conn.run(
     `INSERT INTO mailboxes (name, session_id, role, pools, bind_key, last_seen, created_at)
      VALUES (?, ?, ?, '[]', ?, ?, ?)
@@ -144,6 +142,15 @@ export function mailboxBySession(db: MeshDb, session_id: string): Mailbox | null
   return row ? rowToMailbox(row) : null;
 }
 
+/** Every mailbox bound to a session (a session may wear several hats). */
+export function mailboxesBySession(db: MeshDb, session_id: string): Mailbox[] {
+  return db.conn
+    .all<MailboxRow>("SELECT * FROM mailboxes WHERE session_id = ? ORDER BY created_at ASC", [
+      session_id,
+    ])
+    .map(rowToMailbox);
+}
+
 export function mailboxByName(db: MeshDb, name: string): Mailbox | null {
   const row = db.conn.get<MailboxRow>("SELECT * FROM mailboxes WHERE name = ?", [name]);
   return row ? rowToMailbox(row) : null;
@@ -157,6 +164,11 @@ export function listMailboxes(db: MeshDb): Mailbox[] {
 
 export function touchMailbox(db: MeshDb, session_id: string, now: number): void {
   db.conn.run("UPDATE mailboxes SET last_seen = ? WHERE session_id = ?", [now, session_id]);
+}
+
+/** Touch one specific box (used when the caller names its sending box). */
+export function touchBoxByName(db: MeshDb, name: string, now: number): void {
+  db.conn.run("UPDATE mailboxes SET last_seen = ? WHERE name = ?", [now, name]);
 }
 
 export function joinPool(db: MeshDb, name: string, pool: string): void {
@@ -306,9 +318,25 @@ function globalRows(db: MeshDb): InboxRow[] {
 }
 
 export function inboxRows(db: MeshDb, session_id: string): InboxRow[] {
-  const box = mailboxBySession(db, session_id);
-  const rows = box ? [...deliveryRows(db, box.name), ...globalRows(db)] : globalRows(db);
-  return rows.sort((a, b) => a.created_at - b.created_at);
+  const boxes = mailboxesBySession(db, session_id);
+  const rows =
+    boxes.length > 0
+      ? [...boxes.flatMap((box) => deliveryRows(db, box.name)), ...globalRows(db)]
+      : globalRows(db);
+  return rows
+    .map((row) =>
+      boxes.length > 1 ? { ...row, box: deliveryBoxName(db, row.delivery_id, boxes) } : row,
+    )
+    .sort((a, b) => a.created_at - b.created_at);
+}
+
+/** Which of the session's boxes a delivery belongs to (multi-box labeling). */
+function deliveryBoxName(db: MeshDb, delivery_id: string, boxes: Mailbox[]): string | null {
+  if (delivery_id.length === 0) return null;
+  const row = db.conn.get<{ to_box: string }>("SELECT to_box FROM deliveries WHERE id = ?", [
+    delivery_id,
+  ]);
+  return row && boxes.some((b) => b.name === row.to_box) ? row.to_box : null;
 }
 
 // First unread reply to a message id, for mesh_wait. Box deliveries take

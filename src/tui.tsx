@@ -72,27 +72,30 @@ export default Plugin.define({
     // RPC) or while the server is unreachable, the slot stays hidden. The
     // sessionID arrives with the slot input (see register below).
     const mesh = context.client.rpc(MeshRpc);
-    const sessionId = createSignal<string | null>(null);
-    const refresh = async () => {
+    // Snapshots per session: switching tabs must show THAT session's state
+    // instantly (a single "latest" cache made the panel stale on tab switch).
+    const snapBySession = new Map<string, MeshSnapshot>();
+    let currentSession: string | null = null;
+    const refresh = async (sid: string | null) => {
+      if (sid === null) return;
       try {
-        const sid = sessionId[0]();
-        const snap = (await mesh.snapshot({
-          ...(sid !== null ? { sessionID: sid } : {}),
-        })) as MeshSnapshot;
-        setSnapshot(snap);
-        setLines(formatMeshSidebar(snap, store.collapsed));
+        const snap = (await mesh.snapshot({ sessionID: sid })) as MeshSnapshot;
+        snapBySession.set(sid, snap);
+        if (currentSession === sid) {
+          setSnapshot(snap);
+          setLines(formatMeshSidebar(snap, store.collapsed));
+        }
       } catch {
-        setLines(null);
+        if (currentSession === sid) setLines(null);
       }
     };
-    void refresh();
-    const timer = setInterval(() => void refresh(), REFRESH_MS);
+    const timer = setInterval(() => void refresh(currentSession), REFRESH_MS);
 
     // quota-style event refresh: debounced immediate refresh after activity.
     let debounce: ReturnType<typeof setTimeout> | undefined;
     const schedule = () => {
       if (debounce) clearTimeout(debounce);
-      debounce = setTimeout(() => void refresh(), EVENT_DEBOUNCE_MS);
+      debounce = setTimeout(() => void refresh(currentSession), EVENT_DEBOUNCE_MS);
     };
     // context.client.event is an AsyncIterable of V2Event, not an EventEmitter.
     const events = context.client.event.subscribe();
@@ -109,11 +112,12 @@ export default Plugin.define({
     const unregister = context.ui.slot({
       append: "sidebar.content",
       render: (input) => {
-        if (input.sessionID !== sessionId[0]()) {
-          sessionId[1](input.sessionID);
+        if (input.sessionID !== currentSession) {
+          currentSession = input.sessionID;
           // Bind BEFORE any mesh tool call: a fresh idle session must wake on
           // incoming mail, and only the TUI knows the sessionID that early.
           void meshRpc.bind({ sessionID: input.sessionID }).catch(() => {});
+          void refresh(currentSession);
           schedule();
         }
         const unread = snapshot()?.me?.unread ?? 0;
@@ -125,7 +129,7 @@ export default Plugin.define({
                 onMouseDown={() => {
                   void mutate((draft) => {
                     draft.collapsed = !draft.collapsed;
-                  }).then(() => void refresh());
+                  }).then(() => void refresh(currentSession));
                 }}
               >
                 <b>{store.collapsed ? "▶ Mesh" : "▼ Mesh"}</b>
@@ -155,7 +159,7 @@ export default Plugin.define({
           slash: { name: "mesh" },
           palette: true,
           run: async () => {
-            await refresh();
+            await refresh(currentSession);
             const current = snapshot();
             if (!current) {
               context.ui.toast.show({
@@ -177,7 +181,7 @@ export default Plugin.define({
             await mutate((draft) => {
               draft.collapsed = !draft.collapsed;
             });
-            void refresh();
+            void refresh(currentSession);
           },
         },
       ],

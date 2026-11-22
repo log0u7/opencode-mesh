@@ -36,7 +36,7 @@ CREATE TABLE IF NOT EXISTS messages (
 );
 CREATE TABLE IF NOT EXISTS mailboxes (
   name TEXT PRIMARY KEY,
-  session_id TEXT NOT NULL UNIQUE,
+  session_id TEXT NOT NULL,
   role TEXT,
   pools TEXT NOT NULL DEFAULT '[]',
   bind_key TEXT,
@@ -120,6 +120,23 @@ function migrate(conn: SqliteConn): void {
   // v5: messages.origin_id (cross-host broadcast dedup).
   if (!messageColumns.includes("origin_id")) {
     conn.exec("ALTER TABLE messages ADD COLUMN origin_id TEXT");
+  }
+  // v6: mailboxes loses UNIQUE(session_id) — a session may own several boxes
+  // (one TUI, several agent hats). SQLite cannot drop a constraint: rebuild.
+  const mailboxesSql =
+    conn.get<{ sql: string }>(
+      "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'mailboxes'",
+    )?.sql ?? "";
+  if (mailboxesSql.includes("session_id TEXT NOT NULL UNIQUE")) {
+    conn.exec(
+      "CREATE TABLE mailboxes_new (name TEXT PRIMARY KEY, session_id TEXT NOT NULL, role TEXT, pools TEXT NOT NULL DEFAULT '[]', bind_key TEXT, last_seen INTEGER NOT NULL, created_at INTEGER NOT NULL)",
+    );
+    conn.exec(
+      "INSERT INTO mailboxes_new SELECT name, session_id, role, pools, bind_key, last_seen, created_at FROM mailboxes",
+    );
+    conn.exec("DROP TABLE mailboxes");
+    conn.exec("ALTER TABLE mailboxes_new RENAME TO mailboxes");
+    conn.exec("CREATE INDEX IF NOT EXISTS idx_mailboxes_session ON mailboxes(session_id)");
   }
   conn.exec(INDEXES_V3);
   conn.exec("CREATE INDEX IF NOT EXISTS idx_messages_origin ON messages(origin_id);");
