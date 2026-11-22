@@ -6,6 +6,9 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Plugin } from "@opencode/plugin";
 
 import { pluginModule } from "../src/index.js";
+import { sendMail } from "../src/lib/client.js";
+import { openMeshDb } from "../src/lib/db.js";
+import { pairWithToken } from "../src/lib/peers.js";
 
 const dirs: string[] = [];
 
@@ -51,6 +54,8 @@ function fakeCtx(
   overrides: { options?: Record<string, unknown>; worktree?: unknown } = {},
 ) {
   const added: AddedTool[] = [];
+  const rpcHandlers: Record<string, (input: unknown) => Promise<unknown>> = {};
+  const prompts: string[] = [];
 
   const ctx = {
     location: {
@@ -79,18 +84,29 @@ function fakeCtx(
       transform: async (fn: (editor: { add: (t: AddedTool & { id: string }) => void }) => void) =>
         fn({ add: (t) => added.push(t) }),
     },
-    session: { hook: async () => {} },
+    session: {
+      hook: async () => {},
+      prompt: vi.fn(async (input: { text: string }) => {
+        prompts.push(input.text);
+      }),
+    },
     event: { subscribe: () => (async function* () {})() },
     storage: {
       get: async () => undefined,
       set: async () => {},
     },
     rpc: {
-      register: async () => ({ dispose: async () => {}, events: { emit: async () => {} } }),
+      register: async (
+        _id: unknown,
+        handlers: Record<string, (input: unknown) => Promise<unknown>>,
+      ) => {
+        Object.assign(rpcHandlers, handlers);
+        return { dispose: async () => {}, events: { emit: async () => {} } };
+      },
     },
   } as unknown as Plugin.Context;
 
-  return { ctx, added };
+  return { ctx, added, rpcHandlers, prompts };
 }
 
 const TOOL_NAMES = [
@@ -217,6 +233,55 @@ describe("opencode-mesh v2 setup", () => {
     expect(domain.create).toHaveBeenCalledWith({ projectID: "proj-1" });
     expect(parsed.worktree).toBe("/v2/wt2");
     expect(parsed.branch).toBe("wt2");
+
+    await cleanup?.();
+  });
+
+  it("wakes an idle restarted session via declarative mailbox + TUI bind", async () => {
+    const dir = tmpDataDir();
+    // Declarative mailbox in plugin options: the box follows the instance
+    // across restarts with no tool call and no manual mesh_register.
+    const { ctx, added, rpcHandlers, prompts } = fakeCtx(dir, {
+      options: { wakeIntervalMs: 20, mailbox: "a", mailboxRole: "pair" },
+    });
+    const cleanup = await pluginModule.setup(ctx as never);
+
+    const bind = rpcHandlers.bind;
+    await bind?.({ sessionID: "s1" });
+
+    const meshStatus = added.find((t) => t.name === "mesh_status");
+    const rawStatus = await meshStatus?.execute({}, { sessionID: "s1" });
+    const statusOut = JSON.parse(
+      typeof rawStatus === "string" ? rawStatus : (rawStatus?.content ?? "{}"),
+    ) as { server: string; mailboxes: Array<{ name: string; role: string | null }> };
+    expect(statusOut.mailboxes[0]?.name).toBe("a");
+    expect(statusOut.mailboxes[0]?.role).toBe("pair");
+
+    // Pair a remote node so the HTTP mail authenticates, then deliver from
+    // OUTSIDE this process: no tool call may run before the wake.
+    const pairDb = openMeshDb(join(dir, "mesh.db"));
+    pairWithToken(pairDb, {
+      node_id: "node-x",
+      hostname: "x",
+      fingerprint: "fx",
+      token: "tok-x",
+    });
+    pairDb.close();
+
+    const sendResult = await sendMail({
+      url: `http://${statusOut.server}`,
+      token: "tok-x",
+      from: "node-x",
+      subject: "ping",
+      body: "wake up",
+      to: "a",
+    });
+    expect(sendResult).toBe("ok");
+
+    for (let i = 0; i < 60 && prompts.length === 0; i += 1) {
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    expect(prompts.some((t) => t.includes('mailbox "a"'))).toBe(true);
 
     await cleanup?.();
   });

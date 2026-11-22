@@ -191,6 +191,27 @@ export const MeshRpc = Rpc.define({
         additionalProperties: false,
       },
     },
+    // Bind: the TUI reports this instance's sessionID at mount, so the wake
+    // loop works BEFORE any mesh tool call (a fresh idle session otherwise
+    // never learns its sessionID and mail to its mailbox stays silent).
+    bind: {
+      input: {
+        type: "object",
+        properties: {
+          sessionID: { type: "string", description: "This TUI instance's session id" },
+        },
+        required: ["sessionID"],
+        additionalProperties: false,
+      },
+      output: {
+        type: "object",
+        properties: {
+          bound: { type: "boolean" },
+        },
+        required: ["bound"],
+        additionalProperties: false,
+      },
+    },
     // Sidebar collapse state, persisted by the setup side through the raw
     // storage domain: the TUI-side storage.store() throws for scoped plugin
     // ids (anomalyco/opencode#62634).
