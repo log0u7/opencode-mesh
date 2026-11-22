@@ -5,6 +5,17 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.1] - 2026-11-22
+
+### Fixed
+
+- Sidebar collapse state survives TUI restarts even for scoped plugin ids
+  (`@scope/name`): the host's storage segment validation rejects them
+  (anomalyco/opencode#62634, fix pending in PR #62638), so the collapse state
+  is now persisted by the setup side through the raw storage domain under an
+  escaped key (`plugin.<escaped-id>.mesh-sidebar`) and synced to the TUI over
+  RPC. In-memory remains the last resort on hosts without RPC.
+
 ## [0.8.0] - 2026-11-22
 
 ### Added
@@ -79,8 +90,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - TUI plugin (phase 0+1): toast, `/mesh` slash command, sidebar slot.
-
-## [0.8.0] - 2026-11-22
 
 ## [0.4.1] - 2026-10-24
 

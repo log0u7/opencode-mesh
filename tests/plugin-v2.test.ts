@@ -81,6 +81,10 @@ function fakeCtx(
     },
     session: { hook: async () => {} },
     event: { subscribe: () => (async function* () {})() },
+    storage: {
+      get: async () => undefined,
+      set: async () => {},
+    },
     rpc: {
       register: async () => ({ dispose: async () => {}, events: { emit: async () => {} } }),
     },

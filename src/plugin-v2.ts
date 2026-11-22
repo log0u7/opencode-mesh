@@ -11,6 +11,7 @@ import type { WorktreeClient } from "./lib/worktree.js";
 import { v2WorktreeDomainClient } from "./lib/worktree.js";
 import { reconcileWorkers } from "./lib/workers.js";
 import { startMeshServer } from "./lib/serve.js";
+import { createDurableStore } from "./lib/persist.js";
 import { startWakeLoop } from "./lib/wake.js";
 import { MeshRpc, snapshotFromMesh } from "./rpc.js";
 import { buildToolSpecs, type ToolSpec } from "./tools.js";
@@ -119,6 +120,10 @@ export const MeshV2 = Plugin.define({
     });
 
     // Live snapshot for the TUI sidebar: one compact read over the mesh state.
+    // Sidebar collapse state is persisted HERE (raw storage domain, escaped
+    // key) because the TUI-side storage.store() throws for scoped plugin ids
+    // (anomalyco/opencode#62634).
+    const sidebarPersist = createDurableStore(ctx.storage, "@log0u7/opencode-mesh", "mesh-sidebar");
     const rpc = await ctx.rpc.register(MeshRpc, {
       snapshot: async () =>
         snapshotFromMesh({
@@ -127,6 +132,18 @@ export const MeshV2 = Plugin.define({
           locks: listLocks(db, { now: Date.now() }),
           server: `${address}:${port}`,
         }),
+      sidebar: async () => {
+        const state = await sidebarPersist.load<{ collapsed: boolean }>();
+        return { collapsed: state?.collapsed === true };
+      },
+      set_sidebar: async (input: unknown) => {
+        const collapsed =
+          typeof input === "object" && input !== null && "collapsed" in input
+            ? (input as { collapsed: unknown }).collapsed === true
+            : false;
+        await sidebarPersist.save({ collapsed });
+        return { collapsed };
+      },
     });
 
     const cleanup = async () => {

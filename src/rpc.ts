@@ -90,6 +90,38 @@ export const MeshRpc = Rpc.define({
         additionalProperties: false,
       },
     },
+    // Sidebar collapse state, persisted by the setup side through the raw
+    // storage domain: the TUI-side storage.store() throws for scoped plugin
+    // ids (anomalyco/opencode#62634).
+    sidebar: {
+      input: { type: "object", properties: {}, additionalProperties: false },
+      output: {
+        type: "object",
+        properties: {
+          collapsed: { type: "boolean", description: "Sidebar collapsed state" },
+        },
+        required: ["collapsed"],
+        additionalProperties: false,
+      },
+    },
+    set_sidebar: {
+      input: {
+        type: "object",
+        properties: {
+          collapsed: { type: "boolean", description: "Sidebar collapsed state" },
+        },
+        required: ["collapsed"],
+        additionalProperties: false,
+      },
+      output: {
+        type: "object",
+        properties: {
+          collapsed: { type: "boolean", description: "Sidebar collapsed state" },
+        },
+        required: ["collapsed"],
+        additionalProperties: false,
+      },
+    },
   },
   events: {},
 });
