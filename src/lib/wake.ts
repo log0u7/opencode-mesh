@@ -17,6 +17,10 @@ export type WakeOptions = {
    * session lives here; mailboxes bound to foreign/dead sessions are skipped —
    * their own host wakes them.) */
   sessionExists: (sessionID: string) => Promise<boolean>;
+  /** Is the session mid-turn? Queued prompts would fire with a stale unread
+   * count after the turn acked the mail (false positives). Optional: when
+   * absent, every existing session is treated as idle. */
+  sessionRunning?: (sessionID: string) => boolean;
   /** Inject a prompt into a session (ctx.session.prompt). */
   prompt: (sessionID: string, text: string) => Promise<unknown>;
   /** Poll interval in ms. 0 disables the loop. Default 5000. */
@@ -69,6 +73,12 @@ export function startWakeLoop(options: WakeOptions): WakeHandle {
         if (!bound) {
           // Not this host's session (foreign host, dead session): its own
           // host wakes it, or a future bind/registration re-binds it here.
+          continue;
+        }
+        if (options.sessionRunning?.(box.session_id)) {
+          // Mid-turn: a queued prompt would fire with a stale unread count
+          // after the turn acked the mail. The turn-start check-in reads the
+          // box anyway (AGENTS.md convention) — skip.
           continue;
         }
         lastPromptAt.set(box.name, now);
