@@ -13,10 +13,12 @@ import { listMailboxes, unreadBoxCount } from "./mail.js";
 
 export type WakeOptions = {
   db: MeshDb;
-  /** Does this host process own the session? (ctx.session.get: defined = the
-   * session lives here; mailboxes bound to foreign/dead sessions are skipped —
-   * their own host wakes them.) */
-  sessionExists: (sessionID: string) => Promise<boolean>;
+  /** Has this plugin instance SEEN the session since its boot (a mesh tool
+   * call or a TUI bind)? Session records outlive their process: a durable
+   * record is not a live session. Mailboxes bound to unseen sessions are
+   * skipped — the agent's first turn re-registers (AGENTS.md) and re-binds
+   * the box, and only then the wake loop takes it over. */
+  sessionKnown: (sessionID: string) => boolean;
   /** Is the session mid-turn? Queued prompts would fire with a stale unread
    * count after the turn acked the mail (false positives). Optional: when
    * absent, every existing session is treated as idle. */
@@ -67,12 +69,12 @@ export function startWakeLoop(options: WakeOptions): WakeHandle {
           continue;
         }
         const bound =
-          typeof box.session_id === "string" && box.session_id.length > 0
-            ? await options.sessionExists(box.session_id)
-            : false;
+          typeof box.session_id === "string" &&
+          box.session_id.length > 0 &&
+          options.sessionKnown(box.session_id);
         if (!bound) {
-          // Not this host's session (foreign host, dead session): its own
-          // host wakes it, or a future bind/registration re-binds it here.
+          // Session this instance never saw (foreign host, dead session, or a
+          // pre-restart id): its live session will re-register and re-bind.
           continue;
         }
         if (options.sessionRunning?.(box.session_id)) {

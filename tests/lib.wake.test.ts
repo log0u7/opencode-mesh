@@ -15,8 +15,8 @@ function setup(hostSessions: string[]) {
   const prompt = vi.fn(async (sessionID: string, text: string) => {
     prompts.push({ sessionID, text });
   });
-  const sessionExists = vi.fn(async (sessionID: string) => live.has(sessionID));
-  return { db, prompt, prompts, sessionExists };
+  const sessionKnown = vi.fn((sessionID: string) => live.has(sessionID));
+  return { db, prompt, prompts, sessionKnown };
 }
 
 describe("wake loop", () => {
@@ -29,7 +29,7 @@ describe("wake loop", () => {
     const { db, prompt } = setup(["s1"]);
     registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
     deliverMessage(db, { from: "n", to_box: "a", subject: "s", body: "b", created_at: 1000 });
-    const handle = startWakeLoop({ db, prompt, sessionExists: async () => true, intervalMs: 0 });
+    const handle = startWakeLoop({ db, prompt, sessionKnown: () => true, intervalMs: 0 });
     await new Promise((r) => setTimeout(r, 30));
     handle.stop();
     expect(prompt).not.toHaveBeenCalled();
@@ -37,9 +37,9 @@ describe("wake loop", () => {
   });
 
   it("wakes the bound session when its mailbox receives mail", async () => {
-    const { db, prompt, prompts } = setup(["s1"]);
+    const { db, prompt, prompts, sessionKnown } = setup(["s1"]);
     registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
-    const handle = startWakeLoop({ db, prompt, sessionExists, intervalMs: 10, cooldownMs: 5000 });
+    const handle = startWakeLoop({ db, prompt, sessionKnown, intervalMs: 10, cooldownMs: 5000 });
     deliverMessage(db, { from: "n", to_box: "a", subject: "s", body: "b", created_at: 1000 });
     await new Promise((r) => setTimeout(r, 50));
     handle.stop();
@@ -56,10 +56,10 @@ describe("wake loop", () => {
   }
 
   it("skips mailboxes whose session does not live on this host", async () => {
-    const { db, prompt } = setup([]);
+    const { db, prompt, sessionKnown } = setup([]);
     registerMailbox(db, { name: "far", session_id: "s-elsewhere", now: 1000 });
     deliverMessage(db, { from: "n", to_box: "far", subject: "s", body: "b", created_at: 1000 });
-    const handle = startWakeLoop({ db, prompt, sessionExists, intervalMs: 10, cooldownMs: 10 });
+    const handle = startWakeLoop({ db, prompt, sessionKnown, intervalMs: 10, cooldownMs: 10 });
     await new Promise((r) => setTimeout(r, 60));
     handle.stop();
 
@@ -74,7 +74,7 @@ describe("wake loop", () => {
     const handle = startWakeLoop({
       db,
       prompt,
-      sessionExists: async () => true,
+      sessionKnown: () => true,
       intervalMs: 10,
       cooldownMs: 5000,
     });
@@ -96,7 +96,7 @@ describe("wake loop", () => {
     const handle = startWakeLoop({
       db,
       prompt,
-      sessionExists: async () => true,
+      sessionKnown: () => true,
       intervalMs: 10,
       cooldownMs: 5000,
     });
@@ -108,12 +108,12 @@ describe("wake loop", () => {
   });
 
   it("prompts again when new mail arrives during the cooldown of another mailbox only", async () => {
-    const { db, prompt, prompts } = setup(["s1"]);
+    const { db, prompt, prompts, sessionKnown } = setup(["s1"]);
     registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
     const handle = startWakeLoop({
       db,
       prompt,
-      sessionExists: async () => true,
+      sessionKnown: () => true,
       intervalMs: 10,
       cooldownMs: 5000,
     });
@@ -132,7 +132,7 @@ describe("wake loop", () => {
     const handle = startWakeLoop({
       db,
       prompt,
-      sessionExists: async () => true,
+      sessionKnown: () => true,
       intervalMs: 10,
       cooldownMs: 10,
     });
@@ -154,7 +154,7 @@ describe("wake loop", () => {
         calls += 1;
         throw new Error("host refused");
       },
-      sessionExists: async () => true,
+      sessionKnown: () => true,
       intervalMs: 10,
       cooldownMs: 0,
     });
@@ -167,13 +167,13 @@ describe("wake loop", () => {
   });
 
   it("skips a mid-turn session and prompts it once idle", async () => {
-    const { db, prompt, prompts } = setup(["s1"]);
+    const { db, prompt, prompts, sessionKnown } = setup(["s1"]);
     registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
     const running = new Set<string>(["s1"]);
     const handle = startWakeLoop({
       db,
       prompt,
-      sessionExists: async () => true,
+      sessionKnown: () => true,
       sessionRunning: (sessionID) => running.has(sessionID),
       intervalMs: 10,
       cooldownMs: 5000,
