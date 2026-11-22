@@ -5,6 +5,27 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.6] - 2026-11-23
+
+### Fixed
+
+- **The v2 adapter never passed the fanout to the tools** (lost in a 0.9.4
+  merge): every tool-originated broadcast with no local recipients errored
+  instead of forwarding — pool federation silently died for `mesh_send`
+  broadcasts (the relay path from remote arrivals still worked). The fanout
+  is wired again, with a regression test asserting the forward over HTTP.
+
+## [0.10.5] - 2026-11-22
+
+### Fixed
+
+- `mesh_join` / `mesh_leave` / `mesh_send` default to the **most recently
+  touched box** of the session (multi-box: the default was the first box by
+  creation date — the oldest — so enrollment joins landed on the wrong
+  mailbox). Explicit `box=` override available.
+- `SCHEMA_VERSION` bumped to 6: the 0.10.3 mailboxes rebuild (drop
+  `UNIQUE(session_id)`) never ran on existing v5 stores.
+
 ## [0.10.4] - 2026-11-22
 
 ### Fixed
