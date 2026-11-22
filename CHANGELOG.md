@@ -5,6 +5,37 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Named mailboxes: `mesh_register(name, role?)` binds a session to a mailbox;
+  `mesh_send(to=...)` routes locally by mailbox name; `mesh_inbox` reads only
+  the caller's box. Ends the shared-inbox cross-drain where the first session
+  to run consumed every message on the node.
+- Pool broadcast: `mesh_join` / `mesh_leave` / `mesh_pools` manage persisted
+  pool membership; `mesh_send(to="team:<pool>")` delivers one copy per member
+  (sender excluded), `to="all"` reaches every registered mailbox. Per-member
+  delivery rows mean each recipient acks independently.
+- Request/response: `mesh_wait(id, timeout)` blocks the agent turn until a
+  message with `reply_to: <id>` lands, then returns it acked.
+- Wake (OpenCode 2.x): the plugin watches the session's mailbox (5s poll,
+  60s cooldown) and injects a prompt via `ctx.session.prompt` when unread mail
+  arrives, so an idle agent reacts to incoming mail. Disable with `wake: false`.
+- Presence: mailboxes carry role, pools and `last_seen`; `mesh_status` shows
+  the age of every registered box.
+- Remote mailbox addressing: `POST /mail` accepts optional `to`, `from_box`,
+  `reply_to`; an unknown `to` falls back to the node's global inbox (old
+  receivers simply ignore the fields).
+- Retention: messages older than 7 days are swept at server boot.
+- Schema v3: `mailboxes`, `deliveries` tables; `messages.from_box` /
+  `messages.reply_to`; migration from v2 in place.
+
+### Fixed
+
+- `mesh_send`/`mesh_inbox` tolerate a missing session context (tests, exotic
+  hosts) instead of failing on a SQLite bind with `undefined`.
+
 ## [0.7.1] - 2026-11-07
 
 ### Fixed

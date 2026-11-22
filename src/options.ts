@@ -13,6 +13,8 @@ export type PluginOptions = {
   port?: number;
   bind?: "loopback" | "lan";
   advertise?: boolean;
+  /** Disable the mailbox wake loop (default: enabled). */
+  wake?: boolean;
   worktreeClient?: WorktreeClient;
   spawnFn?: SpawnFn;
 };
@@ -59,6 +61,12 @@ export function parseOptions(raw: PluginOptions | undefined): PluginOptions {
       throw new Error("opencode-mesh: options.advertise must be a boolean");
     }
     options.advertise = raw.advertise;
+  }
+  if (raw.wake !== undefined) {
+    if (typeof raw.wake !== "boolean") {
+      throw new Error("opencode-mesh: options.wake must be a boolean");
+    }
+    options.wake = raw.wake;
   }
   // Opaque collaborators are passed through untouched: the plugin cannot
   // validate a client or spawn function beyond its nominal type.

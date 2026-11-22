@@ -91,22 +91,54 @@ Note (npm 12): the package ships no lifecycle install scripts and needs no `allo
 Same machine: start two OpenCode instances in the same repository.
 
 ```
-mesh_status()                      # local sessions + paired peers + active locks
-mesh_pair()                        # emit a pairing offer (5 min) / complete the peer's offer
-mesh_send(peer="laptop", subject="handoff", body="...")
-mesh_inbox()                       # pull new messages, ack
+mesh_register(name="purser", role="manager")   # claim a named mailbox for this session
+mesh_send(to="quartermaster", subject="r8 go", body="...")   # targeted mail (this machine)
+mesh_send(to="team:quartermaster", subject="status", body="...")   # pool broadcast
+mesh_inbox()                       # only YOUR mailbox (plus legacy global mail), ack
+mesh_wait(id="...", timeout=120)   # block until a reply_to lands, then return it
+mesh_join(pool="team:quartermaster") / mesh_leave(pool="...") / mesh_pools()
 mesh_lock(path="src/api.ts", ttl=300)   # claim a file before editing (this machine only)
 mesh_unlock(path="src/api.ts")
 ```
+
+### Mailboxes and pools (multi-session routing)
+
+All sessions on one machine used to share a single mailbox, so every session
+draining the inbox ate everyone's messages. Mailboxes fix the routing:
+
+- `mesh_register(name, role?)` binds this session to a named mailbox. One box
+  per session; re-registering the same name from another session is a handoff.
+- `mesh_send(to=...)` routes locally by mailbox name, or broadcasts with
+  `team:<pool>` (members of a pool) or `all` (every registered box except the
+  sender). `peer=...` still sends to a remote node; `to` is honored on the
+  receiving node when its protocol supports it, otherwise the mail falls back
+  to that node's global inbox.
+- `mesh_inbox` reads only your box (plus legacy global mail), ack per message.
+- Pools are dynamic and persisted server-side: `mesh_join` / `mesh_leave`, and
+  the membership survives session restarts (a replacement session
+  re-registering the same name finds its pools intact).
+- `mesh_wait(id, timeout)` completes a request/response within one turn: it
+  blocks the agent turn until a message with `reply_to: id` arrives.
+- Presence: every tool interaction refreshes the mailbox `last_seen`;
+  `mesh_status` lists mailboxes with role, pools and age.
+- Wake (OpenCode 2.x): a plugin-side loop watches your mailbox and injects a
+  prompt into the session when unread mail arrives, so an idle agent reacts
+  without a human relaying the message. Disable with `wake: false` in the
+  plugin options.
+- Retention: messages older than 7 days are swept at server boot.
 
 ### Tools
 
 | Tool | Args | Description |
 |---|---|---|
-| `mesh_status` | | Local session registry, own address, paired peers, active locks. |
+| `mesh_status` | | Local session registry, named mailboxes (role, pools, presence), paired peers, active locks. |
+| `mesh_register` | `name`, `role?` | Bind this session to a named mailbox (one box per session, re-register = handoff). |
 | `mesh_pair` | `node_id?`, `token?`, `address?` | No args: emit a pairing offer (5 min ttl). With args: complete the peer's offer. |
-| `mesh_send` | `peer`, `subject`, `body` | Deliver a message to a peer's mailbox. |
-| `mesh_inbox` | `ack?` | Fetch unread messages; ack marks them read. |
+| `mesh_send` | `peer?`, `to?`, `subject`, `body`, `reply_to?` | Deliver mail: `to` a mailbox / `team:<pool>` / `all` locally, and/or `peer` on another node. |
+| `mesh_inbox` | `ack?` | Fetch unread messages addressed to this session's mailbox; ack marks them read. |
+| `mesh_wait` | `id`, `timeout?` | Block until a reply (`reply_to`) to message `id` arrives, return it. |
+| `mesh_join` / `mesh_leave` | `pool` | Add / remove this mailbox from a broadcast pool. |
+| `mesh_pools` | | List pools with their member mailboxes. |
 | `mesh_lock` | `path`, `ttl?` | Exclusive claim on a file or path, enforced only between sessions on this machine (default ttl 600s). Not visible to remote peers. |
 | `mesh_unlock` | `path` | Release a claim. |
 

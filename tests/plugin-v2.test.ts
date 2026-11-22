@@ -90,21 +90,26 @@ function fakeCtx(
 }
 
 const TOOL_NAMES = [
-  "mesh_status",
-  "mesh_pair",
-  "mesh_send",
   "mesh_inbox",
+  "mesh_join",
+  "mesh_leave",
   "mesh_lock",
-  "mesh_unlock",
+  "mesh_pair",
+  "mesh_pools",
+  "mesh_register",
+  "mesh_send",
   "mesh_spawn",
-  "mesh_workers",
+  "mesh_status",
+  "mesh_unlock",
+  "mesh_wait",
   "mesh_worker_logs",
-  "mesh_worker_stop",
   "mesh_worker_remove",
+  "mesh_worker_stop",
+  "mesh_workers",
 ].sort();
 
 describe("opencode-mesh v2 setup", () => {
-  it("registers the eleven mesh tools", async () => {
+  it("registers the mesh tools", async () => {
     const { ctx, added } = fakeCtx(tmpDataDir());
     const cleanup = await pluginModule.setup(ctx);
 

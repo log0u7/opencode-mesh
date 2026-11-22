@@ -11,6 +11,7 @@ import type { WorktreeClient } from "./lib/worktree.js";
 import { v2WorktreeDomainClient } from "./lib/worktree.js";
 import { reconcileWorkers } from "./lib/workers.js";
 import { startMeshServer } from "./lib/serve.js";
+import { startWakeLoop } from "./lib/wake.js";
 import { MeshRpc, snapshotFromMesh } from "./rpc.js";
 import { buildToolSpecs, type ToolSpec } from "./tools.js";
 import { defaultDataDir, parseOptions, type PluginOptions } from "./options.js";
@@ -53,6 +54,8 @@ export const MeshV2 = Plugin.define({
       options.worktreeClient ?? v2WorktreeDomainClient(ctx.worktree, ctx.location.project.id);
     const spawnFn: SpawnFn = options.spawnFn ?? nodeSpawn;
 
+    const sessionRef: { sessionID: string | null } = { sessionID: null };
+
     let advertiseHandle: AdvertiseHandle | null = null;
     let browseHandle: { close(): void } | null = null;
     if (options.advertise !== false) {
@@ -89,10 +92,30 @@ export const MeshV2 = Plugin.define({
           description: spec.description,
           input: jsonSchema(spec),
           async execute(args, context) {
+            // The session id is only known once a tool runs: capture it so the
+            // wake loop can find this session's mailbox (and prompt it).
+            if (typeof context?.sessionID === "string" && context.sessionID.length > 0) {
+              sessionRef.sessionID = context.sessionID;
+            }
             return { content: await spec.execute(args as Record<string, unknown>, context) };
           },
         });
       }
+    });
+
+    // Wake: when unread mail lands in this session's mailbox (another session
+    // or a remote peer addressing it), inject a prompt so an idle agent reacts
+    // without a human relaying the message.
+    const wake = startWakeLoop({
+      db,
+      sessionID: () => sessionRef.sessionID,
+      ...(options.wake === false ? { intervalMs: 0 } : {}),
+      prompt: (text) =>
+        ctx.session.prompt({
+          sessionID: sessionRef.sessionID!,
+          text,
+          delivery: "queue",
+        }),
     });
 
     // Live snapshot for the TUI sidebar: one compact read over the mesh state.
@@ -107,6 +130,7 @@ export const MeshV2 = Plugin.define({
     });
 
     const cleanup = async () => {
+      wake.stop();
       stopAllWorkers(db);
       advertiseHandle?.close();
       browseHandle?.close();

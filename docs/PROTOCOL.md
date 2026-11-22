@@ -72,8 +72,14 @@ pending path, the node must already be known.
 
 | Method | Path | Auth | Body | Response |
 |---|---|---|---|---|
-| `POST` | `/mail` | peer token | `{"from": "...", "subject": "...", "body": "...", "proof"?: "<pk>.<sig>"}` | `200 {"ok": true, "unread": N}` |
+| `POST` | `/mail` | peer token | `{"from": "...", "subject": "...", "body": "...", "proof"?: "<pk>.<sig>", "to"?: "<mailbox or team:<pool> or all>", "from_box"?: "<sender mailbox>", "reply_to"?: "<message id>"}` | `200 {"ok": true, "unread": N, "delivered": M}` |
 | `GET` | `/status` | peer token | none | `200 {"node_id": "...", "unread": N}` |
+
+The optional mail fields (`to`, `from_box`, `reply_to`) carry mailbox routing
+across nodes. A receiving node that recognizes the addressed mailbox delivers
+the mail into that box; an unknown `to` falls back to the node's global inbox
+so mail is never silently dropped. Older receivers ignore the extra fields
+entirely (global inbox), which keeps mixed-version pools working.
 
 Status codes:
 

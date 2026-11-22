@@ -10,7 +10,7 @@ export type MeshDb = {
 
 // Bump when a schema change needs a migration step; the version anchors future
 // migrations that cannot be expressed as idempotent `CREATE ... IF NOT EXISTS`.
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS peers (
@@ -26,8 +26,25 @@ CREATE TABLE IF NOT EXISTS peers (
 CREATE TABLE IF NOT EXISTS messages (
   id TEXT PRIMARY KEY,
   from_node TEXT NOT NULL,
+  from_box TEXT,
   subject TEXT NOT NULL,
   body TEXT NOT NULL,
+  reply_to TEXT,
+  status TEXT NOT NULL DEFAULT 'unread',
+  created_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS mailboxes (
+  name TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL UNIQUE,
+  role TEXT,
+  pools TEXT NOT NULL DEFAULT '[]',
+  last_seen INTEGER NOT NULL,
+  created_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS deliveries (
+  id TEXT PRIMARY KEY,
+  message_id TEXT NOT NULL,
+  to_box TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'unread',
   created_at INTEGER NOT NULL
 );
@@ -60,6 +77,12 @@ CREATE INDEX IF NOT EXISTS idx_workers_status ON workers(status);
 CREATE INDEX IF NOT EXISTS idx_locks_expires ON locks(expires_at);
 `;
 
+const INDEXES_V3 = `
+CREATE INDEX IF NOT EXISTS idx_messages_reply_to ON messages(reply_to);
+CREATE INDEX IF NOT EXISTS idx_deliveries_box_status ON deliveries(to_box, status);
+CREATE INDEX IF NOT EXISTS idx_deliveries_message ON deliveries(message_id);
+`;
+
 function migrate(conn: SqliteConn): void {
   const current = conn.get<{ user_version: number }>("PRAGMA user_version")?.user_version ?? 0;
   if (current >= SCHEMA_VERSION) {
@@ -74,6 +97,18 @@ function migrate(conn: SqliteConn): void {
   if (!peerColumns.includes("public_key")) {
     conn.exec("ALTER TABLE peers ADD COLUMN public_key TEXT");
   }
+  // v3: named mailboxes. messages gains from_box/reply_to; guarded ALTERs for
+  // databases created before v3 (fresh installs already have the columns).
+  const messageColumns = conn
+    .all<{ name: string }>("PRAGMA table_info(messages)")
+    .map((row) => row.name);
+  if (!messageColumns.includes("from_box")) {
+    conn.exec("ALTER TABLE messages ADD COLUMN from_box TEXT");
+  }
+  if (!messageColumns.includes("reply_to")) {
+    conn.exec("ALTER TABLE messages ADD COLUMN reply_to TEXT");
+  }
+  conn.exec(INDEXES_V3);
   conn.run(`PRAGMA user_version = ${SCHEMA_VERSION}`);
 }
 
