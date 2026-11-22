@@ -12,6 +12,13 @@ import {
   unreadCount,
 } from "./mail.js";
 import type { Fanout } from "./fanout.js";
+import {
+  ensurePairingCodeSchema,
+  findPendingByCode,
+  pairWithToken,
+  prunePendingTokens,
+} from "./peers.js";
+import { buildOfferBlob, parseOfferBlob, type OfferPayload } from "./offer-blob.js";
 
 const BODY_LIMIT = 64 * 1024;
 
@@ -25,6 +32,10 @@ export type MeshServerOptions = {
   bind?: "loopback" | "lan";
   /** Pool federation: forwards local broadcasts to paired peers. */
   fanout?: Fanout;
+  /** This node's identity, for pairing counter-offers. */
+  self: { node_id: string; pk: string; hostname: string };
+  /** Resolved by startMeshServer: "host:port" the caller reached us on. */
+  selfAddress?: string;
 };
 
 export type MeshServer = {
@@ -36,6 +47,7 @@ export type MeshServer = {
 // port is taken (two mesh nodes on one machine, e.g. a spawned worker loading
 // the same plugin), fall back to an ephemeral port instead of crashing.
 export async function startMeshServer(options: MeshServerOptions): Promise<MeshServer> {
+  ensurePairingCodeSchema(options.db);
   // Messages older than 7 days are swept at boot.
   purgeExpired(options.db, MESSAGE_TTL_MS, Date.now());
 
@@ -66,12 +78,42 @@ export async function startMeshServer(options: MeshServerOptions): Promise<MeshS
     attempt(options.port);
   });
 
+  options.selfAddress = `${host === "0.0.0.0" ? "127.0.0.1" : host}:${port}`;
   return { server, port, address: host };
 }
 
 function serverAddressPort(server: Server, fallback: number): number {
   const address = server.address();
   return address !== null && typeof address !== "string" ? address.port : fallback;
+}
+
+function consumePairingOffer(
+  options: MeshServerOptions,
+  pendingToken: string,
+  offer: string,
+  remote: string,
+  localAddress: string,
+): string | null {
+  const parsed = parseOfferBlob(offer) as OfferPayload | null;
+  if (parsed === null) return null;
+  options.db.conn.run("DELETE FROM pending_tokens WHERE token = ?", [pendingToken]);
+  pairWithToken(options.db, {
+    node_id: parsed.node_id,
+    hostname: (parsed.hostname ?? "").length > 0 ? (parsed.hostname ?? "") : "manual",
+    fingerprint: "code-pairing",
+    token: parsed.token,
+    addresses: remote.startsWith("::ffff:") ? [remote.slice(7)] : [remote],
+    public_key: parsed.pk,
+  });
+  // Counter-offer: our fresh pending offer, addressed to the interface the
+  // caller actually reached.
+  const address = localAddress.startsWith("::ffff:") ? localAddress.slice(7) : localAddress;
+  return buildOfferBlob(options.db, {
+    node_id: options.self.node_id,
+    pk: options.self.pk,
+    hostname: options.self.hostname,
+    address: `${address}:${options.port}`,
+  });
 }
 
 async function handle(
@@ -170,6 +212,49 @@ async function handle(
       unread: unreadCount(db) + unreadDeliveries(db),
       delivered,
     });
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/pair-code") {
+    // Pairing bootstrap: the 6-digit code is the capability. Rate-limited per
+    // source address (5 consumed attempts per 5 minutes) to blunt brute force.
+    const body = await readBody(req);
+    if ("error" in body) {
+      json(res, 400, { error: "malformed request body" });
+      return;
+    }
+    let parsed: { code?: string; offer?: string } = {};
+    try {
+      parsed = JSON.parse(body.body) as { code?: string; offer?: string };
+    } catch {}
+    const code = typeof parsed.code === "string" ? parsed.code : "";
+    const offer = typeof parsed.offer === "string" ? parsed.offer : "";
+    if (!/^\d{6}$/.test(code) || !offer.startsWith("MESH1-")) {
+      json(res, 400, { error: "invalid pairing request" });
+      return;
+    }
+    const remote = req.socket.remoteAddress ?? "unknown";
+    if (pairCodeThrottled(remote)) {
+      json(res, 429, { error: "too many pairing attempts" });
+      return;
+    }
+    const pending = findPendingByCode(db, code);
+    if (pending === null) {
+      json(res, 404, { error: "unknown pairing code" });
+      return;
+    }
+    const counter = consumePairingOffer(
+      options,
+      pending.token,
+      offer,
+      remote,
+      req.socket.localAddress ?? "",
+    );
+    if (counter === null) {
+      json(res, 400, { error: "invalid offer" });
+      return;
+    }
+    json(res, 200, { ok: true, counter_offer: counter });
     return;
   }
 
@@ -307,3 +392,21 @@ function json(res: ServerResponse, status: number, body: unknown): void {
   res.writeHead(status, { "content-type": "application/json" });
   res.end(JSON.stringify(body));
 }
+
+// ---- pairing-code bootstrap ----
+
+const PAIR_ATTEMPTS = new Map<string, { count: number; windowStart: number }>();
+
+function pairCodeThrottled(remote: string): boolean {
+  const now = Date.now();
+  const entry = PAIR_ATTEMPTS.get(remote);
+  if (entry === undefined || now - entry.windowStart > 5 * 60_000) {
+    PAIR_ATTEMPTS.set(remote, { count: 1, windowStart: now });
+    return false;
+  }
+  entry.count += 1;
+  return entry.count > 5;
+}
+
+/** Consume the code's pending offer, bind the caller from its offer blob, and
+ * mint a counter-offer blob so the caller can bind us back. */

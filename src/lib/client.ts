@@ -72,3 +72,26 @@ export async function getPools(target: {
     return null;
   }
 }
+
+// Pairing bootstrap: present a 6-digit code + our own offer blob to a peer's
+// /pair-code endpoint. Unauthenticated by design — the code IS the capability.
+// Returns the peer's counter-offer blob, or null (bad code, unreachable).
+export async function postPairCode(target: {
+  url: string;
+  code: string;
+  offer: string;
+}): Promise<{ counter_offer: string } | null> {
+  try {
+    const response = await fetch(`${target.url}/pair-code`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ code: target.code, offer: target.offer }),
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!response.ok) return null;
+    const body = (await response.json()) as { counter_offer?: string };
+    return typeof body.counter_offer === "string" ? { counter_offer: body.counter_offer } : null;
+  } catch {
+    return null;
+  }
+}

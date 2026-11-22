@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomInt } from "node:crypto";
 
 import type { MeshDb } from "./db.js";
 import { pairingProofPayload, verifyPairingProof } from "./identity.js";
@@ -6,7 +6,15 @@ import type { Peer } from "../types/peer.js";
 
 // A pairing offer is only useful while the operator can relay it out of band.
 // Past this age the token is dropped instead of becoming a permanent credential.
-export const PAIRING_TOKEN_TTL_MS = 5 * 60_000;
+export const PAIRING_TOKEN_TTL_MS = 30 * 60_000;
+
+/** Six-digit pairing code: a capability naming a pending offer, not a secret.
+ * The trust anchor stays the Ed25519 proof (pk pinned at completion). */
+export type PairingCode = { code: string; token: string; hostname: string };
+
+function newCode(): string {
+  return String(randomInt(0, 1_000_000)).padStart(6, "0");
+}
 
 export type PeerInput = {
   node_id: string;
@@ -61,6 +69,58 @@ export function createPairingToken(db: MeshDb): string {
     Date.now(),
   ]);
   return token;
+}
+
+/** Schema addition: pending_tokens gains code + hostname (the emitter's real
+ * name, replacing the "manual" placeholder). */
+export function ensurePairingCodeSchema(db: MeshDb): void {
+  const columns = db.conn
+    .all<{ name: string }>("PRAGMA table_info(pending_tokens)")
+    .map((c) => c.name);
+  if (!columns.includes("code")) {
+    db.conn.exec("ALTER TABLE pending_tokens ADD COLUMN code TEXT");
+    db.conn.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_pending_code ON pending_tokens(code)");
+  }
+  if (!columns.includes("hostname")) {
+    db.conn.exec("ALTER TABLE pending_tokens ADD COLUMN hostname TEXT");
+  }
+}
+
+/** Create a code-based pairing offer: a 6-digit code naming the pending token. */
+export function createPairingCode(db: MeshDb, hostname: string): PairingCode {
+  const token = createPairingToken(db);
+  let code = newCode();
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    try {
+      db.conn.run(
+        "INSERT INTO pending_tokens (token, created_at, code, hostname) VALUES (?, ?, ?, ?) " +
+          "ON CONFLICT(token) DO UPDATE SET code = excluded.code, hostname = excluded.hostname",
+        [token, Date.now(), code, hostname],
+      );
+      return { code, token, hostname };
+    } catch (error) {
+      lastError = error;
+      code = newCode(); // unique index collision: regenerate
+    }
+  }
+  const detail = lastError instanceof Error ? lastError.message : String(lastError);
+  throw new Error(`unable to allocate a unique pairing code: ${detail}`);
+}
+
+/** Resolve a pairing code to its pending offer. Expired or absent codes return null. */
+export function findPendingByCode(
+  db: MeshDb,
+  code: string,
+): { token: string; hostname: string } | null {
+  if (!/^\d{6}$/.test(code)) return null;
+  prunePendingTokens(db);
+  const row = db.conn.get<{ token: string; hostname: string | null }>(
+    "SELECT token, hostname FROM pending_tokens WHERE code = ?",
+    [code],
+  );
+  if (!row || row.hostname === null) return null;
+  return { token: row.token, hostname: row.hostname };
 }
 
 // Check a bearer token: known paired peer, or a live pending pairing token.

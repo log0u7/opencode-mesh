@@ -15,7 +15,7 @@ export type MeshSnapshot = {
   node_id: string;
   hostname: string;
   /** Paired peers only: discovery alone never makes a peer sendable. */
-  peers: Array<{ node_id: string; hostname: string }>;
+  peers: Array<{ node_id: string; hostname: string; address?: string }>;
   active_locks: number;
   /** The mailbox bound to the session that asked (null when unregistered). */
   me: { name: string; role: string | null; unread: number } | null;
@@ -83,6 +83,15 @@ function formatPoolLine(pool: string, members: string[], byName: Map<string, Mai
   return `${pool}: ${parts.join(" · ")}`;
 }
 
+/** Manual pairings all carry the placeholder hostname "manual": label them by
+ * short node id + address, which is what actually distinguishes them. */
+export function peerLabel(peer: { node_id: string; hostname: string; address?: string }): string {
+  const host = peer.hostname.length > 0 ? peer.hostname : peer.node_id;
+  if (host !== "manual" && host !== peer.node_id) return host;
+  const id = peer.node_id.slice(0, 8);
+  return peer.address !== undefined ? `${id}@${peer.address}` : id;
+}
+
 /** Sidebar lines: my mailbox (unread first), one line per pool, peers, locks. */
 export function formatMeshLines(s: MeshSnapshot): string[] {
   const lines: string[] = [];
@@ -102,7 +111,7 @@ export function formatMeshLines(s: MeshSnapshot): string[] {
     lines.push("no paired peers");
   } else {
     for (const peer of s.peers) {
-      lines.push(`↔ ${peer.hostname.length > 0 ? peer.hostname : peer.node_id}`);
+      lines.push(`↔ ${peerLabel(peer)}`);
     }
   }
   if (s.active_locks > 0) {

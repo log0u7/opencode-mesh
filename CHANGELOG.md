@@ -5,6 +5,26 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.2] - 2026-11-22
+
+### Added
+
+- Code pairing: `mesh_pair()` now emits a **6-digit code** (30 min) instead of
+  a raw token blob. The peer runs `mesh_pair(code="482913")` — on the same LAN
+  the address is autodiscovered (mDNS), cross-subnet adds `address=`
+  (`host:port`). The code endpoint exchanges both offers in one call: the peer
+  binds you AND mints a counter-offer you bind automatically — **one command
+  each side, both paired**.
+- The code is a capability, not a secret: trust stays anchored on the Ed25519
+  proof (pk pinned at completion). `POST /pair-code` (unauthenticated
+  bootstrap) is rate-limited per source (5 consumed attempts / 5 min).
+- Offers now carry the emitter's hostname: paired peers display their real
+  name instead of the `manual` placeholder; the sidebar labels legacy manual
+  pairings as `id@address`.
+- Blob offers (`mesh_pair(offer="MESH1-...")`) kept for agent-to-agent flows
+  (files, DMs); legacy node_id/token completion still accepted for older
+  mesh versions. Offer TTL raised 5 min → 30 min.
+
 ## [0.10.1] - 2026-11-22
 
 ### Fixed

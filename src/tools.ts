@@ -1,8 +1,9 @@
 import { basename } from "node:path";
 import { randomUUID } from "node:crypto";
-import { sendMail } from "./lib/client.js";
+import { postPairCode, sendMail } from "./lib/client.js";
 import type { MeshDb } from "./lib/db.js";
 import type { Fanout } from "./lib/fanout.js";
+import { buildOfferBlob, parseOfferBlob } from "./lib/offer-blob.js";
 import { tailnetAddresses } from "./lib/discovery.js";
 import { pairingProof, type NodeIdentity } from "./lib/identity.js";
 import {
@@ -23,7 +24,9 @@ import {
 } from "./lib/mail.js";
 import { listLocks, releaseLock, tryLock } from "./lib/locks.js";
 import {
+  createPairingCode,
   createPairingToken,
+  findPendingByCode,
   findSendablePeer,
   listPeers,
   pairWithToken,
@@ -88,6 +91,12 @@ function bool(name: string, description: string): ToolField {
 // The host normally always provides a session id; normalizing keeps tools
 // usable in contexts without one (tests, exotic hosts) instead of crashing
 // on a SQLite bind with undefined.
+function peerLabelShort(nodeId: string, hostname?: string | null): string {
+  const host =
+    hostname !== null && hostname !== undefined && hostname.length > 0 ? hostname : nodeId;
+  return host === "manual" ? nodeId.slice(0, 8) : host;
+}
+
 function sessionID(context: ToolContext): string {
   return typeof context?.sessionID === "string" && context.sessionID.length > 0
     ? context.sessionID
@@ -138,14 +147,88 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
     {
       name: "mesh_pair",
       description:
-        "Pair with a peer. With no args: emit a pairing offer (token, node id, public key, server address) for the peer's mesh_pair. With node_id, token, and address (pk from the offer): complete pairing started by the other side.",
+        "Pair with a peer. With no args: emit a 6-digit pairing code (30 min). With code=: complete pairing on the peer running mesh_pair() — LAN autodiscovers the address, cross-subnet adds address=. With offer=: complete a MESH1- offer blob (agents, files). Legacy node_id/token still accepted.",
       fields: [
-        str("node_id", "Peer node id, from its mesh_pair output", false),
-        str("token", "Pairing token from the peer's offer", false),
-        str("address", "Peer server address as host:port", false),
-        str("pk", "Peer public key from the peer's offer (pins its signing key)", false),
+        str("code", "6-digit pairing code shown by the peer's mesh_pair()", false),
+        str(
+          "address",
+          "Peer server address as host:port (cross-subnet only; LAN autodiscovers)",
+          false,
+        ),
+        str("offer", "MESH1- offer blob from the peer's mesh_pair output", false),
+        str("node_id", "Peer node id (legacy completion)", false),
+        str("token", "Pairing token (legacy completion)", false),
+        str("pk", "Peer public key (legacy completion)", false),
       ],
       execute: async (args) => {
+        // Code flow: one 6-digit code, both directions.
+        if (typeof args.code === "string" && args.code.length > 0) {
+          if (!/^\d{6}$/.test(args.code)) {
+            return "error: the pairing code is 6 digits";
+          }
+          const candidates: string[] = [];
+          if (typeof args.address === "string" && args.address.length > 0) {
+            candidates.push(args.address);
+          } else {
+            for (const peer of listPeers(db)) {
+              candidates.push(...peer.addresses);
+            }
+          }
+          if (candidates.length === 0) {
+            return 'error: no candidate address — pass address="host:port" (cross-subnet) or wait for mDNS discovery (LAN)';
+          }
+          for (const candidate of candidates) {
+            const myOffer = buildOfferBlob(db, {
+              node_id: identity.node_id,
+              pk: identity.public_key,
+              hostname: identity.hostname,
+              address: `${serverAddress}:${port}`,
+            });
+            const result = await postPairCode({
+              url: `http://${candidate}`,
+              code: args.code,
+              offer: myOffer,
+            });
+            if (result === null) continue;
+            const counter = parseOfferBlob(result.counter_offer);
+            if (counter === null) continue;
+            pairWithToken(db, {
+              node_id: counter.node_id,
+              hostname: counter.hostname ?? "manual",
+              fingerprint: "code-pairing",
+              token: counter.token,
+              addresses: [counter.address ?? candidate],
+              public_key: counter.pk,
+            });
+            return `pairé des deux côtés avec ${peerLabelShort(counter.node_id, counter.hostname)}`;
+          }
+          return "error: code refusé ou injoignable (expire au bout de 30 min; vérifie l'address= en cross-subnet)";
+        }
+
+        // Blob flow (agents): complete the peer's MESH1- offer, auto-emit our counter.
+        if (typeof args.offer === "string" && args.offer.length > 0) {
+          const parsed = parseOfferBlob(args.offer);
+          if (parsed === null) {
+            return "error: offer blob invalide (attendu MESH1-...)";
+          }
+          pairWithToken(db, {
+            node_id: parsed.node_id,
+            hostname: parsed.hostname ?? "manual",
+            fingerprint: "code-pairing",
+            token: parsed.token,
+            addresses: parsed.address !== undefined ? [parsed.address] : [],
+            public_key: parsed.pk,
+          });
+          const counter = buildOfferBlob(db, {
+            node_id: identity.node_id,
+            pk: identity.public_key,
+            hostname: identity.hostname,
+            address: `${serverAddress}:${port}`,
+          });
+          return `pairé avec ${peerLabelShort(parsed.node_id, parsed.hostname)}. Contre-offre pour l'autre côté: mesh_pair(offer="${counter}")`;
+        }
+
+        // Legacy completion (older mesh versions).
         const node_id = args.node_id;
         const token = args.token;
         const hasNodeId = typeof node_id === "string";
@@ -164,8 +247,16 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
           });
           return `paired with ${node_id}`;
         }
-        const offer = createPairingToken(db);
-        return `peer should run: mesh_pair(node_id="${identity.node_id}", token="${offer}", address="${serverAddress}:${port}", pk="${identity.public_key}")`;
+
+        // Code offer.
+        const pairing = createPairingCode(db, identity.hostname);
+        const legacy = createPairingToken(db);
+        return [
+          `pairing code: ${pairing.code} (valable 30 min)`,
+          `Sur l'autre machine: mesh_pair(code="${pairing.code}")  [même LAN]`,
+          `ou: mesh_pair(code="${pairing.code}", address="${serverAddress}:${port}")  [cross-subnet]`,
+          `Version plus ancienne: mesh_pair(node_id="${identity.node_id}", token="${legacy}", address="${serverAddress}:${port}", pk="${identity.public_key}")`,
+        ].join("\n");
       },
     },
 
