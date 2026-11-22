@@ -288,4 +288,48 @@ describe("opencode-mesh v2 setup", () => {
 
     await cleanup?.();
   });
+
+  it("applies the static mailbox option at bind, winning role collisions (last act)", async () => {
+    const { ctx, added, rpcHandlers } = fakeCtx(tmpDataDir(), {
+      options: { mailbox: "shared", mailboxRole: "configured" },
+    });
+    const cleanup = await pluginModule.setup(ctx as never);
+
+    // Dynamic registration under the same name with a different role.
+    const register = added.find((t) => t.name === "mesh_register");
+    await register?.execute({ name: "shared", role: "dynamic-role" }, { sessionID: "s-old" });
+
+    await rpcHandlers.bind?.({ sessionID: "s1" });
+
+    const meshStatus = added.find((t) => t.name === "mesh_status");
+    const rawStatus = await meshStatus?.execute({}, { sessionID: "s1" });
+    const statusOut = JSON.parse(
+      typeof rawStatus === "string" ? rawStatus : (rawStatus?.content ?? "{}"),
+    ) as { mailboxes: Array<{ name: string; role: string | null }> };
+    expect(statusOut.mailboxes).toHaveLength(1);
+    expect(statusOut.mailboxes[0]?.name).toBe("shared");
+    expect(statusOut.mailboxes[0]?.role).toBe("configured");
+
+    await cleanup?.();
+  });
+
+  it("keeps the dynamic binding when no static mailbox is configured", async () => {
+    const { ctx, added, rpcHandlers } = fakeCtx(tmpDataDir(), {});
+    const cleanup = await pluginModule.setup(ctx as never);
+
+    const register = added.find((t) => t.name === "mesh_register");
+    await register?.execute({ name: "dyn", role: "pair" }, { sessionID: "s-old" });
+    await rpcHandlers.bind?.({ sessionID: "s1" });
+
+    const meshStatus = added.find((t) => t.name === "mesh_status");
+    const rawStatus = await meshStatus?.execute({}, { sessionID: "s1" });
+    const statusOut = JSON.parse(
+      typeof rawStatus === "string" ? rawStatus : (rawStatus?.content ?? "{}"),
+    ) as { mailboxes: Array<{ name: string; role: string | null }> };
+    expect(statusOut.mailboxes).toHaveLength(1);
+    expect(statusOut.mailboxes[0]?.name).toBe("dyn");
+    expect(statusOut.mailboxes[0]?.role).toBe("pair");
+
+    await cleanup?.();
+  });
 });

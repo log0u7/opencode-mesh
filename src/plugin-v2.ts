@@ -196,6 +196,16 @@ export const MeshV2 = Plugin.define({
               now: Date.now(),
             });
           }
+          // Optional declarative mailbox: applied after the dynamic boxes, so
+          // on a name collision the configuration wins (last act).
+          if (options.mailbox !== undefined) {
+            registerMailbox(db, {
+              name: options.mailbox,
+              session_id: sessionID,
+              ...(options.mailboxRole !== undefined ? { role: options.mailboxRole } : {}),
+              now: Date.now(),
+            });
+          }
         }
         return { bound: true };
       },
