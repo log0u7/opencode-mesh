@@ -120,7 +120,9 @@ export default Plugin.define({
           void refresh(currentSession);
           schedule();
         }
-        const unread = snapshot()?.me?.unread ?? 0;
+        const unread = (snapshot()?.hats ?? []).reduce((s, h) => s + h.unread, 0);
+        const snap = snapshot();
+        const summary = snap ? (formatMeshSidebar(snap, true)[0] ?? "") : "0 agents";
         return (
           <box gap={0}>
             <box flexDirection="row">
@@ -135,11 +137,7 @@ export default Plugin.define({
                 <b>{store.collapsed ? "▶ Mesh" : "▼ Mesh"}</b>
               </text>
               <Show when={store.collapsed}>
-                <text fg={theme.text.muted}>
-                  {unread > 0
-                    ? ` (${unread} unread)`
-                    : ` (${snapshot()?.mailboxes.length ?? 0} agents)`}
-                </text>
+                <text fg={theme.text.muted}>{` (${summary})`}</text>
               </Show>
             </box>
             <box gap={0}>{themedBody(theme, lines, unread)}</box>

@@ -17,7 +17,10 @@ function snapshot() {
     ],
     locks: [{ path: "a", owner: "s1", node_id: "n1", expires_at: 1 }],
     server: "127.0.0.1:4399",
-    my: { name: "purser", role: "lead", unread: 2 },
+    hats: [
+      { name: "purser", role: "lead", unread: 2 },
+      { name: "orchestrator", role: null, unread: 1 },
+    ],
     mailboxes: [
       { name: "purser", role: "lead", pools: ["team:purser"], age_s: 5 },
       { name: "6admin", role: "lead", pools: ["team:infra", "team:quartermaster"], age_s: 100 },
@@ -38,7 +41,10 @@ describe("snapshotFromMesh", () => {
     expect(s.node_id).toBe("n1");
     expect(s.peers).toEqual([{ node_id: "p1", hostname: "desktop" }]);
     expect(s.active_locks).toBe(1);
-    expect(s.me).toEqual({ name: "purser", role: "lead", unread: 2 });
+    expect(s.hats).toEqual([
+      { name: "purser", role: "lead", unread: 2 },
+      { name: "orchestrator", role: null, unread: 1 },
+    ]);
     expect(s.mailboxes).toHaveLength(4);
     expect(s.pools["team:infra"]).toEqual(["6admin", "k8s-oci"]);
   });
@@ -62,18 +68,25 @@ describe("presence", () => {
 });
 
 describe("formatMeshLines", () => {
-  it("leads with my mailbox and unread, then one line per pool, then peers and locks", () => {
+  it("leads with the hats line (total unread, per-hat counters), then pools, peers and locks", () => {
     const lines = formatMeshLines(snapshot());
-    expect(lines[0]).toBe("purser (lead) ● 2 unread");
+    expect(lines[0]).toBe("hats: ● 3 unread — purser (lead) ● 2 · orchestrator ● 1");
     expect(lines).toContain("team:infra: ● 6admin 1m · ○ k8s-oci 9m");
     expect(lines).toContain("team:purser: ● purser 5s");
     expect(lines).toContain("↔ desktop");
     expect(lines).toContain("1 active lock(s)");
   });
 
-  it("shows the unregistered state when there is no mailbox", () => {
+  it("omits the unread prefix and per-hat counters when nothing is unread", () => {
     const s = snapshot();
-    s.me = null;
+    s.hats = s.hats.map((h) => ({ ...h, unread: 0 }));
+    const lines = formatMeshLines(s);
+    expect(lines[0]).toBe("hats: purser (lead) · orchestrator");
+  });
+
+  it("shows the unregistered state when the session has no hat", () => {
+    const s = snapshot();
+    s.hats = [];
     const lines = formatMeshLines(s);
     expect(lines[0]).toBe("no mailbox — mesh_register");
   });
@@ -97,16 +110,24 @@ describe("formatMeshLines", () => {
 describe("formatMeshSidebar", () => {
   it("expands to the full lines", () => {
     const lines = formatMeshSidebar(snapshot(), false);
-    expect(lines[0]).toBe("purser (lead) ● 2 unread");
+    expect(lines[0]).toBe("hats: ● 3 unread — purser (lead) ● 2 · orchestrator ● 1");
   });
 
-  it("collapses to one summary line led by unread", () => {
-    expect(formatMeshSidebar(snapshot(), true)).toEqual(["2 unread · 4 agents · 3 pools"]);
+  it("collapses to one summary line led by unread, ending with the host count", () => {
+    expect(formatMeshSidebar(snapshot(), true)).toEqual([
+      "3 unread · 4 agents · 3 pools · 2 hôtes",
+    ]);
   });
 
-  it("collapsed without unread shows agents and pools only", () => {
+  it("counts hosts as self plus paired peers only", () => {
     const s = snapshot();
-    s.me = { name: "purser", role: "lead", unread: 0 };
-    expect(formatMeshSidebar(s, true)).toEqual(["4 agents · 3 pools"]);
+    s.peers = [];
+    expect(formatMeshSidebar(s, true)).toEqual(["3 unread · 4 agents · 3 pools · 1 hôte"]);
+  });
+
+  it("collapsed without unread shows agents, pools and hosts only", () => {
+    const s = snapshot();
+    s.hats = s.hats.map((h) => ({ ...h, unread: 0 }));
+    expect(formatMeshSidebar(s, true)).toEqual(["4 agents · 3 pools · 2 hôtes"]);
   });
 });
