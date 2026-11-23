@@ -68,9 +68,13 @@ export function startWakeLoop(options: WakeOptions): WakeHandle {
   const undrained = new Map<string, number>();
   let stopped = false;
   let failures = 0;
+  // Overlap guard (0.18.0): a prompt slower than the interval must not run
+  // two ticks concurrently (double prompt for the same mail).
+  let ticking = false;
 
   const tick = async (): Promise<void> => {
-    if (stopped) return;
+    if (stopped || ticking) return;
+    ticking = true;
     try {
       const now = Date.now();
       for (const box of listMailboxes(options.db)) {
@@ -128,6 +132,9 @@ export function startWakeLoop(options: WakeOptions): WakeHandle {
         }
         lastPromptAt.set(box.name, now);
         undrained.set(box.name, cycles + 1);
+        // Dispose during this tick (stop() below the running interval): the
+        // prompt would fire into a torn-down host binding.
+        if (stopped) return;
         // The unread count is read from this process' database right here,
         // one line above the prompt: never an inherited or cached state.
         // Compact notification (0.16.0): count + first pending subject,
@@ -140,6 +147,8 @@ export function startWakeLoop(options: WakeOptions): WakeHandle {
           box.session_id,
           preview === "" ? `mesh: ${unread} unread` : `mesh: ${unread} unread — "${preview}"`,
         );
+        // The prompt resolved after dispose: do not touch any further box.
+        if (stopped) return;
       }
       failures = 0;
     } catch (error) {
@@ -158,6 +167,8 @@ export function startWakeLoop(options: WakeOptions): WakeHandle {
           `[opencode-mesh] wake loop stopped after ${failures} consecutive tick failures`,
         );
       }
+    } finally {
+      ticking = false;
     }
   };
 

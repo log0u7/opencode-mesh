@@ -162,11 +162,26 @@ describe("mesh plugin with advertise enabled", () => {
     const hooks = await MeshPlugin(fakeInput(), { dataDir: dir, port: 0, advertise: false });
     const tools = hooks.tool ?? {};
 
+    // A keyless manual pairing is TLS-by-default with NO pinned key: sending
+    // there would be silent TOFU on a token-authenticated channel — refused.
     await tools.mesh_pair?.execute(
       { node_id: "peer-by-host", token: "tok", address: "127.0.0.1:4399" },
       ctx("s1"),
     );
     // Hostname "manual" is stored for token pairings without a discovery source.
+    const refused = await tools.mesh_send?.execute(
+      { peer: "manual", subject: "s", body: "b" },
+      ctx("s1"),
+    );
+    expect(refused).toContain("is TLS but has no pinned key");
+
+    // Re-pairing the same node with its pinned key unblocks the send (the
+    // hostname match still resolves it; unreachable: nothing listens there,
+    // but the auth model let it on the wire).
+    await tools.mesh_pair?.execute(
+      { node_id: "peer-by-host", token: "tok2", address: "127.0.0.1:4399", pk: "dGVzdC1rZXk" },
+      ctx("s1"),
+    );
     const result = await tools.mesh_send?.execute(
       { peer: "manual", subject: "s", body: "b" },
       ctx("s1"),

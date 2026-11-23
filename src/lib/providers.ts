@@ -107,9 +107,14 @@ export function parseNetbirdStatus(stdout: string): string[] {
 
 async function netbirdStatus(timeoutMs: number): Promise<string[]> {
   return new Promise<string[]>((resolve) => {
-    execFile("netbird", ["status", "--json"], { timeout: timeoutMs }, (error, stdout) => {
-      resolve(error ? [] : parseNetbirdStatus(String(stdout)));
-    });
+    execFile(
+      "netbird",
+      ["status", "--json"],
+      { timeout: timeoutMs, killSignal: "SIGKILL" },
+      (error, stdout) => {
+        resolve(error ? [] : parseNetbirdStatus(String(stdout)));
+      },
+    );
   });
 }
 
@@ -141,28 +146,40 @@ export function parseZerotierNetworks(stdout: string): string[] {
 
 async function zerotierNetworks(timeoutMs: number): Promise<string[]> {
   return new Promise<string[]>((resolve) => {
-    execFile("zerotier-cli", ["listnetworks"], { timeout: timeoutMs }, (error, stdout) => {
-      resolve(error ? [] : parseZerotierNetworks(String(stdout)));
-    });
+    execFile(
+      "zerotier-cli",
+      ["listnetworks"],
+      { timeout: timeoutMs, killSignal: "SIGKILL" },
+      (error, stdout) => {
+        resolve(error ? [] : parseZerotierNetworks(String(stdout)));
+      },
+    );
   });
 }
 
 // tailscale: the original provider this mold was extracted from.
 async function tailscaleStatus(timeoutMs: number): Promise<string[]> {
   return new Promise<string[]>((resolve) => {
-    execFile("tailscale", ["status", "--json"], { timeout: timeoutMs }, (error, stdout) => {
-      if (error) {
-        resolve([]);
-        return;
-      }
-      try {
-        const status = JSON.parse(String(stdout)) as { Self?: { TailscaleIPs?: string[] } };
-        const ips = status.Self?.TailscaleIPs;
-        resolve(Array.isArray(ips) ? ips.filter((ip): ip is string => typeof ip === "string") : []);
-      } catch {
-        resolve([]);
-      }
-    });
+    execFile(
+      "tailscale",
+      ["status", "--json"],
+      { timeout: timeoutMs, killSignal: "SIGKILL" },
+      (error, stdout) => {
+        if (error) {
+          resolve([]);
+          return;
+        }
+        try {
+          const status = JSON.parse(String(stdout)) as { Self?: { TailscaleIPs?: string[] } };
+          const ips = status.Self?.TailscaleIPs;
+          resolve(
+            Array.isArray(ips) ? ips.filter((ip): ip is string => typeof ip === "string") : [],
+          );
+        } catch {
+          resolve([]);
+        }
+      },
+    );
   });
 }
 

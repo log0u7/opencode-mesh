@@ -19,7 +19,7 @@ import {
 } from "../src/lib/mail.js";
 import { pairingProof, pairingProofPayload, signPairingProof } from "../src/lib/identity.js";
 import { pairWithToken, upsertDiscoveredPeer, createPairingToken } from "../src/lib/peers.js";
-import { startMeshServer } from "../src/lib/serve.js";
+import { pairCodeThrottled, startMeshServer } from "../src/lib/serve.js";
 
 let dir: string;
 
@@ -222,6 +222,48 @@ describe("mesh server", () => {
 });
 
 describe("mesh server routes", () => {
+  it("answers 500 JSON when a route throws instead of crashing the host (0.18.0)", async () => {
+    const { db, server, url } = await start();
+    pairWithToken(db, {
+      node_id: "peer1",
+      hostname: "laptop",
+      fingerprint: "ff",
+      token: "tok-peer1",
+    });
+    // Any route that touches the db now throws (closed database): without the
+    // handler wrapper this surfaces as an unhandled rejection in the host
+    // process; with it the client sees a plain 500.
+    db.close();
+    const response = await fetch(`${url}/status`, {
+      headers: { authorization: "Bearer tok-peer1" },
+    });
+    expect(response.status).toBe(500);
+    expect(await response.json()).toEqual({ error: "internal error" });
+
+    server.close();
+  });
+
+  it("bounds the pair-code attempt map (LRU cap, 0.18.0)", () => {
+    // The cap evicts the OLDEST remote: a fresh flood of spoofed sources
+    // cannot grow the map, and an evicted remote starts a fresh window.
+    const first = "remote-1";
+    expect(pairCodeThrottled(first)).toBe(false);
+    for (let i = 2; i <= 1001; i += 1) {
+      pairCodeThrottled(`remote-${i}`);
+    }
+    // The first remote was evicted: five more attempts stay unthrottled (a
+    // retained entry would have throttled on the 6th total call).
+    for (let i = 0; i < 5; i += 1) {
+      expect(pairCodeThrottled(first)).toBe(false);
+    }
+    // A recently-seen remote keeps its window: 1 flood call + 5 now → throttled.
+    const recent = "remote-1001";
+    for (let i = 0; i < 5; i += 1) {
+      pairCodeThrottled(recent);
+    }
+    expect(pairCodeThrottled(recent)).toBe(true);
+  });
+
   it("answers /status with node identity for a valid token", async () => {
     const { db, server, url } = await start();
     pairWithToken(db, {

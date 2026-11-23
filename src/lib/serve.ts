@@ -85,7 +85,17 @@ export async function startMeshServer(options: MeshServerOptions): Promise<MeshS
     );
   }
   const handler = (req: IncomingMessage, res: ServerResponse): void => {
-    void handle(options, req, res);
+    handle(options, req, res).catch((error: unknown) => {
+      // Any uncaught throw in a route answers 500 JSON: an unhandled
+      // rejection would crash the host process (opencode itself).
+      const message = error instanceof Error ? error.message : String(error);
+      console.warn(`[opencode-mesh] handler failed: ${message}`);
+      if (res.headersSent) {
+        res.destroy();
+        return;
+      }
+      json(res, 500, { error: "internal error" });
+    });
   };
   const server = tls
     ? createHttpsServer(
@@ -295,7 +305,6 @@ async function handle(
         .fanout({
           to_box: parsed.to,
           origin_id: parsed.origin_id ?? result.id,
-          from: parsed.from,
           from_box: parsed.from_box ?? null,
           subject: parsed.subject,
           body: parsed.body,
@@ -413,15 +422,21 @@ function readBody(req: IncomingMessage, limit: number = BODY_LIMIT): Promise<Bod
     let limited = false;
 
     req.on("data", (chunk: Buffer) => {
+      if (limited) return;
       size += chunk.length;
       if (size > limit) {
+        // Resolve at once and let the HTTP layer tear the connection down
+        // with the 413: an explicit socket destroy here would race the
+        // response (the client would see a reset instead of the 413), while
+        // node drops an unconsumed request body as soon as the response ends.
+        // Buffering stops here, so a lying content-length or an endless
+        // stream cannot grow memory.
         limited = true;
         chunks.length = 0;
+        resolve({ error: "too_large" });
         return;
       }
-      if (!limited) {
-        chunks.push(chunk);
-      }
+      chunks.push(chunk);
     });
     req.on("end", () =>
       resolve(limited ? { error: "too_large" } : { body: Buffer.concat(chunks).toString("utf8") }),
@@ -494,12 +509,22 @@ function json(res: ServerResponse, status: number, body: unknown): void {
 
 // ---- pairing-code bootstrap ----
 
+// Bounded LRU (0.18.0): a flood of spoofed source addresses (e.g. behind a
+// proxy that forwards X-Forwarded-For-like values) must not grow the map
+// without limit. Oldest entry evicted at the cap.
+const PAIR_ATTEMPTS_MAX = 1000;
 const PAIR_ATTEMPTS = new Map<string, { count: number; windowStart: number }>();
 
-function pairCodeThrottled(remote: string): boolean {
+// Exported for the LRU-bound unit test; production callers go through the
+// /pair-code route only.
+export function pairCodeThrottled(remote: string): boolean {
   const now = Date.now();
   const entry = PAIR_ATTEMPTS.get(remote);
   if (entry === undefined || now - entry.windowStart > 5 * 60_000) {
+    if (PAIR_ATTEMPTS.size >= PAIR_ATTEMPTS_MAX && !PAIR_ATTEMPTS.has(remote)) {
+      const oldest = PAIR_ATTEMPTS.keys().next().value;
+      if (oldest !== undefined) PAIR_ATTEMPTS.delete(oldest);
+    }
     PAIR_ATTEMPTS.set(remote, { count: 1, windowStart: now });
     return false;
   }

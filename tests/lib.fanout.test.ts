@@ -84,7 +84,6 @@ describe("createFanout", () => {
     const forwarded = await fanout.fanout({
       to_box: "team:infra",
       origin_id: "11111111-1111-4111-8111-111111111111",
-      from: "self-1",
       from_box: "ops",
       subject: "status: go",
       body: "...",
@@ -102,6 +101,40 @@ describe("createFanout", () => {
 
     (withMember as unknown as { server: { close(): void } }).server.close();
     (withoutMember as unknown as { server: { close(): void } }).server.close();
+    local.close();
+  });
+
+  it("skips a TLS peer with no pinned key — no silent TOFU (0.18.0)", async () => {
+    const local = db();
+    const peer = await startFakePeer("peer-tls", { "team:x": ["a"] });
+    pairPeer(local, {
+      node_id: peer.node_id,
+      hostname: peer.node_id,
+      fingerprint: peer.node_id,
+      token: "tok",
+      addresses: [peer.url.replace("http://", "")],
+      public_key: undefined,
+    });
+    // The dangerous shape: TLS on (the pairing default) with NO pinned key —
+    // the transport would accept any certificate on a token-authenticated
+    // channel. The fanout must not hand the mail (and its bearer token) there.
+    local.conn.run("UPDATE peers SET tls = 1, public_key = NULL");
+
+    const identity = loadOrCreateIdentity(join(tmpdir(), "fanout-id-tlspk")) as NodeIdentity;
+    const fanout = createFanout({ db: local, identity, poolsCacheTtlMs: 60_000 });
+    const forwarded = await fanout.fanout({
+      to_box: "team:x",
+      origin_id: "66666666-6666-4666-8666-666666666666",
+      from_box: "ops",
+      subject: "status: go",
+      body: "...",
+      via: [],
+    });
+
+    expect(forwarded).toEqual([]);
+    expect(peer.received).toHaveLength(0);
+
+    (peer as unknown as { server: { close(): void } }).server.close();
     local.close();
   });
 
@@ -123,7 +156,6 @@ describe("createFanout", () => {
     const forwarded = await fanout.fanout({
       to_box: "team:x",
       origin_id: "22222222-2222-4222-8222-222222222222",
-      from: "self-1",
       from_box: null,
       subject: "s",
       body: "b",
@@ -159,7 +191,6 @@ describe("createFanout", () => {
     const forwarded = await fanout.fanout({
       to_box: "all",
       origin_id: "33333333-3333-4333-8333-333333333333",
-      from: "self-1",
       from_box: "ops",
       subject: "org change",
       body: "...",
@@ -191,7 +222,6 @@ describe("createFanout", () => {
     const forwarded = await fanout.fanout({
       to_box: "team:infra",
       origin_id: "55555555-5555-4555-8555-555555555555",
-      from: "self-1",
       from_box: "ops",
       subject: "r8 go",
       body: "...",

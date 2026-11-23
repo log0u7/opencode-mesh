@@ -5,6 +5,46 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.18.0] - 2026-11-23
+
+### Fixed
+
+- **Multi-hop fanout worked only up to 2 nodes**: the relay forwarded a
+  broadcast with the ORIGIN node's id in the mail `from`, while the next hop
+  binds the bearer token and the pairing proof to the node on the wire and
+  401'd any mismatch. On a mesh of 3+ nodes (A→B→C) the mail died at the
+  relay: C never saw it. The relay now signs every hop with its OWN identity
+  (the wire `from` is always the node putting the mail on the wire); the
+  origin stays traceable through `origin_id` + `from_box`, both stored. The
+  origin_id dedup keeps a direct re-delivery of the same broadcast a no-op.
+  Covered by a new 3-node e2e (origin → relay → final over real HTTP
+  servers, plus the direct-leg dedup).
+- **TLS peer without a pinned key = send refused, never silent TOFU**: a
+  legacy pairing (pre-pinned-keys) with `tls = 1` yielded `pk = null` and the
+  TLS transport accepted ANY certificate — a MITM could steal the bearer
+  token. `mesh_send` now refuses with `error: peer <id> is TLS but has no
+  pinned key — re-pair with mesh_pair`, and the fanout skips such peers.
+  TOFU stays a pairing-code-only capability (first contact, the code is the
+  capability).
+- **Wake guards**: a prompt slower than the poll interval can no longer run
+  two ticks concurrently (in-flight guard, no double prompt), and a stop()
+  during an in-flight tick prompts no further box after dispose (re-check
+  after the prompt await).
+- **Handler exceptions answer 500 JSON**: an uncaught throw in any route is
+  caught by the server handler and answered `{"error": "internal error"}`
+  (500) — never an unhandled rejection, which would crash the host process.
+- **Response reads bounded**: the client transports cap response bodies at
+  2 MiB (plain fetch reader and TLS stream: over the limit the read is
+  cancelled and the send maps to a plain error) — a hostile peer cannot
+  balloon host memory.
+
+### Changed
+
+- `POST /mail` and `/memory-sync` bodies resolve `too_large` as soon as the
+  limit is crossed (buffering stops; the HTTP layer tears the connection down
+  with the 413). The pair-code rate limiter is LRU-bounded at 1000 remotes.
+  Address-provider subprocesses are killed with SIGKILL on timeout.
+
 ## [0.17.0] - 2026-11-23
 
 ### Added

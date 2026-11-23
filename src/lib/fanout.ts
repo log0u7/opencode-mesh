@@ -23,7 +23,6 @@ export type FanoutPeer = {
 export type FanoutInput = {
   to_box: string | null;
   origin_id: string;
-  from: string;
   from_box: string | null;
   subject: string;
   body: string;
@@ -101,6 +100,10 @@ export function createFanout(options: FanoutOptions): Fanout {
 
       for (const peer of peers) {
         if (visited.has(peer.node_id)) continue;
+        // TLS peer without a pinned key: any certificate would be accepted on
+        // a token-authenticated channel (silent TOFU = steal the bearer
+        // token). Never send there; the operator re-pairs with mesh_pair.
+        if (peer.tls && peer.pk === null) continue;
         if (input.to_box !== "all") {
           // Pool broadcast: forward only to peers with at least one member.
           // Unknown pools (peer unreachable, or its token not yet bound on our
@@ -115,7 +118,13 @@ export function createFanout(options: FanoutOptions): Fanout {
           token: peer.token,
           ...(peer.tls ? { tls: true } : {}),
           ...(peer.pk !== null ? { pk: peer.pk } : {}),
-          from: input.from,
+          // Multi-hop (0.18.0): the wire `from` is ALWAYS the node that puts
+          // the mail on the wire, because the receiver binds the bearer token
+          // and the pairing proof to that node (`parsed.from` must equal the
+          // authenticated peer). A relay forwarding the origin's id was
+          // rejected 401 by the next hop — any mesh of 3+ nodes was broken.
+          // The origin stays traceable through origin_id + from_box.
+          from: selfNodeId,
           proof: pairingProof(options.identity, peer.token),
           ...(input.from_box !== null && input.from_box !== undefined
             ? { from_box: input.from_box }
