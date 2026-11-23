@@ -5,7 +5,15 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.10.7] - 2026-11-23
+## [0.10.8] - 2026-11-23
+
+### Fixed
+
+- Wake prompts no longer quote an unread count: a queued prompt can fire
+  after the session acked some mail, and a stale number reads as a false
+  positive (observed live on a multi-hat session). The prompt now says
+  "unread mail waiting" — the signal is the wake itself, mesh_inbox is the
+  truth.
 
 ### Fixed
 
