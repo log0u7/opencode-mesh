@@ -62,15 +62,15 @@ function pairPlain(
     hostname: peer.hostname,
     fingerprint: peer.fingerprint,
     addresses: peer.addresses ?? [],
-    public_key: peer.public_key,
+    ...(peer.public_key === undefined ? {} : { public_key: peer.public_key }),
   });
   pairWithToken(db, {
     node_id: peer.node_id,
     hostname: peer.hostname,
     fingerprint: peer.fingerprint,
     token: peer.token,
-    addresses: peer.addresses,
-    public_key: peer.public_key,
+    ...(peer.addresses === undefined ? {} : { addresses: peer.addresses }),
+    ...(peer.public_key === undefined ? {} : { public_key: peer.public_key }),
   });
   db.conn.run("UPDATE peers SET tls = 0");
 }

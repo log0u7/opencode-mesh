@@ -113,7 +113,6 @@ describe("createFanout", () => {
       fingerprint: peer.node_id,
       token: "tok",
       addresses: [peer.url.replace("http://", "")],
-      public_key: undefined,
     });
     // The dangerous shape: TLS on (the pairing default) with NO pinned key —
     // the transport would accept any certificate on a token-authenticated

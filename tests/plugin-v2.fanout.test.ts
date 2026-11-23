@@ -74,7 +74,6 @@ describe("v2 fanout wiring", () => {
         ) => Promise<{ content?: string }>;
       }> = [];
       const rpcHandlers: Record<string, (input: unknown) => Promise<unknown>> = {};
-      const prompts: string[] = [];
       const ctxObj = {
         location: {
           directory: "/work/project",
@@ -109,7 +108,7 @@ describe("v2 fanout wiring", () => {
           },
         },
       };
-      return { ctx: ctxObj, added: addedTools, rpcHandlers, prompts };
+      return { ctx: ctxObj, added: addedTools, rpcHandlers };
     })();
 
     const cleanup = await pluginModule.setup(ctx as never);

@@ -21,6 +21,8 @@ import { buildTlsMaterial, certPkSpki, nodeTlsMaterial, type TlsMaterial } from 
 
 let dir: string;
 
+const SELF = { node_id: "self", pk: "test-pk", hostname: "localhost" };
+
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), "opencode-mesh-tls-"));
 });
@@ -215,7 +217,7 @@ describe("code pairing over TLS (TOFU pin)", () => {
 describe("server TLS options", () => {
   it("requires TLS material unless TLS is explicitly disabled", async () => {
     const db = openMeshDb(":memory:");
-    await expect(startMeshServer({ db, port: 0 })).rejects.toThrow(/tlsMaterial/);
+    await expect(startMeshServer({ db, port: 0, self: SELF })).rejects.toThrow(/tlsMaterial/);
     db.close();
   });
 
@@ -227,6 +229,7 @@ describe("server TLS options", () => {
       port: 0,
       tlsMaterial: material,
       insecureHttp: true,
+      self: SELF,
     });
 
     const response = await fetch(`http://127.0.0.1:${insecurePort}/mail`, {

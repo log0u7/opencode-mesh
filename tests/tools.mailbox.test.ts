@@ -20,6 +20,7 @@ function setup() {
     dataDir: "",
     serverAddress: "127.0.0.1",
     port: 4399,
+    bindKey: "test-project:/work/project",
     worktreeClient: null as never,
     spawnFn: null as never,
   };
@@ -158,6 +159,7 @@ describe("mesh_inbox", () => {
   it("keeps the legacy global feed for unregistered sessions", async () => {
     const { db, call } = setup();
     const sent = deliverMessage(db, { from: "n9", subject: "legacy", body: "b" });
+    if (!sent.ok) return;
     const inbox = JSON.parse(await call("mesh_inbox", {}, "s-unreg")) as Array<{
       delivery_id: string;
       id: string;

@@ -16,7 +16,7 @@ vi.mock("node:child_process", () => ({
   execFile: execFileMocks.execFile,
 }));
 
-type ExecCb = (err: Error | null, stdout: string) => void;
+type ExecCb = (err: Error | null, stdout: string, stderr: string) => void;
 
 beforeEach(() => {
   execFileMocks.execFile.mockReset();

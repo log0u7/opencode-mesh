@@ -80,7 +80,11 @@ describe("createSidebarState", () => {
       memory: vi.fn(),
     } as unknown as Storage;
     const set_sidebar = vi.fn(async (input: { collapsed: boolean }) => input);
-    const mesh = { sidebar: async () => ({ collapsed: true }), set_sidebar };
+    const mesh = {
+      bind: async () => ({ bound: true }),
+      sidebar: async () => ({ collapsed: true }),
+      set_sidebar,
+    };
 
     const [state, mutate] = createSidebarState(storage, mesh);
     // The persisted state (collapsed: true) is adopted once it arrives.
@@ -103,6 +107,9 @@ describe("createSidebarState", () => {
       memory: vi.fn(),
     } as unknown as Storage;
     const mesh = {
+      bind: async () => {
+        throw new Error("rpc unreachable");
+      },
       sidebar: async () => {
         throw new Error("rpc unreachable");
       },

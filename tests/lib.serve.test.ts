@@ -23,6 +23,8 @@ import { pairCodeThrottled, startMeshServer } from "../src/lib/serve.js";
 
 let dir: string;
 
+const SELF = { node_id: "self", pk: "test-pk", hostname: "localhost" };
+
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), "opencode-mesh-serve-"));
 });
@@ -33,7 +35,7 @@ afterEach(() => {
 
 async function start() {
   const db = openMeshDb(join(dir, "mesh.db"));
-  const { server, port } = await startMeshServer({ db, port: 0, tls: false });
+  const { server, port } = await startMeshServer({ db, port: 0, tls: false, self: SELF });
   const url = `http://127.0.0.1:${port}`;
   return { db, server, url };
 }
@@ -53,7 +55,12 @@ async function post(url: string, path: string, body: unknown, token?: string) {
 describe("mesh server bind", () => {
   it("binds loopback by default and reports the address it bound", async () => {
     const db = openMeshDb(":memory:");
-    const { server, port, address } = await startMeshServer({ db, port: 0, tls: false });
+    const { server, port, address } = await startMeshServer({
+      db,
+      port: 0,
+      tls: false,
+      self: SELF,
+    });
 
     expect(address).toBe("127.0.0.1");
     expect(server.address()).toMatchObject({ address: "127.0.0.1", port });
@@ -64,7 +71,13 @@ describe("mesh server bind", () => {
 
   it("binds every interface only when explicitly asked for lan", async () => {
     const db = openMeshDb(":memory:");
-    const { server, address } = await startMeshServer({ db, port: 0, bind: "lan", tls: false });
+    const { server, address } = await startMeshServer({
+      db,
+      port: 0,
+      bind: "lan",
+      tls: false,
+      self: SELF,
+    });
 
     expect(address).not.toBe("127.0.0.1");
 
@@ -79,6 +92,7 @@ describe("mesh server bind", () => {
       port: 0,
       bind: "lan",
       tls: false,
+      self: SELF,
     });
 
     const lanIp = Object.values(networkInterfaces())
@@ -641,7 +655,7 @@ describe("mesh server mailboxes", () => {
     db.conn.run("UPDATE messages SET created_at = ?", [Date.now() - MESSAGE_TTL_MS - 1]);
     receiveMessage(db, { from: "n0", subject: "fresh", body: "b" });
 
-    const { server } = await startMeshServer({ db, port: 0, tls: false });
+    const { server } = await startMeshServer({ db, port: 0, tls: false, self: SELF });
     expect(unreadMessages(db).map((m) => m.subject)).toEqual(["fresh"]);
 
     server.close();

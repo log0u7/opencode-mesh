@@ -47,7 +47,12 @@ describe("port collision", () => {
 
     // Occupy that exact port with an unrelated mesh server.
     const blockerDb = openMeshDb(":memory:");
-    const blocker = await startMeshServer({ db: blockerDb, port: takenPort, tls: false });
+    const blocker = await startMeshServer({
+      db: blockerDb,
+      port: takenPort,
+      tls: false,
+      self: { node_id: "blocker", pk: "test-pk", hostname: "blocker" },
+    });
 
     // The real assertion: default-port collision must not throw at init...
     const second = await MeshPlugin(input(), { dataDir: dir2, port: takenPort, advertise: false });
