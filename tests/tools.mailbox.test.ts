@@ -9,6 +9,7 @@ import {
   mailboxByName,
   registerMailbox,
 } from "../src/lib/mail.js";
+import { pairWithToken } from "../src/lib/peers.js";
 import { buildToolSpecs, type MeshContext, type ToolSpec } from "../src/tools.js";
 
 function setup() {
@@ -345,6 +346,26 @@ describe("mesh_status", () => {
       )
       .map((r) => `${r.subject}:${r.wake}`);
     expect(wakes).toEqual(["flagged:1", "quiet:0"]);
+    db.close();
+  });
+
+  it("refuses to send to a TLS peer with no pinned key — no silent TOFU (0.18.0)", async () => {
+    const { db, call } = setup();
+    registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
+    // A pairing from the pre-pinned-key era: tls = 1 (0.11+ default), the
+    // peer row carries NO public_key. resolvePeerTarget then yields pk=null
+    // and the TLS transport would accept ANY certificate.
+    pairWithToken(db, {
+      node_id: "legacy-peer",
+      hostname: "legacy",
+      fingerprint: "ff",
+      token: "tok-legacy",
+      addresses: ["127.0.0.1:4399"],
+    });
+    const out = await call("mesh_send", { peer: "legacy-peer", subject: "s", body: "b" }, "s1");
+    expect(out).toBe(
+      "error: peer legacy-peer is TLS but has no pinned key — re-pair with mesh_pair",
+    );
     db.close();
   });
 });

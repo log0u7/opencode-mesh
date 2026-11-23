@@ -392,7 +392,6 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
             const forwardedOnly = await fanout.fanout({
               to_box: to!,
               origin_id: origin,
-              from: identity.node_id,
               from_box,
               subject: String(args.subject),
               body: String(args.body),
@@ -416,7 +415,6 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
             forwarded = await fanout.fanout({
               to_box: to!,
               origin_id: result.id,
-              from: identity.node_id,
               from_box,
               subject: String(args.subject),
               body: String(args.body),
@@ -452,6 +450,13 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
           const conn = resolvePeerTarget(db, peer);
           if (conn === null) {
             return `error: peer ${target.node_id} has no known address with a port; have it run mesh_pair to share its address, or wait for discovery`;
+          }
+          // No silent TOFU on a token-authenticated channel: a TLS peer whose
+          // pinned key is missing (legacy pairing predating pinned keys)
+          // accepts ANY certificate, so the bearer token could be stolen by a
+          // MITM. Refuse the send; TOFU stays a pairing-code-only capability.
+          if (conn.tls && conn.pk === null) {
+            return `error: peer ${target.node_id} is TLS but has no pinned key — re-pair with mesh_pair`;
           }
           // Every mail carries a pairing proof signed by this node's key: it is
           // what lets the receiving side bind (or rotate) a pairing to us without

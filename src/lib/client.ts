@@ -101,6 +101,11 @@ export async function sendMail(target: SendTarget): Promise<SendResult> {
     if (message.includes("wrong version number")) {
       return "plaintext-peer";
     }
+    // An oversized (bounded) response is a protocol-level garbage answer from
+    // a reachable host: "error", not "unreachable".
+    if (message.includes("response body exceeds")) {
+      return "error";
+    }
     return "unreachable";
   }
 }
@@ -159,6 +164,11 @@ export async function pushMemorySync(target: {
     }
     if (message.includes("wrong version number")) {
       return "plaintext-peer";
+    }
+    // An oversized (bounded) response is a protocol-level garbage answer from
+    // a reachable host: "error", not "unreachable".
+    if (message.includes("response body exceeds")) {
+      return "error";
     }
     return "unreachable";
   }
@@ -231,6 +241,12 @@ export async function postPairCode(target: {
 
 type WireResponse = { status: number; body: string; peerPk: string | null };
 
+// Response bodies are bounded (0.18.0): a compromised or hostile peer must
+// not balloon the host's memory through a trusted-but-unbounded read. 2 MiB
+// covers any real mesh payload (mail JSON, /pools, pairing blobs, memory-sync
+// acks); the memory-sync REQUEST limit is 1 MiB on the receiving side.
+const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
+
 async function plainRequest(
   url: string,
   init: { method: string; headers: Record<string, string>; body?: string; timeoutMs: number },
@@ -241,7 +257,25 @@ async function plainRequest(
     ...(init.body !== undefined ? { body: init.body } : {}),
     signal: AbortSignal.timeout(init.timeoutMs),
   });
-  return { status: response.status, body: await response.text(), peerPk: null };
+  // Read with a cap: over the limit the stream is cancelled and the read
+  // fails (the caller maps any failure to a plain error result).
+  const reader = response.body?.getReader();
+  if (!reader) {
+    return { status: response.status, body: "", peerPk: null };
+  }
+  const chunks: Buffer[] = [];
+  let size = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > MAX_RESPONSE_BYTES) {
+      await reader.cancel();
+      throw new Error(`response body exceeds ${MAX_RESPONSE_BYTES} bytes`);
+    }
+    chunks.push(Buffer.from(value));
+  }
+  return { status: response.status, body: Buffer.concat(chunks).toString("utf8"), peerPk: null };
 }
 
 // ---- TLS transport ----
@@ -283,7 +317,15 @@ async function tlsRequest(req: TlsRequest): Promise<WireResponse> {
       },
       (response) => {
         const chunks: Buffer[] = [];
-        response.on("data", (chunk: Buffer) => chunks.push(chunk));
+        let size = 0;
+        response.on("data", (chunk: Buffer) => {
+          size += chunk.length;
+          if (size > MAX_RESPONSE_BYTES) {
+            request.destroy(new Error(`response body exceeds ${MAX_RESPONSE_BYTES} bytes`));
+            return;
+          }
+          chunks.push(chunk);
+        });
         response.on("end", () => {
           resolve({
             status: response.statusCode ?? 0,

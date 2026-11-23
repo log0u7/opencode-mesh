@@ -297,4 +297,35 @@ describe("POST /memory-sync endpoint", () => {
     expect(response.status).toBe(503);
     server.close();
   });
+
+  it("accepts exactly 1 MiB and rejects 1 MiB + 1 with 413 (boundary, 0.18.0)", async () => {
+    seedPeer("node-peer", "tok-peer");
+    const { server, port } = await startMeshServer({
+      db,
+      port: 0,
+      tls: false,
+      dataDir: dir,
+      self: { node_id: "self-node", pk: "self-pk", hostname: "self-host" },
+    });
+    const url = `http://127.0.0.1:${port}`;
+
+    // Exactly at the limit: accepted (the checks are strict `>`).
+    const at = await fetch(`${url}/memory-sync`, {
+      method: "POST",
+      headers: { authorization: "Bearer tok-peer" },
+      body: "a".repeat(1024 * 1024),
+    });
+    expect(at.status).toBe(200);
+    expect(await at.json()).toEqual({ accepted: 1024 * 1024 });
+
+    // One byte over: 413 (rejected through the content-length pre-check).
+    const over = await fetch(`${url}/memory-sync`, {
+      method: "POST",
+      headers: { authorization: "Bearer tok-peer" },
+      body: "a".repeat(1024 * 1024 + 1),
+    });
+    expect(over.status).toBe(413);
+
+    server.close();
+  });
 });

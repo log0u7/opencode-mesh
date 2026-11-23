@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { createServer as createHttpsServer } from "node:https";
 
 import { openMeshDb } from "../src/lib/db.js";
 import { sendMail } from "../src/lib/client.js";
@@ -121,5 +122,64 @@ describe("sendMail version skew", () => {
 
     server.close();
     db.close();
+  });
+});
+
+describe("sendMail response bound (0.18.0)", () => {
+  it("refuses a plain-HTTP response body over 2 MiB instead of reading it all", async () => {
+    // A stubbed oversized body: the bounded plain reader must cancel the
+    // stream, not accumulate it — sendMail maps the failure to plain "error".
+    const oversized = "x".repeat(2 * 1024 * 1024 + 1);
+    const fetchStub = vi.fn(async () => new Response(oversized, { status: 200 }));
+    vi.stubGlobal("fetch", fetchStub);
+
+    const result = await sendMail({
+      url: "http://127.0.0.1:1",
+      token: "t",
+      from: "a",
+      subject: "s",
+      body: "b",
+    });
+    expect(result).toBe("error");
+
+    vi.unstubAllGlobals();
+  });
+
+  it("refuses a TLS response body over 2 MiB instead of reading it all", async () => {
+    const { nodeTlsMaterial } = await import("../src/lib/tls.js");
+    const { mkdtempSync, rmSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+
+    const serverDir = mkdtempSync(join(tmpdir(), "mesh-bound-tls-"));
+    try {
+      const material = nodeTlsMaterial(serverDir);
+      const server = createHttpsServer(
+        { key: material.keyPem, cert: material.certPem },
+        (_req, res) => {
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end("x".repeat(2 * 1024 * 1024 + 1));
+        },
+      );
+      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+      const addr = server.address();
+      const port = typeof addr === "object" && addr !== null ? addr.port : 0;
+
+      // TOFU on the cert (first contact, no pin): the response size is the
+      // thing under test, not the identity.
+      const result = await sendMail({
+        url: `https://127.0.0.1:${port}`,
+        tls: true,
+        token: "t",
+        from: "a",
+        subject: "s",
+        body: "b",
+      });
+      expect(result).toBe("error");
+
+      server.close();
+    } finally {
+      rmSync(serverDir, { recursive: true, force: true });
+    }
   });
 });

@@ -333,6 +333,73 @@ describe("wake flag (0.17.0 Slack model)", () => {
   });
 });
 
+describe("wake guards (0.18.0)", () => {
+  // Two mailboxes, a prompt that only resolves when the test releases it:
+  // while tick 1 hangs in the prompt, the interval keeps firing — and the
+  // dispose path is exercised by stopping the loop before the release.
+  function guardedSetup() {
+    const s = setup(["s1", "s2"]);
+    registerMailbox(s.db, { name: "a", session_id: "s1", now: 1000 });
+    registerMailbox(s.db, { name: "b", session_id: "s2", now: 1000 });
+    deliverMessage(s.db, { from: "n", to_box: "a", subject: "one", body: "b", created_at: 1000 });
+    deliverMessage(s.db, { from: "n", to_box: "b", subject: "two", body: "b", created_at: 1000 });
+    let releaseFirst!: () => void;
+    let calls = 0;
+    const prompt = vi.fn((_sessionID: string, _text: string) => {
+      calls += 1;
+      if (calls === 1) {
+        return new Promise<void>((resolve) => {
+          releaseFirst = resolve;
+        });
+      }
+      return Promise.resolve();
+    });
+    return { ...s, prompt, releaseFirst: () => releaseFirst(), calls: () => calls };
+  }
+
+  it("does not double-prompt while a tick is in flight (prompt slower than the interval)", async () => {
+    const { db, prompt, releaseFirst, calls } = guardedSetup();
+    const handle = startWakeLoop({
+      db,
+      prompt,
+      sessionKnown: () => true,
+      intervalMs: 5,
+      cooldownMs: 0,
+    });
+    // Several interval ticks fire while the first prompt is still pending:
+    // the in-flight guard keeps them all out.
+    await new Promise((r) => setTimeout(r, 40));
+    expect(calls()).toBe(1);
+    expect(prompt.mock.calls[0]?.[0]).toBe("s1");
+
+    releaseFirst();
+    handle.stop();
+    await new Promise((r) => setTimeout(r, 30));
+    expect(calls()).toBe(1);
+    db.close();
+  });
+
+  it("prompts no box after dispose (stop during an in-flight tick)", async () => {
+    const { db, prompt, releaseFirst } = guardedSetup();
+    const handle = startWakeLoop({
+      db,
+      prompt,
+      sessionKnown: () => true,
+      intervalMs: 5,
+      cooldownMs: 0,
+    });
+    await new Promise((r) => setTimeout(r, 30));
+    // Dispose while tick 1 hangs in the prompt for box a: when the prompt
+    // resolves, the loop must not go on to box b.
+    handle.stop();
+    releaseFirst();
+    await new Promise((r) => setTimeout(r, 40));
+
+    expect(prompt.mock.calls.map((c) => c[0])).toEqual(["s1"]);
+    db.close();
+  });
+});
+
 describe("wake tick failures", () => {
   it("logs each failed tick and stops the loop after MAX_TICK_FAILURES", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
