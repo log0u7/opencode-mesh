@@ -51,6 +51,15 @@ re-register the **correct** name from the org table from the same session: the
 one-box-per-name handoff supersedes the wrong box, which stops receiving mail.
 No cleanup command needed.
 
+### Mode matters
+
+Enrollment prompts execute tools only in **build mode**: a tab in plan mode
+plans the enrollment commands without running them, and the boxes are never
+created. Check the mode before pasting an enrollment prompt. On binding, since
+0.10.7 switching tabs no longer steals other tabs' boxes (bind no-steal: the
+bind only reclaims boxes whose owning session is dead), so every living tab
+keeps its hats.
+
 ### Onboarding checklist
 
 Paste this at the top of a new agent's prompt (or AGENTS.md):

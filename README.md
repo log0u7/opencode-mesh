@@ -47,7 +47,7 @@ flowchart LR
 
 1. **Install the plugin on every host.** See [Install](#install) below, then restart OpenCode.
 2. **Pair the hosts.** `mesh_pair()` on host A emits a 6-digit code (30 min); `mesh_pair(code="...")` on host B completes it. One call per side, both paired.
-3. **Paste a role prompt.** Pick a role from the [playbook](docs/PLAYBOOK.md) (orchestrator, team lead, bridge, ops, worker pair) into each agent's instructions.
+3. **Paste a role prompt.** Pick a role from the [playbook](docs/PLAYBOOK.md) (orchestrator, team lead, bridge, ops, worker pair) into each agent's instructions. Enrollment prompts execute only in build mode (plan mode plans, never runs) — check the mode before pasting.
 4. **Let the agents self-enroll.** At their first turn they run `mesh_register` / `mesh_join` and confirm by DM to their lead; after a restart, TUI sessions re-bind their boxes automatically.
 5. **Wake does the relaying.** Idle agents are prompted when mail lands in their box; leads post `status:` per team; discussions stay in DMs.
 6. **The orchestrator consolidates.** It maintains the global TODO as opencode-memory entries anchored to the code they touch, and posts a daily digest per team.
