@@ -110,6 +110,78 @@ describe("parseOptions", () => {
     expect(() => parseOptions({ addresses: [42] as never })).toThrow(/addresses/);
     expect(() => parseOptions({ addresses: [""] })).toThrow(/addresses/);
   });
+
+  // CI coverage debt (0.18.1): the validation branches for these options were
+  // never exercised. Same contract as the port/bind/advertise tests above.
+  it("accepts the wake, tls, insecureHttp, memorySync and mailbox options", () => {
+    const options = parseOptions({
+      wake: true,
+      wakeIntervalMs: 1000,
+      tls: false,
+      insecureHttp: true,
+      memorySync: false,
+      memorySyncInterval: 30,
+      mailbox: "ops.alert-1",
+      mailboxRole: "manager",
+    });
+    expect(options).toMatchObject({
+      wake: true,
+      wakeIntervalMs: 1000,
+      tls: false,
+      insecureHttp: true,
+      memorySync: false,
+      memorySyncInterval: 30,
+      mailbox: "ops.alert-1",
+      mailboxRole: "manager",
+    });
+  });
+
+  it("accepts memorySyncInterval 0 (the documented off switch)", () => {
+    expect(parseOptions({ memorySyncInterval: 0 })).toMatchObject({ memorySyncInterval: 0 });
+    expect(parseOptions({ wakeIntervalMs: 1 })).toMatchObject({ wakeIntervalMs: 1 });
+  });
+
+  it("rejects a non-boolean wake", () => {
+    expect(() => parseOptions({ wake: "yes" as unknown as boolean })).toThrow(/wake/);
+  });
+
+  it("rejects a wakeIntervalMs that is not a positive integer", () => {
+    expect(() => parseOptions({ wakeIntervalMs: 0 })).toThrow(/wakeIntervalMs/);
+    expect(() => parseOptions({ wakeIntervalMs: 1.5 })).toThrow(/wakeIntervalMs/);
+    expect(() => parseOptions({ wakeIntervalMs: "fast" as unknown as number })).toThrow(
+      /wakeIntervalMs/,
+    );
+  });
+
+  it("rejects a non-boolean tls", () => {
+    expect(() => parseOptions({ tls: "on" as unknown as boolean })).toThrow(/tls/);
+  });
+
+  it("rejects a non-boolean insecureHttp", () => {
+    expect(() => parseOptions({ insecureHttp: 1 as unknown as boolean })).toThrow(/insecureHttp/);
+  });
+
+  it("rejects a non-boolean memorySync", () => {
+    expect(() => parseOptions({ memorySync: "true" as unknown as boolean })).toThrow(/memorySync/);
+  });
+
+  it("rejects a memorySyncInterval that is not a non-negative integer", () => {
+    expect(() => parseOptions({ memorySyncInterval: -5 })).toThrow(/memorySyncInterval/);
+    expect(() => parseOptions({ memorySyncInterval: 2.5 })).toThrow(/memorySyncInterval/);
+    expect(() => parseOptions({ memorySyncInterval: "soon" as unknown as number })).toThrow(
+      /memorySyncInterval/,
+    );
+  });
+
+  it("rejects a mailbox outside the allowed charset or size", () => {
+    expect(() => parseOptions({ mailbox: "bad mailbox!" })).toThrow(/mailbox/);
+    expect(() => parseOptions({ mailbox: "x".repeat(65) })).toThrow(/mailbox/);
+  });
+
+  it("rejects an empty or non-string mailboxRole", () => {
+    expect(() => parseOptions({ mailboxRole: "" })).toThrow(/mailboxRole/);
+    expect(() => parseOptions({ mailboxRole: 5 as unknown as string })).toThrow(/mailboxRole/);
+  });
 });
 
 describe("defaultDataDir", () => {

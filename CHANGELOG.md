@@ -14,8 +14,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `execFile` callback's missing `stderr` parameter, `exactOptionalPropertyTypes`-
   clean peer fixtures, `SidebarRpc.bind` / `MeshContext.bindKey` in mocks,
   `DeliverResult` narrowing, dead fields dropped from legacy-mail tests).
-  Test-only: no runtime behavior change. The `[0.14.2]` section, lost with
-  the peer-fix commit, is restored below.
+- **Coverage gate green again** — fixing the typecheck step unmasked a latent
+  branch-coverage shortfall (79.3% < 80): the option-validation branches for
+  `wake`, `tls`, `insecureHttp`, `memorySync`, `memorySyncInterval`, `mailbox`
+  and `mailboxRole` were never exercised; new `parseOptions` validation tests
+  bring branches to 80.7%. Test-only: no runtime behavior change. The
+  `[0.14.2]` section, lost with the peer-fix commit, is restored below.
 
 ## [0.18.0] - 2026-11-23
 
