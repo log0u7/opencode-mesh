@@ -100,3 +100,26 @@ describe("sendMail TLS pinning", () => {
     db.close();
   });
 });
+
+describe("sendMail version skew", () => {
+  it("maps a plaintext listener to plaintext-peer, not unreachable", async () => {
+    const { startMeshServer } = await import("../src/lib/serve.js");
+    const db = openMeshDb(":memory:");
+    const { server, port } = await startMeshServer({ db, port: 0, tls: false });
+
+    // A 0.11+ TLS client against a 0.10.x plaintext peer: the host is up, the
+    // handshake is not. The error must name the skew, not blame the network.
+    const result = await sendMail({
+      url: `https://127.0.0.1:${port}`,
+      tls: true,
+      token: "t",
+      from: "node-a",
+      subject: "s",
+      body: "b",
+    });
+    expect(result).toBe("plaintext-peer");
+
+    server.close();
+    db.close();
+  });
+});

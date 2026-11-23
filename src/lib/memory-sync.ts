@@ -64,7 +64,14 @@ export function receiveMemorySync(dataDir: string, fromNodeId: string, body: str
 
 export type SyncPushResult = {
   node_id: string;
-  outcome: "ok" | "unreachable" | "unauthorized" | "error" | "skipped" | "pin-mismatch";
+  outcome:
+    | "ok"
+    | "unreachable"
+    | "unauthorized"
+    | "error"
+    | "skipped"
+    | "pin-mismatch"
+    | "plaintext-peer";
   bytes: number;
 };
 

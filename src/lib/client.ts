@@ -35,7 +35,11 @@ export type SendResult =
   /** TLS refused the peer: the pinned SPKI no longer matches what the peer presents
    * (its identity rotated or was re-paired). Reporting it as plain "unreachable"
    * hides the remedy — the peer is up, the pin is stale. */
-  | "pin-mismatch";
+  | "pin-mismatch"
+  /** The peer's port answered in PLAINTEXT (HTTP) where TLS was expected: a 0.10.x
+   * peer not yet upgraded to the TLS-only 0.11 transport. The remedy is an upgrade,
+   * not a re-pair. */
+  | "plaintext-peer";
 
 // TLS is implied by the scheme; the flag covers callers that state it twice.
 function isTls(target: { url: string; tls?: boolean }): boolean {
@@ -82,10 +86,15 @@ export async function sendMail(target: SendTarget): Promise<SendResult> {
     return response.status === 401 ? "unauthorized" : "error";
   } catch (cause) {
     // pinCheck rejects the handshake with a precise message; collapsing it into
-    // "unreachable" made a rotated peer identity look like a dead host.
+    // "unreachable" made a rotated peer identity look like a dead host. A plaintext
+    // listener (0.10.x peer) fails TLS with "wrong version number": the host is up,
+    // it just predates the TLS-only transport.
     const message = cause instanceof Error ? cause.message : "";
     if (message.includes("peer certificate key mismatch")) {
       return "pin-mismatch";
+    }
+    if (message.includes("wrong version number")) {
+      return "plaintext-peer";
     }
     return "unreachable";
   }
@@ -136,10 +145,15 @@ export async function pushMemorySync(target: {
     return response.status === 401 ? "unauthorized" : "error";
   } catch (cause) {
     // pinCheck rejects the handshake with a precise message; collapsing it into
-    // "unreachable" made a rotated peer identity look like a dead host.
+    // "unreachable" made a rotated peer identity look like a dead host. A plaintext
+    // listener (0.10.x peer) fails TLS with "wrong version number": the host is up,
+    // it just predates the TLS-only transport.
     const message = cause instanceof Error ? cause.message : "";
     if (message.includes("peer certificate key mismatch")) {
       return "pin-mismatch";
+    }
+    if (message.includes("wrong version number")) {
+      return "plaintext-peer";
     }
     return "unreachable";
   }

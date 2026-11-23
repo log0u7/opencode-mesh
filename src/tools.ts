@@ -437,7 +437,9 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
           const hint =
             result === "pin-mismatch"
               ? " — the peer's identity changed: re-pair with mesh_pair to refresh the pin"
-              : "";
+              : result === "plaintext-peer"
+                ? " — the peer answered in plaintext: version skew, the peer needs opencode-mesh >= 0.11 (TLS-only)"
+                : "";
           return `sent to ${target.node_id}: ${result}${hint}`;
         }
         return await selfSendLocal();
