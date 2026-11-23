@@ -5,6 +5,38 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.1] - 2026-11-23
+
+### Fixed
+
+- **Wake decoupled from the TUI** — since opencode 2.4.0 the TUI plugin slot
+  requires `@opentui >= 0.9.4`, and a host that cannot load it stopped the
+  tab-render bind, leaving the in-memory `sessionsSeen` empty: `sessionKnown`
+  was false everywhere, the wake loop skipped every mailbox and an idle
+  session never re-registered on its own — only a human click unblocked it.
+  `sessionKnown` now consults the host's **live session list** (setup
+  `ctx.session.list`, paginated, cursor-chained, archived sessions excluded —
+  `lib/sessions.ts`); `sessionsSeen` (mesh tool calls + TUI bind) stays as a
+  complement. Hosts without the list fall back to the previous behavior, with
+  a one-time warning.
+- **Notification ghosts** — post-hot-swap "N unread" counts came from an
+  orphaned previous instance (its timers kept running against a closed
+  state). The unread count is read fresh from the same process' database
+  right before each prompt, plugin dispose now stops every timer
+  (wake loop, session lister, sync pusher, workers) and is idempotent, and a
+  wake tick that fails 5 times in a row stops the loop with a logged reason
+  (end of the silent catch).
+- `@opentui/core`/`@opentui/solid` peer requirement raised to `>= 0.9.4`
+  (matches opencode 2.4.0), dev `@opencode/plugin` bumped to 2.3.2 (the
+  version exposing the paginated session list to the setup context).
+
+### Added
+
+- **Anti-narration guidance**: every session's system prompt carries the
+  standing directive injected through the v2 session context hook — status
+  only on significant state changes (release, block/unblock, decision,
+  failure); `mesh_journal` answers "what happened" on demand.
+
 ## [0.14.0] - 2026-11-23
 
 ### Added

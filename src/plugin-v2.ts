@@ -24,6 +24,8 @@ import { startMemorySyncPusher } from "./lib/memory-sync.js";
 import { createDurableStore } from "./lib/persist.js";
 import { createFanout } from "./lib/fanout.js";
 import { startWakeLoop } from "./lib/wake.js";
+import { startSessionLister } from "./lib/sessions.js";
+import { MESH_GUIDANCE } from "./lib/guidance.js";
 import { MeshRpc, snapshotFromMesh } from "./rpc.js";
 import { buildToolSpecs, type ToolSpec } from "./tools.js";
 import { defaultDataDir, parseOptions, type PluginOptions } from "./options.js";
@@ -95,6 +97,27 @@ export const MeshV2 = Plugin.define({
 
     const sessionRef: { sessionID: string | null } = { sessionID: null };
 
+    // Live sessions of THIS host, snapshotted from the host's paginated
+    // session list (ctx.session.list, @opencode/plugin >= 2.3). This is the
+    // wake loop's primary liveness signal: it works even when the TUI slot
+    // fails to load (opencode 2.4.0 raises the @opentui requirement, which
+    // used to leave sessionsSeen empty and starve the wake). On older hosts
+    // the list is absent: log it once and rely on sessionsSeen alone.
+    const liveSessions = startSessionLister({
+      ...(typeof ctx.session.list === "function"
+        ? { list: (input: { cursor?: string }) => ctx.session.list(input) }
+        : {}),
+      onError: (error) => {
+        const message = error instanceof Error ? error.message : String(error);
+        console.warn(`[opencode-mesh] live session list refresh failed: ${message}`);
+      },
+    });
+    if (typeof ctx.session.list !== "function") {
+      console.warn(
+        "[opencode-mesh] host session list unavailable (< 2.4): wake liveness falls back to tool-call and TUI bind discovery",
+      );
+    }
+
     let advertiseHandle: AdvertiseHandle | null = null;
     let browseHandle: { close(): void } | null = null;
     if (options.advertise !== false) {
@@ -145,9 +168,11 @@ export const MeshV2 = Plugin.define({
       }
     });
 
-    // Sessions this instance has seen since boot (mesh tool calls + TUI bind):
-    // the wake loop's liveness test. Session records outlive their process —
-    // ctx.session.get would call a dead pre-restart session "alive".
+    // Sessions this instance has seen since boot (mesh tool calls + TUI
+    // bind): a COMPLEMENT to the host session list (liveSessions) — a fresh
+    // idle session is known through the list before its first tool call.
+    // Session records outlive their process — ctx.session.get would call a
+    // dead pre-restart session "alive".
     const sessionsSeen = new Set<string>();
     // Sessions currently mid-turn, tracked from the host's durable execution
     // events: a queued wake prompt would fire with a stale unread count after
@@ -184,7 +209,7 @@ export const MeshV2 = Plugin.define({
       db,
       ...(options.wake === false ? { intervalMs: 0 } : {}),
       ...(options.wakeIntervalMs !== undefined ? { intervalMs: options.wakeIntervalMs } : {}),
-      sessionKnown: (sessionID) => sessionsSeen.has(sessionID),
+      sessionKnown: (sessionID) => sessionsSeen.has(sessionID) || liveSessions.has(sessionID),
       sessionRunning: (sessionID) => running.has(sessionID),
       prompt: (sessionID, text) =>
         ctx.session.prompt({
@@ -192,6 +217,14 @@ export const MeshV2 = Plugin.define({
           text,
           delivery: "queue",
         }),
+    });
+
+    // Standing anti-narration directive in every session's system prompt: the
+    // v2 session context hook is the supported injection point (the context's
+    // `system` parts are mutable). Disposed with the plugin so a hot-swapped
+    // orphan cannot inject the line twice.
+    const guidance = await ctx.session.hook("context", (input) => {
+      input.system.push({ type: "text", text: MESH_GUIDANCE });
     });
 
     // Live snapshot for the TUI sidebar: one compact read over the mesh state.
@@ -282,13 +315,20 @@ export const MeshV2 = Plugin.define({
       },
     });
 
+    // Idempotent: a double dispose (host hot-swap racing a manual cleanup)
+    // must not double-close the database or re-clear cleared timers.
+    let disposed = false;
     const cleanup = async () => {
+      if (disposed) return;
+      disposed = true;
       wake.stop();
       memorySyncPusher?.stop();
+      liveSessions.stop();
       stopAllWorkers(db);
       advertiseHandle?.close();
       browseHandle?.close();
       rpc.dispose();
+      await guidance?.dispose();
       await Promise.all([
         new Promise<void>((resolve) => server.close(() => resolve())),
         ...(insecureServer !== undefined
