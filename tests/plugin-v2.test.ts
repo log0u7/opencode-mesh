@@ -304,7 +304,7 @@ describe("opencode-mesh v2 setup", () => {
     for (let i = 0; i < 60 && prompts.length === 0; i += 1) {
       await new Promise((r) => setTimeout(r, 25));
     }
-    expect(prompts.some((t) => t.includes('mailbox "a"'))).toBe(true);
+    expect(prompts.some((t) => t.includes('mesh: 1 unread — "ping"'))).toBe(true);
 
     await cleanup?.();
   });
@@ -374,7 +374,7 @@ describe("opencode-mesh v2 setup", () => {
 
     await vi.waitFor(
       () => {
-        expect(prompts.some((t) => t.includes('mailbox "a"'))).toBe(true);
+        expect(prompts.some((t) => t.includes('mesh: 1 unread — "s"'))).toBe(true);
       },
       { timeout: 5000 },
     );
@@ -411,6 +411,9 @@ describe("opencode-mesh v2 setup", () => {
     const system: Array<{ type: string; text: string }> = [];
     (contextHook.callback as (input: { system: typeof system }) => void)({ system });
     expect(system).toEqual([{ type: "text", text: MESH_GUIDANCE }]);
+    // The 0.16.0 token-economy ack rule rides along the anti-narration line.
+    expect(MESH_GUIDANCE).toContain("Ack silently");
+    expect(MESH_GUIDANCE).toContain("Reply only when asked or when adding information");
 
     await cleanup?.();
   });

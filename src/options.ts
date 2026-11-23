@@ -23,6 +23,9 @@ export type PluginOptions = {
   wake?: boolean;
   /** Wake poll interval in ms (default 5000). */
   wakeIntervalMs?: number;
+  /** Wake on pool broadcasts too (default false): only direct mail wakes,
+   * fanouted pool mail is read on natural turns or via mesh_journal. */
+  wakePools?: boolean;
   /** Serve TLS on the mesh port (default true). */
   tls?: boolean;
   /** Open a documented plain-HTTP side channel on port+1 (default false). */
@@ -121,6 +124,12 @@ export function parseOptions(raw: PluginOptions | undefined): PluginOptions {
       throw new Error("opencode-mesh: options.wakeIntervalMs must be a positive integer");
     }
     options.wakeIntervalMs = raw.wakeIntervalMs;
+  }
+  if (raw.wakePools !== undefined) {
+    if (typeof raw.wakePools !== "boolean") {
+      throw new Error("opencode-mesh: options.wakePools must be a boolean");
+    }
+    options.wakePools = raw.wakePools;
   }
   if (raw.tls !== undefined) {
     if (typeof raw.tls !== "boolean") {
