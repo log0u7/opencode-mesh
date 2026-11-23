@@ -9,7 +9,7 @@ import { upsertDiscoveredPeer } from "./lib/peers.js";
 import { loadOrCreateIdentity, type NodeIdentity } from "./lib/identity.js";
 import { createFanout } from "./lib/fanout.js";
 import { nodeSpawn, stopAllWorkers } from "./lib/spawn.js";
-import { defaultDataDir, parseOptions, type PluginOptions } from "./options.js";
+import { defaultDataDir, parseOptions, addressingOptions, type PluginOptions } from "./options.js";
 import { extractClientFetch, type WorktreeClient, type WorktreeFactory } from "./lib/worktree.js";
 import { reconcileWorkers } from "./lib/workers.js";
 import { startMeshServer } from "./lib/serve.js";
@@ -121,6 +121,7 @@ export const MeshPlugin: Plugin = async (input, rawOptions?: PluginOptions) => {
         fanout: createFanout({ db, identity }),
         worktreeClient,
         spawnFn,
+        addressing: addressingOptions(options),
       }).map((spec) => [
         spec.name,
         tool({

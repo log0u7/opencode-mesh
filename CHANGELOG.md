@@ -5,6 +5,25 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.15.0] - 2026-11-23
+
+### Added
+
+- **Modular address providers** — the advertised candidate IPs of this machine
+  (`mesh_status` `tailnet_addresses`) now come from a small provider mold
+  (`lib/providers.ts`): one provider = one function rendering this machine's
+  IPs, shared-cache semantics borrowed from the tailscale pattern (60 s TTL,
+  2 s subprocess timeout, absent CLI or error = empty list, never a failure).
+  Native overlays: **tailscale** (already there, including Headscale via the
+  same CLI), **netbird** (`netbird status --json`, top-level `netbirdIp`),
+  **zerotier** (`zerotier-cli listnetworks`, assigned-IP column). Tunnels
+  without a CLI — WireGuard, IPsec, any SSL VPN — are covered by static
+  `addresses` in the plugin options. Providers can be toggled per name with
+  `providers` (default: all enabled; a missing CLI costs nothing). The
+  tailscale extraction keeps its exported names from `lib/discovery.ts`, and
+  new overlays land as one function + one array entry, by PR — no runtime
+  plugin system.
+
 ## [0.14.1] - 2026-11-23
 
 ### Fixed

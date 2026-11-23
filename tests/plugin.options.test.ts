@@ -77,6 +77,29 @@ describe("parseOptions", () => {
     expect(() => parseOptions({ dataDir: "" })).toThrow(/dataDir/);
     expect(() => parseOptions({ dataDir: 5 as unknown as string })).toThrow(/dataDir/);
   });
+
+  it("accepts providers toggles and static addresses", () => {
+    const options = parseOptions({
+      providers: { netbird: false },
+      addresses: ["10.8.0.2", "fd00::2"],
+    });
+    expect(options.providers).toEqual({ netbird: false });
+    expect(options.addresses).toEqual(["10.8.0.2", "fd00::2"]);
+  });
+
+  it("rejects a malformed providers bag", () => {
+    expect(() => parseOptions({ providers: "on" as never })).toThrow(/providers/);
+    expect(() => parseOptions({ providers: { netbird: "no" as never } })).toThrow(
+      /providers\.netbird/,
+    );
+    expect(() => parseOptions({ providers: null as never })).toThrow(/providers/);
+  });
+
+  it("rejects malformed static addresses", () => {
+    expect(() => parseOptions({ addresses: "10.8.0.2" as never })).toThrow(/addresses/);
+    expect(() => parseOptions({ addresses: [42] as never })).toThrow(/addresses/);
+    expect(() => parseOptions({ addresses: [""] })).toThrow(/addresses/);
+  });
 });
 
 describe("defaultDataDir", () => {

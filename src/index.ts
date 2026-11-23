@@ -32,3 +32,10 @@ export default pluginModule;
 export type { Lock, MailMessage, Peer } from "./types/peer.js";
 
 export type { MeshPlugin } from "./plugin.js";
+
+export type {
+  AddressProvider,
+  AddressOptions,
+  ProvidersConfig,
+} from "./lib/providers.js";
+export { ADDRESS_PROVIDERS, listOwnAddresses } from "./lib/providers.js";

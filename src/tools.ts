@@ -4,7 +4,7 @@ import { postPairCode, sendMail } from "./lib/client.js";
 import type { MeshDb } from "./lib/db.js";
 import type { Fanout } from "./lib/fanout.js";
 import { buildOfferBlob, parseOfferBlob } from "./lib/offer-blob.js";
-import { tailnetAddresses } from "./lib/discovery.js";
+import { listOwnAddresses, type AddressOptions } from "./lib/providers.js";
 import { pairingProof, type NodeIdentity } from "./lib/identity.js";
 import {
   ackInbox,
@@ -78,6 +78,9 @@ export type MeshContext = {
   bindKey: string;
   worktreeClient: WorktreeClient;
   spawnFn: SpawnFn;
+  /** Address providers config + static tunnel addresses: the advertised
+   * candidate IPs (mesh_status `tailnet_addresses`). */
+  addressing?: AddressOptions;
 };
 
 function str(name: string, description: string, required = true): ToolField {
@@ -123,8 +126,18 @@ function sessionID(context: ToolContext): string {
 }
 
 export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
-  const { db, identity, dataDir, serverAddress, port, bindKey, fanout, worktreeClient, spawnFn } =
-    mesh;
+  const {
+    db,
+    identity,
+    dataDir,
+    serverAddress,
+    port,
+    bindKey,
+    fanout,
+    worktreeClient,
+    spawnFn,
+    addressing,
+  } = mesh;
   return [
     {
       name: "mesh_status",
@@ -132,7 +145,7 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
       fields: [],
       execute: async (args, context) => {
         const peers = listPeers(db);
-        const tailnet = await tailnetAddresses();
+        const ownAddresses = await listOwnAddresses(addressing);
         const now = Date.now();
         return JSON.stringify(
           {
@@ -141,7 +154,9 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
             hostname: identity.hostname,
             fingerprint: identity.fingerprint,
             server: `${serverAddress}:${port}`,
-            tailnet_addresses: tailnet,
+            // Field name kept from the tailscale-only era (0.15.0 widened its
+            // contents to every provider + static addresses).
+            tailnet_addresses: ownAddresses,
             peers: peers.map((p) => ({
               node_id: p.node_id,
               hostname: p.hostname,

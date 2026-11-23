@@ -3,6 +3,7 @@ import { join } from "node:path";
 
 import type { SpawnFn } from "./lib/spawn.js";
 import type { WorktreeClient } from "./lib/worktree.js";
+import type { AddressOptions, ProvidersConfig } from "./lib/providers.js";
 
 // Shared option plumbing for both host generations. This module sits in the
 // STATIC import graph of the package (the v2 adapter imports it directly), so
@@ -31,9 +32,22 @@ export type PluginOptions = {
   memorySync?: boolean;
   /** Outbox push cadence in minutes (default 15). 0 disables the push loop. */
   memorySyncInterval?: number;
+  /** Per-provider toggles for the address providers (default: all enabled). */
+  providers?: ProvidersConfig;
+  /** Static addresses of tunnels without a CLI (WireGuard/IPsec/any VPN this
+   * instance manages), advertised alongside the provider-discovered IPs. */
+  addresses?: string[];
   worktreeClient?: WorktreeClient;
   spawnFn?: SpawnFn;
 };
+
+/** The addressing slice of validated options, handed to the tools context. */
+export function addressingOptions(options: PluginOptions): AddressOptions {
+  return {
+    ...(options.providers !== undefined ? { providers: options.providers } : {}),
+    ...(options.addresses !== undefined ? { addresses: options.addresses } : {}),
+  };
+}
 
 // Validate the host-supplied options once, at the boundary. A typo'd port or
 // bind used to surface as a late, cryptic failure (EADDRINUSE, a bind on the
@@ -137,6 +151,27 @@ export function parseOptions(raw: PluginOptions | undefined): PluginOptions {
       );
     }
     options.memorySyncInterval = raw.memorySyncInterval;
+  }
+  if (raw.providers !== undefined) {
+    if (typeof raw.providers !== "object" || raw.providers === null) {
+      throw new Error("opencode-mesh: options.providers must be an object");
+    }
+    const toggles = raw.providers as ProvidersConfig;
+    for (const key of ["tailscale", "netbird", "zerotier"] as const) {
+      if (toggles[key] !== undefined && typeof toggles[key] !== "boolean") {
+        throw new Error(`opencode-mesh: options.providers.${key} must be a boolean`);
+      }
+    }
+    options.providers = toggles;
+  }
+  if (raw.addresses !== undefined) {
+    if (
+      !Array.isArray(raw.addresses) ||
+      !raw.addresses.every((addr) => typeof addr === "string" && addr.length > 0)
+    ) {
+      throw new Error("opencode-mesh: options.addresses must be an array of non-empty strings");
+    }
+    options.addresses = raw.addresses;
   }
   // Opaque collaborators are passed through untouched: the plugin cannot
   // validate a client or spawn function beyond its nominal type.

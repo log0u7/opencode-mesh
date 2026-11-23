@@ -28,7 +28,7 @@ import { startSessionLister } from "./lib/sessions.js";
 import { MESH_GUIDANCE } from "./lib/guidance.js";
 import { MeshRpc, snapshotFromMesh } from "./rpc.js";
 import { buildToolSpecs, type ToolSpec } from "./tools.js";
-import { defaultDataDir, parseOptions, type PluginOptions } from "./options.js";
+import { defaultDataDir, parseOptions, addressingOptions, type PluginOptions } from "./options.js";
 
 const DEFAULT_PORT = 4399;
 
@@ -150,6 +150,7 @@ export const MeshV2 = Plugin.define({
         fanout,
         worktreeClient,
         spawnFn,
+        addressing: addressingOptions(options),
       })) {
         editor.add({
           name: spec.name,

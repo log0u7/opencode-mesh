@@ -37,6 +37,8 @@ On OpenCode 2.x hosts the key is `plugins` and each entry is an object with
 | `mailboxRole` | `string` | none | Informational role stored with the declarative mailbox. |
 | `wake` | `boolean` | `true` | The wake loop polls this session's mailbox every `wakeIntervalMs` and injects a prompt (via `ctx.session.prompt`, delivery `queue`) when unread mail arrives, so an idle agent reacts without a human relaying. `false` disables it. |
 | `wakeIntervalMs` | `number` | `5000` | Wake poll interval in ms. Must be a positive integer. |
+| `providers` | `object` | all enabled | Per-provider toggles for the address providers: `{ "tailscale": true, "netbird": true, "zerotier": true }`. A disabled provider is never invoked; an absent CLI contributes an empty list anyway. |
+| `addresses` | `string[]` | `[]` | Static overlay IPs of tunnels without a CLI (WireGuard, IPsec, any SSL VPN this instance manages), advertised in `mesh_status` `tailnet_addresses` alongside provider-discovered IPs. |
 
 Multi-host pools (0.10.0) add no options: `"bind": "lan"` on every node,
 `mesh_pair()` on one host and `mesh_pair(code="...", address="host:port")` on
