@@ -5,7 +5,17 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.10.6] - 2026-11-23
+## [0.10.7] - 2026-11-23
+
+### Fixed
+
+- **Bind no-steal**: the TUI mount bind re-bound ALL stamped boxes to the
+  currently rendered tab's session on EVERY tab switch — hats churned across
+  tabs as the user switched (the "agents drop pools / exchange roles"
+  reports). The bind now only recovers boxes whose bound session has NOT
+  been seen in this process (dead pre-restart ids); a box bound to a live
+  tab's session is never stolen. Restart recovery keeps working.
+- Includes 0.10.7-diagnostic: `mesh_status` reports the calling session id.
 
 ### Fixed
 
