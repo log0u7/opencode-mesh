@@ -10,7 +10,7 @@ export type MeshDb = {
 
 // Bump when a schema change needs a migration step; the version anchors future
 // migrations that cannot be expressed as idempotent `CREATE ... IF NOT EXISTS`.
-const SCHEMA_VERSION = 8;
+const SCHEMA_VERSION = 9;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS peers (
@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS messages (
   subject TEXT NOT NULL,
   body TEXT NOT NULL,
   reply_to TEXT,
+  wake INTEGER NOT NULL DEFAULT 0,
   status TEXT NOT NULL DEFAULT 'unread',
   created_at INTEGER NOT NULL
 );
@@ -127,6 +128,13 @@ function migrate(conn: SqliteConn): void {
   // v5: messages.origin_id (cross-host broadcast dedup).
   if (!messageColumns.includes("origin_id")) {
     conn.exec("ALTER TABLE messages ADD COLUMN origin_id TEXT");
+  }
+  // v9: messages.wake — a deliberate broadcast (mesh_send wake:true) wakes its
+  // recipients even though it is a pool fanout (Slack model, 0.17.0). The
+  // messages table is never rebuilt (the v6 rebuild only touches mailboxes),
+  // so a guarded ALTER here cannot be lost to a later rebuild in this pass.
+  if (!messageColumns.includes("wake")) {
+    conn.exec("ALTER TABLE messages ADD COLUMN wake INTEGER NOT NULL DEFAULT 0");
   }
   // v6: mailboxes loses UNIQUE(session_id) — a session may own several boxes
   // (one TUI, several agent hats). SQLite cannot drop a constraint: rebuild.

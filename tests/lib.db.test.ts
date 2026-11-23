@@ -64,7 +64,7 @@ describe("mesh database schema", () => {
       legacy.close();
 
       const db = openMeshDb(file);
-      expect(db.conn.get<{ user_version: number }>("PRAGMA user_version")?.user_version).toBe(8);
+      expect(db.conn.get<{ user_version: number }>("PRAGMA user_version")?.user_version).toBe(9);
       const names = db.conn
         .all<{ name: string }>("SELECT name FROM sqlite_master WHERE type = 'index'")
         .map((row) => row.name);
@@ -89,7 +89,7 @@ describe("mesh database schema", () => {
       v1.close();
 
       const db = openMeshDb(file);
-      expect(db.conn.get<{ user_version: number }>("PRAGMA user_version")?.user_version).toBe(8);
+      expect(db.conn.get<{ user_version: number }>("PRAGMA user_version")?.user_version).toBe(9);
       const columns = db.conn
         .all<{ name: string }>("PRAGMA table_info(peers)")
         .map((row) => row.name);
@@ -101,7 +101,7 @@ describe("mesh database schema", () => {
       // migration pass, no version churn.
       const reopened = openMeshDb(file);
       expect(reopened.conn.get<{ user_version: number }>("PRAGMA user_version")?.user_version).toBe(
-        8,
+        9,
       );
       reopened.close();
     } finally {
@@ -132,6 +132,38 @@ describe("mesh database schema", () => {
         .map((row) => row.name);
       expect(columns).toContain("primary_pool");
       expect(db.conn.get<{ name: string }>("SELECT name FROM mailboxes")?.name).toBe("alice");
+      db.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // v9 adds messages.wake (0.17.0 Slack-model flag). The messages table is
+  // never rebuilt, so the guarded ALTER must land on a pre-v9 messages table
+  // and keep its rows.
+  it("adds wake to a pre-v9 messages table in place", () => {
+    const dir = mkdtempSync(join(tmpdir(), "opencode-mesh-db-"));
+    const file = join(dir, "v8.db");
+    try {
+      const v8 = openSqlite(file);
+      v8.exec(`
+        CREATE TABLE messages (id TEXT PRIMARY KEY, origin_id TEXT, from_node TEXT NOT NULL,
+          from_box TEXT, subject TEXT NOT NULL, body TEXT NOT NULL, reply_to TEXT,
+          status TEXT NOT NULL DEFAULT 'unread', created_at INTEGER NOT NULL);
+        INSERT INTO messages (id, origin_id, from_node, subject, body, status, created_at)
+          VALUES ('m1', NULL, 'n1', 's', 'b', 'unread', 1);
+        PRAGMA user_version = 8;
+      `);
+      v8.close();
+
+      const db = openMeshDb(file);
+      expect(db.conn.get<{ user_version: number }>("PRAGMA user_version")?.user_version).toBe(9);
+      const columns = db.conn
+        .all<{ name: string }>("PRAGMA table_info(messages)")
+        .map((row) => row.name);
+      expect(columns).toContain("wake");
+      const row = db.conn.get<{ wake: number }>("SELECT wake FROM messages WHERE id = 'm1'");
+      expect(row?.wake).toBe(0);
       db.close();
     } finally {
       rmSync(dir, { recursive: true, force: true });

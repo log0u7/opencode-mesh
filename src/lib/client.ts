@@ -18,6 +18,10 @@ export type SendTarget = {
   via?: string[];
   /** Origin message id (cross-host broadcast dedup). */
   origin_id?: string;
+  /** Deliberate broadcast: wake every recipient on the peer (Slack model,
+   * 0.17.0). Direct mail always wakes; the flag only matters for
+   * pool/all broadcasts. */
+  wake?: boolean;
   /** `<base64 spki>.<base64 ed25519 signature>` over node_id:token. */
   proof?: string;
   /** Target serves TLS (implied by an https:// url too). */
@@ -58,6 +62,7 @@ export async function sendMail(target: SendTarget): Promise<SendResult> {
     ...(target.reply_to !== undefined ? { reply_to: target.reply_to } : {}),
     ...(target.via !== undefined ? { via: target.via } : {}),
     ...(target.origin_id !== undefined ? { origin_id: target.origin_id } : {}),
+    ...(target.wake === true ? { wake: true } : {}),
     ...(target.proof !== undefined ? { proof: target.proof } : {}),
   });
   const headers = {

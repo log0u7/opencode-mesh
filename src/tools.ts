@@ -356,6 +356,10 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
         str("body", "Message body"),
         str("reply_to", "Message id this message answers, from mesh_send output", false),
         str("box", "Which of YOUR mailboxes sends (multi-box sessions)", false),
+        bool(
+          "wake",
+          "Wake every recipient — use when the message is deliberately addressed to the whole pool and must be seen now. Direct mail always wakes.",
+        ),
       ],
       execute: async (args, context) => {
         const peer = typeof args.peer === "string" ? args.peer : null;
@@ -363,6 +367,7 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
         if (peer === null && to === null) {
           return "error: mesh_send needs a peer (remote) or a to (mailbox, team:<pool> or all)";
         }
+        const wake = args.wake === true;
         const sessionBoxes = mailboxesBySession(db, sessionID(context));
         const from_box =
           typeof args.box === "string" && args.box.length > 0
@@ -377,6 +382,7 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
             subject: String(args.subject),
             body: String(args.body),
             reply_to: typeof args.reply_to === "string" ? args.reply_to : null,
+            wake,
           });
           // Federation: a broadcast with no LOCAL recipients (the sender is
           // often the only member of its team on this node) must still reach
@@ -391,6 +397,7 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
               subject: String(args.subject),
               body: String(args.body),
               via: [],
+              ...(wake ? { wake: true } : {}),
             });
             return JSON.stringify(
               { id: origin, recipients: [], forwarded: forwardedOnly },
@@ -414,6 +421,7 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
               subject: String(args.subject),
               body: String(args.body),
               via: [],
+              ...(wake ? { wake: true } : {}),
             });
           }
           return JSON.stringify(
@@ -457,6 +465,7 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
             subject: String(args.subject),
             body: String(args.body),
             proof: pairingProof(identity, target.token ?? ""),
+            ...(wake ? { wake: true } : {}),
             ...extras,
           });
           const hint =

@@ -43,6 +43,11 @@ export type DeliverInput = {
    * origin_id already exists locally, the delivery is skipped (the fanout
    * can hand the same broadcast to a node through several paths). */
   origin_id?: string | null;
+  /** Deliberate broadcast (mesh_send wake:true): wake every recipient even
+   * though the mail is a pool fanout (Slack model, 0.17.0). Direct mail
+   * always wakes; this flag is only meaningful for multi-recipient or
+   * fanouted mail. */
+  wake?: boolean;
   created_at?: number;
 };
 
@@ -242,8 +247,8 @@ export function deliverMessage(db: MeshDb, input: DeliverInput): DeliverResult {
   }
 
   db.conn.run(
-    `INSERT INTO messages (id, origin_id, from_node, from_box, subject, body, reply_to, status, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO messages (id, origin_id, from_node, from_box, subject, body, reply_to, wake, status, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       id,
       input.origin_id ?? id,
@@ -252,6 +257,7 @@ export function deliverMessage(db: MeshDb, input: DeliverInput): DeliverResult {
       input.subject,
       input.body,
       input.reply_to ?? null,
+      input.wake === true ? 1 : 0,
       global ? "unread" : "delivered",
       created_at,
     ],
@@ -495,16 +501,29 @@ export function unreadBoxCount(db: MeshDb, box: string): number {
 // `forwarded` semantics: origin_id differs from the local id; legacy rows
 // have origin_id NULL). Pool mail is read on natural turns — only a DIRECT
 // mail (origin_id equals the local id, or NULL legacy) may wake the session.
-export function hasDirectUnread(db: MeshDb, box: string): boolean {
+/** Does the box hold pending mail that wakes its session (Slack model,
+ * 0.17.0)? A message wakes when it is deliberate (`wake = 1`) OR direct:
+ * exactly one local recipient and no foreign origin (origin_id null or equal
+ * to the local id). A multi-recipient broadcast or a cross-host fanout
+ * without the flag is quiet: channels are quiet by default, the sender flags
+ * the mention. Legacy rows (pre-origin_id) count as direct, like every
+ * other gate. */
+export function hasWakeableUnread(db: MeshDb, box: string): boolean {
   return (
-    db.conn.get<{ direct: number }>(
+    db.conn.get<{ wakeable: number }>(
       `SELECT EXISTS(
            SELECT 1 FROM deliveries d JOIN messages m ON m.id = d.message_id
            WHERE d.to_box = ? AND d.status = 'unread'
-             AND (m.origin_id IS NULL OR m.origin_id = m.id)
-         ) AS direct`,
+             AND (
+               m.wake = 1
+               OR (
+                 (m.origin_id IS NULL OR m.origin_id = m.id)
+                 AND (SELECT COUNT(*) FROM deliveries d2 WHERE d2.message_id = m.id) <= 1
+               )
+             )
+         ) AS wakeable`,
       [box],
-    )?.direct === 1
+    )?.wakeable === 1
   );
 }
 

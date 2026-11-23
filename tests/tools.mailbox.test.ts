@@ -2,7 +2,13 @@ import { describe, expect, it } from "vitest";
 
 import { openMeshDb } from "../src/lib/db.js";
 import type { NodeIdentity } from "../src/lib/identity.js";
-import { deliverMessage, inboxRows, mailboxByName, registerMailbox } from "../src/lib/mail.js";
+import {
+  deliverMessage,
+  inboxRows,
+  joinPool,
+  mailboxByName,
+  registerMailbox,
+} from "../src/lib/mail.js";
 import { buildToolSpecs, type MeshContext, type ToolSpec } from "../src/tools.js";
 
 function setup() {
@@ -321,5 +327,24 @@ describe("mesh_status", () => {
     const out = await call("mesh_send", { peer: "n1", subject: "s", body: "b" }, "s1");
     expect(out).toContain("is THIS node");
     expect(out).toContain("to=<mailbox>");
+  });
+
+  it("mesh_send stores wake on the message only when the flag is passed (0.17.0)", async () => {
+    const { db, call } = setup();
+    registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
+    registerMailbox(db, { name: "b", session_id: "s2", now: 1000 });
+    joinPool(db, "a", "team:x");
+    joinPool(db, "b", "team:x");
+
+    await call("mesh_send", { to: "team:x", subject: "flagged", body: "b", wake: true }, "s1");
+    await call("mesh_send", { to: "team:x", subject: "quiet", body: "b" }, "s1");
+
+    const wakes = db.conn
+      .all<{ subject: string; wake: number }>(
+        "SELECT subject, wake FROM messages ORDER BY created_at",
+      )
+      .map((r) => `${r.subject}:${r.wake}`);
+    expect(wakes).toEqual(["flagged:1", "quiet:0"]);
+    db.close();
   });
 });

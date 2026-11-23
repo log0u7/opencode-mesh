@@ -1,5 +1,5 @@
 import type { MeshDb } from "./db.js";
-import { firstPendingSubject, hasDirectUnread, listMailboxes, unreadBoxCount } from "./mail.js";
+import { firstPendingSubject, hasWakeableUnread, listMailboxes, unreadBoxCount } from "./mail.js";
 
 // Wake loop: polls every registered mailbox in the shared local database and,
 // when unread mail appears in a box whose session lives on THIS host, injects
@@ -34,7 +34,9 @@ export type WakeOptions = {
   maxUndrainedPrompts?: number;
   /** Wake on pool broadcasts too (default false, token economy 0.16.0):
    * only DIRECT mail wakes the session; fanouted pool mail (origin_id differs
-   * from the local id) is read on natural turns or via mesh_journal. */
+   * from the local id) is read on natural turns or via mesh_journal. Since
+   * 0.17.0 a sender can also flag a single broadcast wake:true (per-message
+   * Slack-style mention); this option wakes EVERY broadcast. */
   wakePools?: boolean;
 };
 
@@ -58,7 +60,8 @@ export function startWakeLoop(options: WakeOptions): WakeHandle {
   if (interval <= 0) {
     return { stop: () => {} };
   }
-  // Token economy (0.16.0): pool broadcasts never wake by default.
+  // Token economy (0.16.0): pool broadcasts never wake by default; since
+  // 0.17.0 the sender can flag one deliberate broadcast wake:true.
   const wakePools = options.wakePools ?? false;
   const lastPromptAt = new Map<string, number>();
   const lastUnread = new Map<string, number>();
@@ -78,10 +81,13 @@ export function startWakeLoop(options: WakeOptions): WakeHandle {
           undrained.delete(box.name);
           continue;
         }
-        // Pool gate: without the opt-in, a box whose pending mail is ALL
-        // fanouted (pool broadcast) never wakes. The box looks empty to the
-        // loop until a direct mail lands — one prompt then drains everything.
-        if (!wakePools && !hasDirectUnread(options.db, box.name)) {
+        // Pool gate (Slack model, 0.17.0): a box wakes only for mail meant to
+        // interrupt it — a direct mail (one recipient), or any pending mail
+        // the sender flagged wake=1 (deliberate broadcast). A pool broadcast
+        // without the flag (fanouted or local multi-recipient) never wakes;
+        // wakePools is the operator-wide override. The box looks empty to the
+        // loop until a wakeable mail lands — one prompt then drains all.
+        if (!wakePools && !hasWakeableUnread(options.db, box.name)) {
           continue;
         }
         lastUnread.set(box.name, unread);

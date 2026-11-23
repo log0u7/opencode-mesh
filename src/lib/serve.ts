@@ -268,6 +268,7 @@ async function handle(
       body: parsed.body,
       reply_to: parsed.reply_to ?? null,
       origin_id: parsed.origin_id ?? null,
+      wake: parsed.wake === true,
     });
     let delivered = 0;
     if (!result.ok && result.error === "unknown_mailbox") {
@@ -299,6 +300,7 @@ async function handle(
           subject: parsed.subject,
           body: parsed.body,
           via: parsed.via ?? null,
+          ...(parsed.wake === true ? { wake: true } : {}),
         })
         .catch(() => {});
     }
@@ -465,6 +467,7 @@ function parseMail(raw: string): MailBody | null {
       ...(typeof parsed.to === "string" ? { to: parsed.to } : {}),
       ...(typeof parsed.from_box === "string" ? { from_box: parsed.from_box } : {}),
       ...(typeof parsed.reply_to === "string" ? { reply_to: parsed.reply_to } : {}),
+      ...(parsed.wake === true ? { wake: true } : {}),
     };
   } catch {
     return null;
@@ -481,6 +484,7 @@ type MailBody = {
   reply_to?: string;
   via?: string[];
   origin_id?: string;
+  wake?: boolean;
 };
 
 function json(res: ServerResponse, status: number, body: unknown): void {

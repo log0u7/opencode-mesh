@@ -24,7 +24,9 @@ export type PluginOptions = {
   /** Wake poll interval in ms (default 5000). */
   wakeIntervalMs?: number;
   /** Wake on pool broadcasts too (default false): only direct mail wakes,
-   * fanouted pool mail is read on natural turns or via mesh_journal. */
+   * fanouted pool mail is read on natural turns or via mesh_journal. Since
+   * 0.17.0 a sender can flag one broadcast wake:true; this option wakes
+   * every broadcast. */
   wakePools?: boolean;
   /** Serve TLS on the mesh port (default true). */
   tls?: boolean;

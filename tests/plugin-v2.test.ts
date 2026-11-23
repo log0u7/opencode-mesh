@@ -414,6 +414,10 @@ describe("opencode-mesh v2 setup", () => {
     // The 0.16.0 token-economy ack rule rides along the anti-narration line.
     expect(MESH_GUIDANCE).toContain("Ack silently");
     expect(MESH_GUIDANCE).toContain("Reply only when asked or when adding information");
+    // The 0.17.0 addressing rule (Slack model): pools are quiet, DMs wake.
+    expect(MESH_GUIDANCE).toContain("team-wide announcements go to the POOL as one post");
+    expect(MESH_GUIDANCE).toContain("never as individual DMs — a DM wakes its recipient");
+    expect(MESH_GUIDANCE).toContain("DM = only what must be seen NOW by ONE mailbox");
 
     await cleanup?.();
   });

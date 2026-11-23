@@ -28,6 +28,8 @@ export type FanoutInput = {
   subject: string;
   body: string;
   via?: string[] | null;
+  /** Deliberate broadcast: the recipient wakes its members (0.17.0). */
+  wake?: boolean;
 };
 
 export type Fanout = {
@@ -122,6 +124,7 @@ export function createFanout(options: FanoutOptions): Fanout {
           subject: input.subject,
           body: input.body,
           origin_id: input.origin_id,
+          ...(input.wake === true ? { wake: true } : {}),
           via: [...visited],
         });
         if (result === "ok") {

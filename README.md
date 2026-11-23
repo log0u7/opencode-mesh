@@ -107,7 +107,8 @@ Same machine: start two OpenCode instances in the same repository.
 ```
 mesh_register(name="purser", role="manager")   # claim a named mailbox for this session
 mesh_send(to="quartermaster", subject="r8 go", body="...")   # targeted mail (this machine)
-mesh_send(to="team:quartermaster", subject="status", body="...")   # pool broadcast
+mesh_send(to="team:quartermaster", subject="status", body="...")   # pool broadcast (quiet)
+mesh_send(to="team:quartermaster", subject="r8 go", body="...", wake=true)   # deliberate broadcast: wakes every member
 mesh_inbox()                       # only YOUR mailbox (plus legacy global mail), ack
 mesh_wait(id="...", timeout=120)   # block until a reply_to lands, then return it
 mesh_join(pool="team:quartermaster") / mesh_leave(pool="...") / mesh_pools()

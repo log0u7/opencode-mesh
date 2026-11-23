@@ -161,6 +161,43 @@ describe("mesh server", () => {
     db.close();
   });
 
+  it("stores the wake flag carried by POST /mail (0.17.0)", async () => {
+    const { db, server, url } = await start();
+    pairWithToken(db, {
+      node_id: "peer1",
+      hostname: "laptop",
+      fingerprint: "ff00",
+      token: "tok-peer1",
+    });
+    const token = "tok-peer1";
+    registerMailbox(db, { name: "ops", session_id: "sess-ops", now: Date.now() });
+
+    const flagged = await post(
+      url,
+      "/mail",
+      { subject: "r8 go", body: "b", from: "peer1", to: "ops", wake: true },
+      token,
+    );
+    expect(flagged.status).toBe(200);
+    const plain = await post(
+      url,
+      "/mail",
+      { subject: "status", body: "b", from: "peer1", to: "ops" },
+      token,
+    );
+    expect(plain.status).toBe(200);
+
+    const wakes = db.conn
+      .all<{ subject: string; wake: number }>(
+        "SELECT subject, wake FROM messages ORDER BY created_at",
+      )
+      .map((r) => `${r.subject}:${r.wake}`);
+    expect(wakes).toEqual(["r8 go:1", "status:0"]);
+
+    server.close();
+    db.close();
+  });
+
   it("returns 401 for a paired token from a different node id", async () => {
     const { db, server, url } = await start();
     pairWithToken(db, {
