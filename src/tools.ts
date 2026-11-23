@@ -25,6 +25,7 @@ import {
   unreadCount,
   unreadMessages,
 } from "./lib/mail.js";
+import { journalQuery } from "./lib/journal.js";
 import { listLocks, releaseLock, tryLock } from "./lib/locks.js";
 import {
   createPairingCode,
@@ -521,6 +522,40 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
           await new Promise((r) => setTimeout(r, 250));
         }
         return `timeout: no reply to ${String(args.id)} within ${seconds}s`;
+      },
+    },
+
+    {
+      name: "mesh_journal",
+      description:
+        "Read-only journal of mesh traffic this machine saw — who said what to whom, when. Consultable on demand; replaces narrating routine ops to the human.",
+      fields: [
+        str("since", "Only entries at or after this time: ISO date or epoch ms", false),
+        str("mailbox", "Only entries where this mailbox is sender or recipient", false),
+        num("limit", "Max entries, newest first (default 50, max 200)"),
+        bool("pool", "Only pool/broadcast traffic (more than one recipient)"),
+      ],
+      execute: async (args) => {
+        let since: number | undefined;
+        if (typeof args.since === "string" && args.since.trim().length > 0) {
+          const raw = args.since.trim();
+          // Epoch ms first (Date.parse on bare digits is unreliable), ISO next.
+          const parsed = /^\d+$/.test(raw) ? Number(raw) : Date.parse(raw);
+          if (!Number.isFinite(parsed)) {
+            return "error: since must be an ISO date or epoch ms";
+          }
+          since = parsed;
+        }
+        const rows = journalQuery(db, {
+          ...(since !== undefined ? { since } : {}),
+          ...(typeof args.mailbox === "string" && args.mailbox.length > 0
+            ? { mailbox: args.mailbox }
+            : {}),
+          ...(typeof args.limit === "number" ? { limit: args.limit } : {}),
+          ...(args.pool === true ? { pool: true } : {}),
+        });
+        const oldest = rows.length > 0 ? new Date(rows[rows.length - 1]!.ts).toISOString() : "now";
+        return `journal: ${rows.length} entries (from ${oldest} — machine-local)\n${JSON.stringify(rows)}`;
       },
     },
 

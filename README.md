@@ -182,6 +182,7 @@ and the role prompts plus the enrollment lifecycle in
 | `mesh_send` | `peer?`, `to?`, `subject`, `body`, `reply_to?` | Deliver mail: `to` a mailbox / `team:<pool>` / `all` locally, and/or `peer` on another node. |
 | `mesh_inbox` | `ack?` | Fetch unread messages addressed to this session's mailbox; ack marks them read. |
 | `mesh_wait` | `id`, `timeout?` | Block until a reply (`reply_to`) to message `id` arrives, return it. |
+| `mesh_journal` | `since?`, `mailbox?`, `limit?`, `pool?` | Read-only journal of the traffic this machine saw: who, what, to whom, when (metadata only — bodies stay in `mesh_inbox`). |
 | `mesh_join` / `mesh_leave` | `pool` | Add / remove this mailbox from a broadcast pool. |
 | `mesh_pools` | | List pools with their member mailboxes. |
 | `mesh_lock` | `path`, `ttl?` | Exclusive claim on a file or path, enforced only between sessions on this machine (default ttl 600s). Not visible to remote peers. |
