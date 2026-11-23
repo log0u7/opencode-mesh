@@ -5,6 +5,20 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.0] - 2026-11-23
+
+### Added
+
+- **mesh_journal** — read-only traffic journal, the anti-narration record: the
+  mesh database already stores every mail (sender, recipients, subject, time,
+  delivery), the new tool is a query over it, with no new writes and no new
+  tables. Agents consult the journal on demand instead of narrating routine
+  operations to the human. Filters: `since` (ISO or epoch ms), `mailbox`
+  (sender or recipient), `pool` (broadcasts only), `limit` (default 50, max
+  200), newest first. Metadata only — bodies stay readable through
+  `mesh_inbox`. Cross-host arrivals (origin id minted by a remote node) are
+  flagged `forwarded`.
+
 ## [0.13.0] - 2026-11-23
 
 ### Added

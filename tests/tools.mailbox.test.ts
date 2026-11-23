@@ -197,6 +197,66 @@ describe("mesh_wait", () => {
   });
 });
 
+describe("mesh_journal", () => {
+  it("returns the header line plus compact JSON metadata without bodies", async () => {
+    const { db, call } = setup();
+    registerMailbox(db, { name: "alice", session_id: "s1", now: 1000 });
+    registerMailbox(db, { name: "bob", session_id: "s2", now: 1000 });
+    deliverMessage(db, {
+      from: "n1",
+      from_box: "alice",
+      to_box: "bob",
+      subject: "hi",
+      body: "SECRET-BODY",
+      created_at: 5000,
+    });
+    const out = await call("mesh_journal");
+    expect(out).toMatch(/^journal: 1 entries \(from /);
+    expect(out).toContain("machine-local)");
+    const rows = JSON.parse(out.slice(out.indexOf("\n") + 1)) as Array<Record<string, unknown>>;
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ from: "alice", to: ["bob"], subject: "hi", kind: "dm" });
+    expect(rows[0]).not.toHaveProperty("body");
+  });
+
+  it("parses since as ISO or epoch ms", async () => {
+    const { db, call } = setup();
+    registerMailbox(db, { name: "alice", session_id: "s1", now: 1000 });
+    registerMailbox(db, { name: "bob", session_id: "s2", now: 1000 });
+    deliverMessage(db, {
+      from: "n1",
+      from_box: "alice",
+      to_box: "bob",
+      subject: "old",
+      body: "b",
+      created_at: Date.now() - 60_000,
+    });
+    deliverMessage(db, {
+      from: "n1",
+      from_box: "alice",
+      to_box: "bob",
+      subject: "new",
+      body: "b",
+      created_at: Date.now(),
+    });
+    const iso = await call("mesh_journal", {
+      since: new Date(Date.now() - 30_000).toISOString(),
+    });
+    expect(iso).toContain('"new"');
+    expect(iso).not.toContain('"old"');
+    const epoch = await call("mesh_journal", { since: String(Date.now() - 30_000) });
+    expect(epoch).toContain('"new"');
+    expect(epoch).not.toContain('"old"');
+  });
+
+  it("rejects an unparseable since", async () => {
+    const { call } = setup();
+    expect(await call("mesh_journal", { since: "not-a-date" })).toMatch(
+      /^error: since must be an ISO date or epoch ms/,
+    );
+  });
+});
+
 describe("mesh_join / mesh_leave / mesh_pools", () => {
   it("requires registration before joining", async () => {
     const { call } = setup();
