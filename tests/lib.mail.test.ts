@@ -5,10 +5,12 @@ import {
   deliverMessage,
   firstPendingSubject,
   hasDirectUnread,
+  inboxRead,
   receiveMessage,
   registerMailbox,
   unreadCount,
   unreadMessages,
+  waitReplyRead,
 } from "../src/lib/mail.js";
 import { openMeshDb } from "../src/lib/db.js";
 
@@ -25,6 +27,89 @@ describe("mail ack flow", () => {
     const remaining = unreadMessages(db);
     expect(remaining[0]?.subject).toBe("two");
     expect(remaining[0]?.status).toBe("unread");
+    db.close();
+  });
+});
+
+describe("transactional inbox read (0.16.1 hot-swap race fix)", () => {
+  function boxDb() {
+    const db = openMeshDb(":memory:");
+    registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
+    return db;
+  }
+
+  it("inboxRead returns the rows and marks their deliveries read in one call", () => {
+    const db = boxDb();
+    deliverMessage(db, { from: "n", to_box: "a", subject: "one", body: "1", created_at: 2000 });
+    deliverMessage(db, { from: "n", to_box: "a", subject: "two", body: "2", created_at: 3000 });
+
+    const rows = inboxRead(db, "s1", true);
+    expect(rows.map((r) => r.subject)).toEqual(["one", "two"]);
+
+    // Same call again serves nothing: everything was read-marked atomically.
+    expect(inboxRead(db, "s1", true)).toHaveLength(0);
+    db.close();
+  });
+
+  it("inboxRead with ack:false returns rows and leaves them unread", () => {
+    const db = boxDb();
+    deliverMessage(db, { from: "n", to_box: "a", subject: "one", body: "1", created_at: 2000 });
+    expect(inboxRead(db, "s1", false)).toHaveLength(1);
+    expect(inboxRead(db, "s1", false)).toHaveLength(1);
+    db.close();
+  });
+
+  it("inboxRead also acks legacy global mail (rows with no delivery)", () => {
+    const db = openMeshDb(":memory:");
+    receiveMessage(db, { from: "n1", subject: "legacy", body: "b" });
+    expect(inboxRead(db, "nosession", true).map((r) => r.subject)).toEqual(["legacy"]);
+    expect(unreadMessages(db)).toHaveLength(0);
+    db.close();
+  });
+
+  it("rolls fetch+ack back when a write fails mid-transaction (nothing lost)", () => {
+    const db = boxDb();
+    deliverMessage(db, { from: "n", to_box: "a", subject: "one", body: "1", created_at: 2000 });
+    deliverMessage(db, { from: "n", to_box: "a", subject: "two", body: "2", created_at: 3000 });
+
+    // Simulate a kill between fetch and ack: the second delivery UPDATE throws.
+    const origRun = db.conn.run.bind(db.conn);
+    let updates = 0;
+    db.conn.run = (sql: string, params?: unknown[]) => {
+      if (sql.startsWith("UPDATE deliveries") && ++updates === 2) {
+        throw new Error("simulated kill between fetch and ack");
+      }
+      return origRun(sql, params);
+    };
+    expect(() => inboxRead(db, "s1", true)).toThrow("simulated kill between fetch and ack");
+    db.conn.run = origRun;
+
+    // The rollback means no delivery was read-marked: both rows are served.
+    expect(inboxRead(db, "s1", true).map((r) => r.subject)).toEqual(["one", "two"]);
+    db.close();
+  });
+
+  it("waitReplyRead returns the reply and marks it read atomically (mesh_wait path)", () => {
+    const db = boxDb();
+    const q = deliverMessage(db, {
+      from: "n",
+      to_box: "a",
+      subject: "question",
+      body: "?",
+      created_at: 2000,
+    });
+    if (!q.ok) throw new Error("delivery failed");
+    deliverMessage(db, {
+      from: "n",
+      to_box: "a",
+      subject: "re: question",
+      body: "answer",
+      reply_to: q.id,
+      created_at: 3000,
+    });
+
+    expect(waitReplyRead(db, q.id, "s1")?.subject).toBe("re: question");
+    expect(waitReplyRead(db, q.id, "s1")).toBeNull();
     db.close();
   });
 });

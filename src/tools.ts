@@ -7,12 +7,8 @@ import { buildOfferBlob, parseOfferBlob } from "./lib/offer-blob.js";
 import { listOwnAddresses, type AddressOptions } from "./lib/providers.js";
 import { pairingProof, type NodeIdentity } from "./lib/identity.js";
 import {
-  ackInbox,
-  ackMessages,
-  ackReply,
   deliverMessage,
-  firstReply,
-  inboxRows,
+  inboxRead,
   joinPool,
   leavePool,
   listMailboxes,
@@ -24,6 +20,7 @@ import {
   touchMailbox,
   unreadCount,
   unreadMessages,
+  waitReplyRead,
 } from "./lib/mail.js";
 import { journalQuery } from "./lib/journal.js";
 import { listLocks, releaseLock, tryLock } from "./lib/locks.js";
@@ -482,20 +479,11 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
       execute: async (args, context) => {
         const sid = sessionID(context);
         touchMailbox(db, sid, Date.now());
-        const rows = inboxRows(db, sid);
+        // Fetch + ack in one transaction: a process killed between them used
+        // to leave deliveries read but never served (hot-swap race, 0.16.1).
+        const rows = inboxRead(db, sid, args.ack !== false);
         if (rows.length === 0) {
           return "inbox empty";
-        }
-        if (args.ack !== false) {
-          ackInbox(
-            db,
-            rows.map((r) => r.delivery_id),
-          );
-          // Legacy global rows have no delivery: ack the message rows instead.
-          ackMessages(
-            db,
-            rows.filter((r) => r.delivery_id === "").map((r) => r.id),
-          );
         }
         return JSON.stringify(
           rows.map((r) => ({
@@ -529,9 +517,9 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
         const seconds = typeof args.timeout === "number" ? args.timeout : 120;
         const deadline = Date.now() + seconds * 1000;
         while (Date.now() < deadline) {
-          const row = firstReply(db, String(args.id), sid);
+          // Atomic fetch+ack, same race fix as mesh_inbox (0.16.1).
+          const row = waitReplyRead(db, String(args.id), sid);
           if (row) {
-            ackReply(db, row);
             return JSON.stringify(row, null, 2);
           }
           await new Promise((r) => setTimeout(r, 250));
