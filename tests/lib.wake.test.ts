@@ -239,3 +239,57 @@ describe("fatigue guard", () => {
     db.close();
   });
 });
+
+describe("wake tick failures", () => {
+  it("logs each failed tick and stops the loop after MAX_TICK_FAILURES", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const db = openMeshDb(":memory:");
+    registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
+    deliverMessage(db, { from: "n", to_box: "a", subject: "s", body: "b", created_at: 1000 });
+    db.close(); // A hot-swapped orphan instance owns a closed database.
+
+    const handle = startWakeLoop({
+      db,
+      prompt: async () => {},
+      sessionKnown: () => true,
+      intervalMs: 10,
+      cooldownMs: 0,
+    });
+    await vi.waitFor(() => {
+      expect(warn.mock.calls.some((c) => String(c[0]).includes("wake loop stopped"))).toBe(true);
+    });
+    handle.stop();
+
+    const stopMessages = warn.mock.calls.filter((c) =>
+      String(c[0]).includes("wake loop stopped after 5 consecutive tick failures"),
+    );
+    expect(stopMessages).toHaveLength(1);
+    expect(warn.mock.calls.some((c) => String(c[0]).includes("wake tick failed (1/5)"))).toBe(true);
+    warn.mockRestore();
+  });
+
+  it("keeps polling when a failure is followed by success", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const db = openMeshDb(":memory:");
+    registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
+    let calls = 0;
+    const handle = startWakeLoop({
+      db,
+      prompt: async () => {
+        calls += 1;
+        if (calls === 1) throw new Error("host busy");
+      },
+      sessionKnown: () => true,
+      intervalMs: 10,
+      cooldownMs: 0,
+    });
+    deliverMessage(db, { from: "n", to_box: "a", subject: "s", body: "b", created_at: 1000 });
+    await new Promise((r) => setTimeout(r, 80));
+    handle.stop();
+
+    expect(calls).toBeGreaterThanOrEqual(2);
+    expect(warn.mock.calls.some((c) => String(c[0]).includes("wake loop stopped"))).toBe(false);
+    warn.mockRestore();
+    db.close();
+  });
+});

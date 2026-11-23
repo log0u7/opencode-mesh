@@ -11,6 +11,8 @@ import { openMeshDb } from "../src/lib/db.js";
 import { pairWithToken } from "../src/lib/peers.js";
 import { loadOrCreateIdentity } from "../src/lib/identity.js";
 import { buildTlsMaterial, certPkSpki } from "../src/lib/tls.js";
+import { deliverMessage, registerMailbox } from "../src/lib/mail.js";
+import { MESH_GUIDANCE } from "../src/lib/guidance.js";
 
 const dirs: string[] = [];
 
@@ -53,11 +55,17 @@ function okSpawn() {
 
 function fakeCtx(
   dataDir: string,
-  overrides: { options?: Record<string, unknown>; worktree?: unknown } = {},
+  overrides: {
+    options?: Record<string, unknown>;
+    worktree?: unknown;
+    /** Host session list (ctx.session.list, @opencode/plugin >= 2.3). */
+    sessionList?: (input: { cursor?: string }) => Promise<unknown>;
+  } = {},
 ) {
   const added: AddedTool[] = [];
   const rpcHandlers: Record<string, (input: unknown) => Promise<unknown>> = {};
   const prompts: string[] = [];
+  const hookRegistrations: Array<{ name: string; callback: (input: never) => void }> = [];
 
   const ctx = {
     location: {
@@ -87,13 +95,17 @@ function fakeCtx(
         fn({ add: (t) => added.push(t) }),
     },
     session: {
-      hook: async () => {},
+      hook: async (name: string, callback: (input: never) => void) => {
+        hookRegistrations.push({ name, callback });
+        return { dispose: async () => {} };
+      },
       get: vi.fn(async (input: { sessionID: string }) =>
         input.sessionID === "s1" ? { sessionID: input.sessionID } : undefined,
       ),
       prompt: vi.fn(async (input: { sessionID: string; text: string }) => {
         prompts.push(input.text);
       }),
+      ...(overrides.sessionList !== undefined ? { list: overrides.sessionList } : {}),
     },
     event: { subscribe: () => (async function* () {})() },
     storage: {
@@ -111,7 +123,7 @@ function fakeCtx(
     },
   } as unknown as Plugin.Context;
 
-  return { ctx, added, rpcHandlers, prompts };
+  return { ctx, added, rpcHandlers, prompts, hookRegistrations };
 }
 
 const TOOL_NAMES = [
@@ -339,5 +351,92 @@ describe("opencode-mesh v2 setup", () => {
     expect(statusOut.mailboxes[0]?.role).toBe("pair");
 
     await cleanup?.();
+  });
+
+  // The 0.14.0 regression: opencode 2.4.0 TUI plugins require @opentui >=
+  // 0.9.4, so the tab-render bind could stop firing and sessionsSeen (in
+  // memory) stayed empty — idle sessions were never woken. sessionKnown must
+  // come from the HOST's session list, not from what this instance saw.
+  it("wakes an idle session known only through the host session list (no tool call, no bind)", async () => {
+    const dir = tmpDataDir();
+    const { ctx, prompts } = fakeCtx(dir, {
+      options: { wakeIntervalMs: 20 },
+      sessionList: async () => ({ data: [{ id: "s1" }], cursor: {} }),
+    });
+    const cleanup = await pluginModule.setup(ctx as never);
+
+    // Register the mailbox and deliver mail WITHOUT any tool call and
+    // without rpc.bind: sessionsSeen stays empty on purpose.
+    const db = openMeshDb(join(dir, "mesh.db"));
+    registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
+    deliverMessage(db, { from: "n", to_box: "a", subject: "s", body: "b", created_at: 1000 });
+    db.close();
+
+    await vi.waitFor(
+      () => {
+        expect(prompts.some((t) => t.includes('mailbox "a"'))).toBe(true);
+      },
+      { timeout: 5000 },
+    );
+
+    await cleanup?.();
+  });
+
+  it("stays silent when the host session list does not know the bound session", async () => {
+    const dir = tmpDataDir();
+    const { ctx, prompts } = fakeCtx(dir, {
+      options: { wakeIntervalMs: 20 },
+      sessionList: async () => ({ data: [], cursor: {} }),
+    });
+    const cleanup = await pluginModule.setup(ctx as never);
+
+    const db = openMeshDb(join(dir, "mesh.db"));
+    registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
+    deliverMessage(db, { from: "n", to_box: "a", subject: "s", body: "b", created_at: 1000 });
+    db.close();
+
+    await new Promise((r) => setTimeout(r, 200));
+    expect(prompts).toHaveLength(0);
+
+    await cleanup?.();
+  });
+
+  it("injects the standing anti-narration guidance through the session context hook", async () => {
+    const { ctx, hookRegistrations } = fakeCtx(tmpDataDir(), {});
+    const cleanup = await pluginModule.setup(ctx as never);
+
+    const contextHook = hookRegistrations.find((h) => h.name === "context");
+    if (!contextHook) throw new Error("session context hook not registered");
+
+    const system: Array<{ type: string; text: string }> = [];
+    (contextHook.callback as (input: { system: typeof system }) => void)({ system });
+    expect(system).toEqual([{ type: "text", text: MESH_GUIDANCE }]);
+
+    await cleanup?.();
+  });
+
+  it("disposes idempotently: timers dead, no second db close", async () => {
+    const dir = tmpDataDir();
+    const { ctx, prompts } = fakeCtx(dir, {
+      options: { wakeIntervalMs: 20 },
+      sessionList: async () => ({ data: [{ id: "s1" }], cursor: {} }),
+    });
+    const cleanup = await pluginModule.setup(ctx as never);
+
+    const db = openMeshDb(join(dir, "mesh.db"));
+    registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
+    deliverMessage(db, { from: "n", to_box: "a", subject: "s", body: "b", created_at: 1000 });
+    db.close();
+
+    // Hot-swap races a manual cleanup: the second dispose must be a no-op,
+    // not a double db.close()/server.close()/hook.dispose().
+    await cleanup?.();
+    const second = typeof cleanup === "function" ? cleanup() : undefined;
+    expect(second).toBeDefined();
+    await expect(second).resolves.toBeUndefined();
+
+    await new Promise((r) => setTimeout(r, 150));
+    // The wake loop's timers are dead: unread mail is left unprompted.
+    expect(prompts).toHaveLength(0);
   });
 });

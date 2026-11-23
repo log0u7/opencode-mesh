@@ -13,11 +13,12 @@ import { listMailboxes, unreadBoxCount } from "./mail.js";
 
 export type WakeOptions = {
   db: MeshDb;
-  /** Has this plugin instance SEEN the session since its boot (a mesh tool
-   * call or a TUI bind)? Session records outlive their process: a durable
-   * record is not a live session. Mailboxes bound to unseen sessions are
-   * skipped — the agent's first turn re-registers (AGENTS.md) and re-binds
-   * the box, and only then the wake loop takes it over. */
+  /** Does the session live here? True when the host's session list contains
+   * it (lib/sessions.ts) OR this instance saw it since boot (a mesh tool call
+   * or a TUI bind). Session records outlive their process: a durable record
+   * is not a live session. Mailboxes bound to unknown sessions are skipped —
+   * the agent's first turn re-registers (AGENTS.md) and re-binds the box, and
+   * only then the wake loop takes it over. */
   sessionKnown: (sessionID: string) => boolean;
   /** Is the session mid-turn? Queued prompts would fire with a stale unread
    * count after the turn acked the mail (false positives). Optional: when
@@ -43,6 +44,10 @@ export const DEFAULT_WAKE_COOLDOWN_MS = 60000;
  * up on it: the binding is wrong (the bound session never reads this box) —
  * re-register in the owning session's tab. */
 export const MAX_UNDRAINED_PROMPTS = 3;
+/** Consecutive failed ticks before the loop stops itself: a closed database
+ * (orphaned plugin instance after a hot-swap) or a dead host must not leave a
+ * timer spinning silently forever. Reloading the plugin restarts the loop. */
+export const MAX_TICK_FAILURES = 5;
 
 export function startWakeLoop(options: WakeOptions): WakeHandle {
   const interval = options.intervalMs ?? DEFAULT_WAKE_INTERVAL_MS;
@@ -53,6 +58,7 @@ export function startWakeLoop(options: WakeOptions): WakeHandle {
   const lastUnread = new Map<string, number>();
   const undrained = new Map<string, number>();
   let stopped = false;
+  let failures = 0;
 
   const tick = async (): Promise<void> => {
     if (stopped) return;
@@ -106,11 +112,28 @@ export function startWakeLoop(options: WakeOptions): WakeHandle {
         undrained.set(box.name, cycles + 1);
         await options.prompt(
           box.session_id,
+          // The unread count is read from this process' database right here,
+          // one line above the prompt: never an inherited or cached state.
           `mesh: ${unread} unread message(s) for mailbox "${box.name}". Run mesh_inbox to read them.`,
         );
       }
-    } catch {
-      // A failed tick (db busy, host rejecting a prompt) is retried next tick.
+      failures = 0;
+    } catch (error) {
+      // A failed tick (db busy or closed, host rejecting a prompt) used to be
+      // retried silently forever — which is what made the post-2.4.0 wake
+      // regression invisible. Log each failure; stop after too many in a row.
+      failures += 1;
+      const message = error instanceof Error ? error.message : String(error);
+      console.warn(
+        `[opencode-mesh] wake tick failed (${failures}/${MAX_TICK_FAILURES}): ${message}`,
+      );
+      if (failures >= MAX_TICK_FAILURES && !stopped) {
+        stopped = true;
+        clearInterval(timer);
+        console.warn(
+          `[opencode-mesh] wake loop stopped after ${failures} consecutive tick failures`,
+        );
+      }
     }
   };
 
