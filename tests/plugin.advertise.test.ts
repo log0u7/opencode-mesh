@@ -113,6 +113,22 @@ describe("mesh plugin with advertise enabled", () => {
     }
   });
 
+  it("advertises static config addresses through mesh_status", async () => {
+    process.env.XDG_DATA_HOME = dir;
+    try {
+      const hooks = await MeshPlugin(fakeInput(), { port: 0, addresses: ["10.8.0.2"] });
+      const tools = hooks.tool ?? {};
+      const status = JSON.parse(String(await tools.mesh_status?.execute({}, ctx("s1")))) as {
+        tailnet_addresses: string[];
+      };
+      // Provider CLIs are absent here: only the static tunnel address survives.
+      expect(status.tailnet_addresses).toEqual(["10.8.0.2"]);
+      await hooks.dispose?.();
+    } finally {
+      delete process.env.XDG_DATA_HOME;
+    }
+  });
+
   it("onDiscovery stores foreign peers and ignores our own announcements", async () => {
     process.env.XDG_DATA_HOME = dir;
     try {

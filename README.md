@@ -130,6 +130,38 @@ a capability, not a secret — trust stays on the pinned Ed25519 proof
 `mesh_pair(offer="MESH1-...")` completes a whole offer blob in one string;
 older mesh versions still accept the legacy `node_id` / `token` completion.
 
+### Overlay addresses (cross-subnet pools)
+
+`mesh_status` publishes the overlay IPs **this machine** holds under
+`tailnet_addresses` (field name kept from the tailscale-only era). Address
+discovery is modular — one provider per overlay, each a function that renders
+this machine's IPs (60 s cache, 2 s timeout, absent CLI = empty list, never an
+error):
+
+| Overlay | How the IPs are found |
+|---|---|
+| Tailscale (incl. Headscale) | native — `tailscale status --json` (`Self.TailscaleIPs`) |
+| Netbird | native — `netbird status --json` (top-level `netbirdIp`) |
+| ZeroTier | native — `zerotier-cli listnetworks` (assigned-IP column) |
+| WireGuard / IPsec / any SSL VPN | static — declare them in the plugin options |
+
+No CLI installed? The provider contributes nothing and costs nothing. Tunnels
+without a CLI (WireGuard, IPsec, any VPN you manage yourself) declare their
+addresses statically:
+
+```json
+{ "package": "@log0u7/opencode-mesh", "options": {
+    "addresses": ["10.8.0.2", "10.99.0.7"],
+    "providers": { "netbird": false }
+} }
+```
+
+`addresses` are rendered as-is alongside the provider-discovered IPs;
+`providers` toggles a provider off by name (default: all enabled). The shape
+of a provider is one function — `cachedProvider(name, listFn, ttlMs, timeout)`
+in `src/lib/providers.ts` — and one entry in `ADDRESS_PROVIDERS`: **add yours
+by PR**, there is no runtime plugin system.
+
 ### Mailboxes and pools (multi-session routing)
 
 All sessions on one machine used to share a single mailbox, so every session
@@ -224,7 +256,8 @@ The plugin ships a TUI part (auto-loaded by OpenCode): a toast on load, a `/mesh
 - Pairing codes and offers expire after 30 minutes. The 6-digit code is a capability naming a pending offer, not a secret; `POST /pair-code` is the only unauthenticated route and is rate-limited (5 attempts per 5 minutes per source). On the mail path a pending token alone grants nothing: the claimed node must already be known to this host. Pairing is one `mesh_pair` call per side, so a leaked offer or code alone cannot install a permanent peer.
 - Peer addresses always carry the advertised port; a portless address is refused instead of being completed with the local port.
 - mDNS TXT records carry node id + fingerprint only, never secrets.
-- Tailnet addresses are surfaced by `mesh_status` when `tailscale` runs, for cross-subnet pools.
+- Advertised overlay addresses (tailscale, netbird, zerotier, plus your static
+  tunnel IPs) are surfaced by `mesh_status` (`tailnet_addresses`), for cross-subnet pools.
 - All mesh traffic travels over TLS (0.11+): each node presents a self-signed certificate derived from its Ed25519 identity key — the very key peers already pin — so the certificate adds zero new trust. Clients pin the peer's certificate key (its SPKI) exactly like the pairing key: a swapped certificate is rejected during the handshake, before any mail body is read. The only unpinned moment is the first `POST /pair-code` over TLS (TOFU: the presented key must then equal the key the counter-offer attests). Peers on 0.10.x cannot send to a 0.11+ node until both hosts upgrade.
 - Escape hatch: set `"insecureHttp": true` to open an extra plain-HTTP listener on port+1 (for a legacy peer you cannot upgrade yet); `"tls": false` turns TLS off entirely. Both stay off by default.
 

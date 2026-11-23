@@ -80,49 +80,7 @@ function socketAddresses(ips: string[] | undefined, port: number | undefined): s
   return (ips ?? []).map((ip) => (ip.includes(":") ? `[${ip}]:${port}` : `${ip}:${port}`));
 }
 
-// Tailnet addresses let peers connect across subnets when tailscale runs.
-// Absent CLI = empty list, never an error. The result is cached: mesh_status is
-// a hot tool call and `tailscale status --json` is a subprocess we must not pay
-// on every invocation.
-const TAILNET_TTL_MS = 60_000;
-const TAILNET_TIMEOUT_MS = 2000;
-
-let tailnetCache: { addresses: string[]; expiresAt: number } | null = null;
-
-export function resetTailnetCache(): void {
-  tailnetCache = null;
-}
-
-export async function tailnetAddresses(): Promise<string[]> {
-  if (tailnetCache !== null && tailnetCache.expiresAt > Date.now()) {
-    return tailnetCache.addresses;
-  }
-
-  const { execFile } = await import("node:child_process");
-
-  const addresses = await new Promise<string[]>((resolve) => {
-    execFile(
-      "tailscale",
-      ["status", "--json"],
-      { timeout: TAILNET_TIMEOUT_MS },
-      (error: Error | null, stdout: string) => {
-        if (error) {
-          resolve([]);
-          return;
-        }
-        try {
-          const status = JSON.parse(stdout) as { Self?: { TailscaleIPs?: string[] } };
-          const ips = status.Self?.TailscaleIPs;
-          resolve(
-            Array.isArray(ips) ? ips.filter((ip): ip is string => typeof ip === "string") : [],
-          );
-        } catch {
-          resolve([]);
-        }
-      },
-    );
-  });
-
-  tailnetCache = { addresses, expiresAt: Date.now() + TAILNET_TTL_MS };
-  return addresses;
-}
+// Tailnet addresses moved to the modular provider mold in lib/providers.js
+// (0.15.0): same semantics (60s cache, 2s timeout, absent CLI = empty list,
+// never an error), same exported names for the existing call sites and tests.
+export { tailnetAddresses, resetTailnetCache } from "./providers.js";
