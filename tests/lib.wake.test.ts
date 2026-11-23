@@ -46,7 +46,7 @@ describe("wake loop", () => {
 
     expect(prompt).toHaveBeenCalledTimes(1);
     expect(prompts[0]?.sessionID).toBe("s1");
-    expect(prompts[0]?.text).toContain('mailbox "a"');
+    expect(prompts[0]?.text).toContain('mesh: 1 unread — "s"');
 
     db.close();
   });
@@ -85,7 +85,7 @@ describe("wake loop", () => {
     handle.stop();
 
     expect(prompts.map((p) => p.sessionID)).toEqual(["s1", "s2"]);
-    expect(prompts[1]?.text).toContain('mailbox "b"');
+    expect(prompts[1]?.text).toContain('"two"');
     db.close();
   });
 
@@ -290,6 +290,140 @@ describe("wake tick failures", () => {
     expect(calls).toBeGreaterThanOrEqual(2);
     expect(warn.mock.calls.some((c) => String(c[0]).includes("wake loop stopped"))).toBe(false);
     warn.mockRestore();
+    db.close();
+  });
+});
+
+describe("token economy (0.16.0)", () => {
+  it("does not wake on fanout mail (origin_id differs from id), even with unread > 0", async () => {
+    const { db, prompt } = setup(["s1"]);
+    registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
+    // A pool broadcast arrives through the fanout: the local message row keeps
+    // the ORIGIN id (journal.ts `forwarded` semantics), not its own id.
+    deliverMessage(db, {
+      from: "n",
+      to_box: "a",
+      subject: "status: pool broadcast",
+      body: "b",
+      origin_id: "origin-1",
+      created_at: 1000,
+    });
+    const handle = startWakeLoop({
+      db,
+      prompt,
+      sessionKnown: () => true,
+      intervalMs: 10,
+      cooldownMs: 5000,
+    });
+    await new Promise((r) => setTimeout(r, 60));
+    handle.stop();
+
+    expect(prompt).not.toHaveBeenCalled();
+    db.close();
+  });
+
+  it("wakes when a direct mail lands among unread fanout mail", async () => {
+    const { db, prompt, prompts } = setup(["s1"]);
+    registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
+    deliverMessage(db, {
+      from: "n",
+      to_box: "a",
+      subject: "status: pool broadcast",
+      body: "b",
+      origin_id: "origin-1",
+      created_at: 1000,
+    });
+    const handle = startWakeLoop({
+      db,
+      prompt,
+      sessionKnown: () => true,
+      intervalMs: 10,
+      cooldownMs: 5000,
+    });
+    await new Promise((r) => setTimeout(r, 40));
+    deliverMessage(db, { from: "n", to_box: "a", subject: "dm", body: "b", created_at: 2000 });
+    await new Promise((r) => setTimeout(r, 40));
+    handle.stop();
+
+    expect(prompt).toHaveBeenCalledTimes(1);
+    expect(prompts[0]?.text).toBe('mesh: 2 unread — "status: pool broadcast"');
+    db.close();
+  });
+
+  it("wakes on fanout mail when wakePools is true (opt-in)", async () => {
+    const { db, prompt, prompts } = setup(["s1"]);
+    registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
+    deliverMessage(db, {
+      from: "n",
+      to_box: "a",
+      subject: "status: pool broadcast",
+      body: "b",
+      origin_id: "origin-1",
+      created_at: 1000,
+    });
+    const handle = startWakeLoop({
+      db,
+      prompt,
+      sessionKnown: () => true,
+      wakePools: true,
+      intervalMs: 10,
+      cooldownMs: 5000,
+    });
+    await new Promise((r) => setTimeout(r, 60));
+    handle.stop();
+
+    expect(prompt).toHaveBeenCalledTimes(1);
+    expect(prompts[0]?.text).toBe('mesh: 1 unread — "status: pool broadcast"');
+    db.close();
+  });
+
+  it("compacts the notification: unread count + first pending subject", async () => {
+    const { db, prompt, prompts } = setup(["s1"]);
+    registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
+    deliverMessage(db, {
+      from: "n",
+      to_box: "a",
+      subject: "status: quota config transmise",
+      body: "b",
+      created_at: 1000,
+    });
+    deliverMessage(db, {
+      from: "n",
+      to_box: "a",
+      subject: "later mail",
+      body: "b",
+      created_at: 2000,
+    });
+    const handle = startWakeLoop({
+      db,
+      prompt,
+      sessionKnown: () => true,
+      intervalMs: 10,
+      cooldownMs: 5000,
+    });
+    await new Promise((r) => setTimeout(r, 60));
+    handle.stop();
+
+    expect(prompts[0]?.text).toBe('mesh: 2 unread — "status: quota config transmise"');
+    db.close();
+  });
+
+  it("truncates the subject preview to 60 chars", async () => {
+    const { db, prompt, prompts } = setup(["s1"]);
+    registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
+    const long = "x".repeat(70);
+    deliverMessage(db, { from: "n", to_box: "a", subject: long, body: "b", created_at: 1000 });
+    const handle = startWakeLoop({
+      db,
+      prompt,
+      sessionKnown: () => true,
+      intervalMs: 10,
+      cooldownMs: 5000,
+    });
+    await new Promise((r) => setTimeout(r, 60));
+    handle.stop();
+
+    expect(prompts[0]?.text).toBe(`mesh: 1 unread — "${"x".repeat(59)}…"`);
     db.close();
   });
 });

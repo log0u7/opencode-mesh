@@ -210,6 +210,7 @@ export const MeshV2 = Plugin.define({
       db,
       ...(options.wake === false ? { intervalMs: 0 } : {}),
       ...(options.wakeIntervalMs !== undefined ? { intervalMs: options.wakeIntervalMs } : {}),
+      ...(options.wakePools !== undefined ? { wakePools: options.wakePools } : {}),
       sessionKnown: (sessionID) => sessionsSeen.has(sessionID) || liveSessions.has(sessionID),
       sessionRunning: (sessionID) => running.has(sessionID),
       prompt: (sessionID, text) =>

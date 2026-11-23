@@ -5,6 +5,26 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.0] - 2026-11-23
+
+### Changed
+
+- **Pool mail no longer wakes sessions — DMs only** (token economy, acté PO):
+  the wake loop skips a mailbox whose pending mail is ALL fanouted
+  (`origin_id` differs from the local message id — the same `forwarded`
+  semantics `mesh_journal` uses). Pool broadcasts are read on natural turns
+  or via `mesh_journal`; a direct DM landing among unread pool mail still
+  wakes, with one prompt draining everything. Opt back in with
+  `wakePools: true` (new option, default `false`).
+- **Compact wake notification**: the injected prompt went from a full
+  sentence to `mesh: <n> unread — "<first pending subject>"`, the subject
+  truncated to 60 chars. The message stays self-carrier: agents read
+  `mesh_inbox` from their standing guidance.
+- **Ack-silently guidance**: the standing directive gains the rule — a DM
+  that only confirms receipt needs no reply, the sender's delivery receipt
+  is the ack; reply only when asked or when adding information (extends the
+  0.14.1 anti-narration line).
+
 ## [0.15.0] - 2026-11-23
 
 ### Added

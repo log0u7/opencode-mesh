@@ -431,6 +431,38 @@ export function unreadBoxCount(db: MeshDb, box: string): number {
   );
 }
 
+// Wake gate (token economy, 0.16.0): a pool broadcast reaches a box through
+// the fanout, and the fanouted message row keeps its ORIGIN id (journal.ts
+// `forwarded` semantics: origin_id differs from the local id; legacy rows
+// have origin_id NULL). Pool mail is read on natural turns — only a DIRECT
+// mail (origin_id equals the local id, or NULL legacy) may wake the session.
+export function hasDirectUnread(db: MeshDb, box: string): boolean {
+  return (
+    db.conn.get<{ direct: number }>(
+      `SELECT EXISTS(
+           SELECT 1 FROM deliveries d JOIN messages m ON m.id = d.message_id
+           WHERE d.to_box = ? AND d.status = 'unread'
+             AND (m.origin_id IS NULL OR m.origin_id = m.id)
+         ) AS direct`,
+      [box],
+    )?.direct === 1
+  );
+}
+
+/** Subject of the box's oldest pending delivery: the wake notification
+ * preview. Null when the box has no unread delivery. */
+export function firstPendingSubject(db: MeshDb, box: string): string | null {
+  return (
+    db.conn.get<{ subject: string }>(
+      `SELECT m.subject AS subject
+         FROM deliveries d JOIN messages m ON m.id = d.message_id
+         WHERE d.to_box = ? AND d.status = 'unread'
+         ORDER BY d.created_at ASC LIMIT 1`,
+      [box],
+    )?.subject ?? null
+  );
+}
+
 export function ackMessages(db: MeshDb, ids: string[]): void {
   for (const id of ids) {
     db.conn.run("UPDATE messages SET status = 'read' WHERE id = ?", [id]);

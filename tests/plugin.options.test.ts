@@ -73,6 +73,16 @@ describe("parseOptions", () => {
     expect(() => parseOptions({ advertise: "yes" as unknown as boolean })).toThrow(/advertise/);
   });
 
+  it("accepts wakePools as a boolean (absent = undefined, wake defaults it to false)", () => {
+    expect(parseOptions({ wakePools: true })).toMatchObject({ wakePools: true });
+    expect(parseOptions({ wakePools: false })).toMatchObject({ wakePools: false });
+    expect(parseOptions(undefined).wakePools).toBeUndefined();
+  });
+
+  it("rejects a non-boolean wakePools", () => {
+    expect(() => parseOptions({ wakePools: "no" as unknown as boolean })).toThrow(/wakePools/);
+  });
+
   it("rejects an empty or non-string dataDir", () => {
     expect(() => parseOptions({ dataDir: "" })).toThrow(/dataDir/);
     expect(() => parseOptions({ dataDir: 5 as unknown as string })).toThrow(/dataDir/);

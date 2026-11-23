@@ -1,5 +1,5 @@
 import type { MeshDb } from "./db.js";
-import { listMailboxes, unreadBoxCount } from "./mail.js";
+import { firstPendingSubject, hasDirectUnread, listMailboxes, unreadBoxCount } from "./mail.js";
 
 // Wake loop: polls every registered mailbox in the shared local database and,
 // when unread mail appears in a box whose session lives on THIS host, injects
@@ -32,6 +32,10 @@ export type WakeOptions = {
   cooldownMs?: number;
   /** Consecutive undrained prompts before giving up on a box. Default 3. */
   maxUndrainedPrompts?: number;
+  /** Wake on pool broadcasts too (default false, token economy 0.16.0):
+   * only DIRECT mail wakes the session; fanouted pool mail (origin_id differs
+   * from the local id) is read on natural turns or via mesh_journal. */
+  wakePools?: boolean;
 };
 
 export type WakeHandle = {
@@ -54,6 +58,8 @@ export function startWakeLoop(options: WakeOptions): WakeHandle {
   if (interval <= 0) {
     return { stop: () => {} };
   }
+  // Token economy (0.16.0): pool broadcasts never wake by default.
+  const wakePools = options.wakePools ?? false;
   const lastPromptAt = new Map<string, number>();
   const lastUnread = new Map<string, number>();
   const undrained = new Map<string, number>();
@@ -70,6 +76,12 @@ export function startWakeLoop(options: WakeOptions): WakeHandle {
         if (unread === 0) {
           lastUnread.delete(box.name);
           undrained.delete(box.name);
+          continue;
+        }
+        // Pool gate: without the opt-in, a box whose pending mail is ALL
+        // fanouted (pool broadcast) never wakes. The box looks empty to the
+        // loop until a direct mail lands — one prompt then drains everything.
+        if (!wakePools && !hasDirectUnread(options.db, box.name)) {
           continue;
         }
         lastUnread.set(box.name, unread);
@@ -110,11 +122,17 @@ export function startWakeLoop(options: WakeOptions): WakeHandle {
         }
         lastPromptAt.set(box.name, now);
         undrained.set(box.name, cycles + 1);
+        // The unread count is read from this process' database right here,
+        // one line above the prompt: never an inherited or cached state.
+        // Compact notification (0.16.0): count + first pending subject,
+        // truncated to 60 chars — the message stays self-carrier, the agent
+        // knows mesh_inbox from its standing guidance.
+        const subject = firstPendingSubject(options.db, box.name);
+        const preview =
+          subject === null ? "" : subject.length > 60 ? `${subject.slice(0, 59)}…` : subject;
         await options.prompt(
           box.session_id,
-          // The unread count is read from this process' database right here,
-          // one line above the prompt: never an inherited or cached state.
-          `mesh: ${unread} unread message(s) for mailbox "${box.name}". Run mesh_inbox to read them.`,
+          preview === "" ? `mesh: ${unread} unread` : `mesh: ${unread} unread — "${preview}"`,
         );
       }
       failures = 0;

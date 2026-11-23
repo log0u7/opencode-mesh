@@ -6,4 +6,6 @@
 
 export const MESH_GUIDANCE =
   "Do not narrate routine ops to the human — status only on significant state changes " +
-  "(release, block/unblock, decision, failure); `mesh_journal` answers 'what happened' on demand.";
+  "(release, block/unblock, decision, failure); `mesh_journal` answers 'what happened' on demand. " +
+  "Ack silently: a DM that only confirms receipt needs no reply — the sender's delivery receipt " +
+  "is the ack. Reply only when asked or when adding information.";
