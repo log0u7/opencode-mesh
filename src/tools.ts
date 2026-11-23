@@ -32,7 +32,7 @@ import {
   findSendablePeer,
   listPeers,
   pairWithToken,
-  resolvePeerUrl,
+  resolvePeerTarget,
 } from "./lib/peers.js";
 import { readLogTail, removeWorkerLog, runWorker, stopWorker, type SpawnFn } from "./lib/spawn.js";
 import {
@@ -184,12 +184,21 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
           if (!/^\d{6}$/.test(args.code)) {
             return "error: the pairing code is 6 digits";
           }
-          const candidates: string[] = [];
+          // Candidate targets: an explicit cross-subnet address (assumed TLS:
+          // 0.11+ default), else every address we know per peer, honoring its
+          // advertised tls flag (TOFU pin when the peer's key is already known).
+          const candidates: { url: string; tls?: boolean; pk?: string }[] = [];
           if (typeof args.address === "string" && args.address.length > 0) {
-            candidates.push(args.address);
+            candidates.push({ url: `https://${args.address}`, tls: true });
           } else {
             for (const peer of listPeers(db)) {
-              candidates.push(...peer.addresses);
+              for (const address of peer.addresses) {
+                candidates.push({
+                  url: `${peer.tls ? "https" : "http"}://${address}`,
+                  ...(peer.tls ? { tls: true } : {}),
+                  ...(peer.tls && peer.public_key !== null ? { pk: peer.public_key } : {}),
+                });
+              }
             }
           }
           if (candidates.length === 0) {
@@ -203,19 +212,24 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
               address: `${serverAddress}:${port}`,
             });
             const result = await postPairCode({
-              url: `http://${candidate}`,
+              url: candidate.url,
               code: args.code,
               offer: myOffer,
+              ...(candidate.tls !== undefined ? { tls: candidate.tls } : {}),
             });
             if (result === null) continue;
             const counter = parseOfferBlob(result.counter_offer);
             if (counter === null) continue;
+            // TOFU pin: the cert presented at first contact must BE the node
+            // key the counter-offer attests — otherwise someone terminated our
+            // TLS and minted their own offer.
+            if (result.peer_pk !== undefined && result.peer_pk !== counter.pk) continue;
             pairWithToken(db, {
               node_id: counter.node_id,
               hostname: counter.hostname ?? "manual",
               fingerprint: "code-pairing",
               token: counter.token,
-              addresses: [counter.address ?? candidate],
+              addresses: [counter.address ?? candidate.url.replace(/^https?:\/\//, "")],
               public_key: counter.pk,
             });
             return `pairé des deux côtés avec ${peerLabelShort(counter.node_id, counter.hostname)}`;
@@ -402,15 +416,17 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
           if (target === null) {
             return `error: no paired peer matching ${peer}; run mesh_status`;
           }
-          const url = resolvePeerUrl(db, peer);
-          if (url === null) {
+          const conn = resolvePeerTarget(db, peer);
+          if (conn === null) {
             return `error: peer ${target.node_id} has no known address with a port; have it run mesh_pair to share its address, or wait for discovery`;
           }
           // Every mail carries a pairing proof signed by this node's key: it is
           // what lets the receiving side bind (or rotate) a pairing to us without
           // trusting the bearer token alone.
           const result = await sendMail({
-            url,
+            url: conn.url,
+            ...(conn.tls ? { tls: true } : {}),
+            ...(conn.pk !== null ? { pk: conn.pk } : {}),
             token: target.token ?? "",
             from: identity.node_id,
             subject: String(args.subject),

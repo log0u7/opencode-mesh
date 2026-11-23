@@ -71,6 +71,9 @@ describe("createFanout", () => {
         token: "tok",
         addresses: [peer.url.replace("http://", "")],
       });
+      // The fake peers are plain-HTTP: pairing flags tls=1 (0.11+ default),
+      // downgraded here to exercise the legacy fanout path.
+      local.conn.run("UPDATE peers SET tls = 0");
     }
 
     const fanout = createFanout({
@@ -145,6 +148,8 @@ describe("createFanout", () => {
         token: "tok",
         addresses: [peer.url.replace("http://", "")],
       });
+      // Plain-HTTP fake peers: downgrade the pairing flag (0.11+ default TLS).
+      local.conn.run("UPDATE peers SET tls = 0");
     }
 
     const fanout = createFanout({

@@ -1,8 +1,10 @@
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import { createServer } from "node:http";
+import { createServer as createHttpsServer } from "node:https";
 
 import type { MeshDb } from "./db.js";
 import { authenticateToken } from "./peers.js";
+import type { TlsMaterial } from "./tls.js";
 import {
   deliverMessage,
   listMailboxes,
@@ -36,14 +38,29 @@ export type MeshServerOptions = {
   self: { node_id: string; pk: string; hostname: string };
   /** Resolved by startMeshServer: "host:port" the caller reached us on. */
   selfAddress?: string;
+  /** Resolved by startMeshServer: the actually-bound port (differs from
+   * `port` when the requested one was taken and we fell back to ephemeral). */
+  resolvedPort?: number;
+  /** TLS material (identity-derived key + cert), from nodeTlsMaterial().
+   * Required unless tls is explicitly disabled. */
+  tlsMaterial?: TlsMaterial;
+  /** Serve HTTPS on `port` (default true): all mesh traffic is encrypted and
+   * the cert is pinned by the peer's Ed25519 key. */
+  tls?: boolean;
+  /** Documented escape hatch: an extra PLAIN-HTTP server on port+1 (default
+   * off). Peers that cannot speak TLS yet may target it explicitly. */
+  insecureHttp?: boolean;
 };
 
 export type MeshServer = {
   server: Server;
   port: number;
   address: string;
+  /** The insecure side channel, when insecureHttp was requested. */
+  insecureServer?: Server;
+  insecurePort?: number;
 };
-// Bind the mesh HTTP server and resolve the actual port. When the requested
+// Bind the mesh HTTP(S) server and resolve the actual port. When the requested
 // port is taken (two mesh nodes on one machine, e.g. a spawned worker loading
 // the same plugin), fall back to an ephemeral port instead of crashing.
 export async function startMeshServer(options: MeshServerOptions): Promise<MeshServer> {
@@ -52,20 +69,53 @@ export async function startMeshServer(options: MeshServerOptions): Promise<MeshS
   purgeExpired(options.db, MESSAGE_TTL_MS, Date.now());
 
   const host = options.bind === "lan" ? "0.0.0.0" : DEFAULT_BIND;
-  const server = createServer((req, res) => {
+  const tls = options.tls !== false;
+  if (tls && options.tlsMaterial === undefined) {
+    throw new Error(
+      "startMeshServer: TLS is on by default; pass tlsMaterial (nodeTlsMaterial(dataDir)) or tls: false",
+    );
+  }
+  const handler = (req: IncomingMessage, res: ServerResponse): void => {
     void handle(options, req, res);
-  });
+  };
+  const server = tls
+    ? createHttpsServer(
+        { key: options.tlsMaterial!.keyPem, cert: options.tlsMaterial!.certPem },
+        handler,
+      )
+    : createServer(handler);
+  const port = await listenWithFallback(server, options.port, host);
 
+  let insecureServer: Server | undefined;
+  let insecurePort: number | undefined;
+  if (options.insecureHttp === true) {
+    insecureServer = createServer(handler);
+    insecurePort = await listenWithFallback(insecureServer, port + 1, host);
+  }
+
+  options.selfAddress = `${host === "0.0.0.0" ? "127.0.0.1" : host}:${port}`;
+  options.resolvedPort = port;
+  return {
+    server,
+    port,
+    address: host,
+    ...(insecureServer !== undefined && insecurePort !== undefined
+      ? { insecureServer, insecurePort }
+      : {}),
+  };
+}
+
+function listenWithFallback(server: Server, requested: number, host: string): Promise<number> {
   let onListen: () => void = () => {};
-  const port = await new Promise<number>((resolve, reject) => {
-    const attempt = (requested: number): void => {
+  return new Promise<number>((resolve, reject) => {
+    const attempt = (port: number): void => {
       onListen = () => {
         server.removeListener("error", onError);
-        resolve(serverAddressPort(server, requested));
+        resolve(serverAddressPort(server, port));
       };
       server.once("listening", onListen);
       server.once("error", onError);
-      server.listen(requested, host);
+      server.listen(port, host);
     };
     const onError = (err: NodeJS.ErrnoException): void => {
       server.removeListener("listening", onListen);
@@ -75,11 +125,8 @@ export async function startMeshServer(options: MeshServerOptions): Promise<MeshS
       }
       reject(err);
     };
-    attempt(options.port);
+    attempt(requested);
   });
-
-  options.selfAddress = `${host === "0.0.0.0" ? "127.0.0.1" : host}:${port}`;
-  return { server, port, address: host };
 }
 
 function serverAddressPort(server: Server, fallback: number): number {
@@ -112,7 +159,7 @@ function consumePairingOffer(
     node_id: options.self.node_id,
     pk: options.self.pk,
     hostname: options.self.hostname,
-    address: `${address}:${options.port}`,
+    address: `${address}:${options.resolvedPort ?? options.port}`,
   });
 }
 

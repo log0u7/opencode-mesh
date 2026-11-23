@@ -64,11 +64,16 @@ describe("mesh database schema", () => {
       legacy.close();
 
       const db = openMeshDb(file);
-      expect(db.conn.get<{ user_version: number }>("PRAGMA user_version")?.user_version).toBe(6);
+      expect(db.conn.get<{ user_version: number }>("PRAGMA user_version")?.user_version).toBe(7);
       const names = db.conn
         .all<{ name: string }>("SELECT name FROM sqlite_master WHERE type = 'index'")
         .map((row) => row.name);
       expect(names).toContain("idx_locks_expires");
+      const columns = db.conn
+        .all<{ name: string }>("PRAGMA table_info(peers)")
+        .map((row) => row.name);
+      expect(columns).toContain("public_key");
+      expect(columns).toContain("tls");
       db.close();
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -84,18 +89,19 @@ describe("mesh database schema", () => {
       v1.close();
 
       const db = openMeshDb(file);
-      expect(db.conn.get<{ user_version: number }>("PRAGMA user_version")?.user_version).toBe(6);
+      expect(db.conn.get<{ user_version: number }>("PRAGMA user_version")?.user_version).toBe(7);
       const columns = db.conn
         .all<{ name: string }>("PRAGMA table_info(peers)")
         .map((row) => row.name);
       expect(columns).toContain("public_key");
+      expect(columns).toContain("tls");
       db.close();
 
       // Reopening an already-current database must be a no-op: no second
       // migration pass, no version churn.
       const reopened = openMeshDb(file);
       expect(reopened.conn.get<{ user_version: number }>("PRAGMA user_version")?.user_version).toBe(
-        6,
+        7,
       );
       reopened.close();
     } finally {

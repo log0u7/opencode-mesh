@@ -7,7 +7,8 @@ export type AdvertiseHandle = {
 };
 
 // Advertise this node on the LAN. TXT carries the node id, key fingerprint and
-// the pairing public key (pk): never secrets.
+// the pairing public key (pk): never secrets. `tls: "1"` marks the 0.11+
+// TLS-only mesh port.
 export function advertiseMesh(options: {
   bonjour: Bonjour;
   port: number;
@@ -19,7 +20,7 @@ export function advertiseMesh(options: {
     name: options.node_id,
     type: MESH_SERVICE_TYPE,
     port: options.port,
-    txt: { id: options.node_id, fp: options.fingerprint, pk: options.public_key },
+    txt: { id: options.node_id, fp: options.fingerprint, pk: options.public_key, tls: "1" },
   });
 
   return {
@@ -35,6 +36,8 @@ export type DiscoveredPeer = {
   fingerprint: string;
   addresses: string[];
   public_key?: string;
+  /** The advertised mesh port speaks TLS (0.11+). */
+  tls?: boolean;
 };
 
 export function browseMesh(options: {
@@ -55,6 +58,7 @@ export function browseMesh(options: {
       ...(typeof service.txt?.pk === "string" && service.txt.pk.length > 0
         ? { public_key: service.txt.pk }
         : {}),
+      ...(service.txt?.tls === "1" ? { tls: true } : {}),
     });
   });
 

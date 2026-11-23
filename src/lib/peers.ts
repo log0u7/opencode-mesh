@@ -41,12 +41,14 @@ export function pairWithToken(
 ): void {
   const now = Date.now();
 
+  // New pairings speak TLS (0.11+): the flag rides with the pairing itself.
   db.conn.run(
-    `INSERT INTO peers (node_id, hostname, fingerprint, addresses, paired, token, public_key, last_seen)
-     VALUES (?, ?, ?, ?, 1, ?, ?, ?)
+    `INSERT INTO peers (node_id, hostname, fingerprint, addresses, paired, token, public_key, last_seen, tls)
+     VALUES (?, ?, ?, ?, 1, ?, ?, ?, 1)
      ON CONFLICT(node_id) DO UPDATE SET hostname = excluded.hostname,
        fingerprint = excluded.fingerprint, paired = 1, token = excluded.token,
-       public_key = COALESCE(excluded.public_key, peers.public_key), last_seen = excluded.last_seen`,
+       public_key = COALESCE(excluded.public_key, peers.public_key), last_seen = excluded.last_seen,
+       tls = 1`,
     [
       peer.node_id,
       peer.hostname,
@@ -244,17 +246,35 @@ export function findSendablePeer(
   return peers.find((p) => p.node_id === query) ?? peers.find((p) => p.hostname === query) ?? null;
 }
 
-// Peer addresses must carry a port: discovery attaches the advertised port and
-// mesh_pair transmits a full host:port. Returning null instead of guessing the
-// local port keeps a stale address from silently reaching the wrong socket.
-export function resolvePeerUrl(db: MeshDb, query: string): string | null {
+export type PeerTarget = {
+  url: string;
+  /** True when the peer serves TLS: the client pins `pk`. */
+  tls: boolean;
+  /** The pinned cert SPKI (the peer's Ed25519 key) when tls and known. */
+  pk: string | null;
+};
+
+// Paired peer connection info for sending: scheme chosen by the peer's tls
+// flag (TLS-only since 0.11). Peer addresses must carry a port: discovery
+// attaches the advertised port and mesh_pair transmits a full host:port.
+// Returning null instead of guessing the local port keeps a stale address
+// from silently reaching the wrong socket.
+export function resolvePeerTarget(db: MeshDb, query: string): PeerTarget | null {
   const peers = listPeers(db).filter((p) => p.paired);
   const peer =
     peers.find((p) => p.node_id === query) ?? peers.find((p) => p.hostname === query) ?? null;
   // A bare IPv6 literal also ends in ":<digits>", so the bracketed form is the
   // only one that can be told apart unambiguously.
   const address = peer?.addresses.find(hasPort);
-  return address !== undefined ? `http://${address}` : null;
+  if (address === undefined || peer === null) {
+    return null;
+  }
+  const tls = peer.tls;
+  return {
+    url: `${tls ? "https" : "http"}://${address}`,
+    tls,
+    pk: tls ? (peer.public_key ?? null) : null,
+  };
 }
 
 function hasPort(address: string): boolean {
@@ -271,15 +291,18 @@ export function upsertDiscoveredPeer(
     fingerprint: string;
     addresses: string[];
     public_key?: string;
+    tls?: boolean;
   },
 ): void {
   const now = Date.now();
+  const tls = peer.tls === true ? 1 : 0;
   db.conn.run(
-    `INSERT INTO peers (node_id, hostname, fingerprint, addresses, paired, token, public_key, last_seen)
-     VALUES (?, ?, ?, ?, 0, NULL, ?, ?)
+    `INSERT INTO peers (node_id, hostname, fingerprint, addresses, paired, token, public_key, last_seen, tls)
+     VALUES (?, ?, ?, ?, 0, NULL, ?, ?, ?)
      ON CONFLICT(node_id) DO UPDATE SET hostname = excluded.hostname,
        fingerprint = excluded.fingerprint, addresses = excluded.addresses,
        public_key = CASE WHEN peers.paired = 1 THEN peers.public_key ELSE excluded.public_key END,
+       tls = CASE WHEN peers.paired = 1 THEN peers.tls ELSE excluded.tls END,
        last_seen = excluded.last_seen`,
     [
       peer.node_id,
@@ -288,6 +311,7 @@ export function upsertDiscoveredPeer(
       JSON.stringify(peer.addresses),
       peer.public_key ?? null,
       now,
+      tls,
     ],
   );
 }
@@ -301,6 +325,7 @@ type PeerRow = {
   token: string | null;
   public_key: string | null;
   last_seen: number;
+  tls: number;
 };
 
 function rowToPeer(row: PeerRow): Peer {
@@ -313,6 +338,7 @@ function rowToPeer(row: PeerRow): Peer {
     token: row.token,
     public_key: row.public_key,
     last_seen: row.last_seen,
+    tls: row.tls === 1,
   };
 }
 

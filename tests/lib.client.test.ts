@@ -7,7 +7,7 @@ describe("sendMail result mapping", () => {
   it("maps 401 to unauthorized", async () => {
     const { startMeshServer } = await import("../src/lib/serve.js");
     const db = openMeshDb(":memory:");
-    const { server, port } = await startMeshServer({ db, port: 0 });
+    const { server, port } = await startMeshServer({ db, port: 0, tls: false });
 
     const result = await sendMail({
       url: `http://127.0.0.1:${port}`,
@@ -25,7 +25,7 @@ describe("sendMail result mapping", () => {
   it("maps server errors to error", async () => {
     const { startMeshServer } = await import("../src/lib/serve.js");
     const db = openMeshDb(":memory:");
-    const { server, port } = await startMeshServer({ db, port: 0 });
+    const { server, port } = await startMeshServer({ db, port: 0, tls: false });
     const { pairWithToken } = await import("../src/lib/peers.js");
     pairWithToken(db, { node_id: "node-a", hostname: "a", fingerprint: "f", token: "tok-a" });
     const token = "tok-a";

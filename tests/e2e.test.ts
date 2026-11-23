@@ -103,4 +103,41 @@ describe("e2e: two plugin instances", () => {
     await a.dispose?.();
     await b.dispose?.();
   });
+
+  it("pairs via 6-digit code over TLS (TOFU pin) and delivers mail", async () => {
+    const a = await MeshPlugin(input(), { dataDir: `${dir}/ca`, port: 0, advertise: false });
+    const b = await MeshPlugin(input(), { dataDir: `${dir}/cb`, port: 0, advertise: false });
+
+    const statusA = JSON.parse(String(await a.tool?.mesh_status?.execute({}, ctx("s-a")))) as {
+      server: string;
+    };
+    const offerA = String(await a.tool?.mesh_pair?.execute({}, ctx("s-a")));
+    const code = /pairing code: (\d{6})/.exec(offerA)?.[1];
+    const nodeIdA = /node_id="([^"]+)"/.exec(offerA)?.[1];
+    expect(code).toBeTruthy();
+    expect(nodeIdA).toBeTruthy();
+
+    // B consumes the code, addressing A explicitly: first contact is TLS TOFU
+    // (unpinned), then both sides pin each other's Ed25519 key.
+    const paired = String(
+      await b.tool?.mesh_pair?.execute({ code, address: statusA.server }, ctx("s-b")),
+    );
+    expect(paired).toContain("pairé des deux côtés");
+
+    // B sends to A over the pinned TLS channel.
+    const send = String(
+      await b.tool?.mesh_send?.execute(
+        { peer: nodeIdA, subject: "code-tls", body: "via code" },
+        ctx("s-b"),
+      ),
+    );
+    expect(send).toContain("ok");
+
+    const inbox = String(await a.tool?.mesh_inbox?.execute({}, ctx("s-a")));
+    expect(inbox).toContain("code-tls");
+    expect(inbox).toContain("via code");
+
+    await a.dispose?.();
+    await b.dispose?.();
+  });
 });

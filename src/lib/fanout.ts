@@ -1,5 +1,5 @@
 import { listMailboxes as listLocalMailboxes } from "./mail.js";
-import { listPeers, resolvePeerUrl } from "./peers.js";
+import { listPeers, resolvePeerTarget } from "./peers.js";
 import { pairingProof, type NodeIdentity } from "./identity.js";
 import type { MeshDb } from "./db.js";
 import { getPools, sendMail } from "./client.js";
@@ -12,7 +12,13 @@ import { getPools, sendMail } from "./client.js";
 // - `origin_id` lets a receiver that already stored the broadcast (through
 //   another path) turn the second arrival into a no-op.
 
-export type FanoutPeer = { node_id: string; url: string; token: string };
+export type FanoutPeer = {
+  node_id: string;
+  url: string;
+  token: string;
+  tls: boolean;
+  pk: string | null;
+};
 
 export type FanoutInput = {
   to_box: string | null;
@@ -58,7 +64,12 @@ export function createFanout(options: FanoutOptions): Fanout {
     if (cached && Date.now() - cached.at < ttl) {
       return cached.pools;
     }
-    const result = await getPools({ url: peer.url, token: peer.token });
+    const result = await getPools({
+      url: peer.url,
+      token: peer.token,
+      ...(peer.tls ? { tls: true } : {}),
+      ...(peer.pk !== null ? { pk: peer.pk } : {}),
+    });
     if (result === null) return null;
     cache.set(peer.node_id, { pools: result.pools, at: Date.now() });
     return result.pools;
@@ -73,8 +84,16 @@ export function createFanout(options: FanoutOptions): Fanout {
       const peers = listPeers(options.db)
         .filter((p) => p.paired)
         .map((p) => {
-          const url = resolvePeerUrl(options.db, p.node_id);
-          return url ? { node_id: p.node_id, url, token: p.token ?? "" } : null;
+          const target = resolvePeerTarget(options.db, p.node_id);
+          return target
+            ? {
+                node_id: p.node_id,
+                url: target.url,
+                token: p.token ?? "",
+                tls: target.tls,
+                pk: target.pk,
+              }
+            : null;
         })
         .filter((p): p is FanoutPeer => p !== null);
 
@@ -92,6 +111,8 @@ export function createFanout(options: FanoutOptions): Fanout {
         const result = await sendMail({
           url: peer.url,
           token: peer.token,
+          ...(peer.tls ? { tls: true } : {}),
+          ...(peer.pk !== null ? { pk: peer.pk } : {}),
           from: input.from,
           proof: pairingProof(options.identity, peer.token),
           ...(input.from_box !== null && input.from_box !== undefined

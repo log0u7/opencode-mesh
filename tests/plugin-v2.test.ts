@@ -9,6 +9,8 @@ import { pluginModule } from "../src/index.js";
 import { sendMail } from "../src/lib/client.js";
 import { openMeshDb } from "../src/lib/db.js";
 import { pairWithToken } from "../src/lib/peers.js";
+import { loadOrCreateIdentity } from "../src/lib/identity.js";
+import { buildTlsMaterial, certPkSpki } from "../src/lib/tls.js";
 
 const dirs: string[] = [];
 
@@ -263,7 +265,7 @@ describe("opencode-mesh v2 setup", () => {
     ) as { server: string; mailboxes: Array<{ name: string; session_id?: string }> };
     expect(statusOut.mailboxes[0]?.name).toBe("a");
 
-    // Pair a remote node so the HTTP mail authenticates, then deliver from
+    // Pair a remote node so the TLS mail authenticates, then deliver from
     // OUTSIDE this process: no tool call may run before the wake.
     const pairDb = openMeshDb(join(dir, "mesh.db"));
     pairWithToken(pairDb, {
@@ -275,7 +277,9 @@ describe("opencode-mesh v2 setup", () => {
     pairDb.close();
 
     const sendResult = await sendMail({
-      url: `http://${statusOut.server}`,
+      url: `https://${statusOut.server}`,
+      tls: true,
+      pk: certPkSpki(buildTlsMaterial(loadOrCreateIdentity(dir)).certPem),
       token: "tok-x",
       from: "node-x",
       subject: "ping",

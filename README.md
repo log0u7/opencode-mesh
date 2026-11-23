@@ -224,7 +224,8 @@ The plugin ships a TUI part (auto-loaded by OpenCode): a toast on load, a `/mesh
 - Peer addresses always carry the advertised port; a portless address is refused instead of being completed with the local port.
 - mDNS TXT records carry node id + fingerprint only, never secrets.
 - Tailnet addresses are surfaced by `mesh_status` when `tailscale` runs, for cross-subnet pools.
-- Messages travel over plain HTTP: there is no TLS layer. Loopback and trusted networks only.
+- All mesh traffic travels over TLS (0.11+): each node presents a self-signed certificate derived from its Ed25519 identity key — the very key peers already pin — so the certificate adds zero new trust. Clients pin the peer's certificate key (its SPKI) exactly like the pairing key: a swapped certificate is rejected during the handshake, before any mail body is read. The only unpinned moment is the first `POST /pair-code` over TLS (TOFU: the presented key must then equal the key the counter-offer attests). Peers on 0.10.x cannot send to a 0.11+ node until both hosts upgrade.
+- Escape hatch: set `"insecureHttp": true` to open an extra plain-HTTP listener on port+1 (for a legacy peer you cannot upgrade yet); `"tls": false` turns TLS off entirely. Both stay off by default.
 
 The code pairing handshake (one `mesh_pair` call per side; a leaked offer or code alone installs nothing):
 

@@ -19,6 +19,7 @@ import type { WorktreeClient } from "./lib/worktree.js";
 import { v2WorktreeDomainClient } from "./lib/worktree.js";
 import { reconcileWorkers } from "./lib/workers.js";
 import { startMeshServer } from "./lib/serve.js";
+import { nodeTlsMaterial } from "./lib/tls.js";
 import { createDurableStore } from "./lib/persist.js";
 import { createFanout } from "./lib/fanout.js";
 import { startWakeLoop } from "./lib/wake.js";
@@ -56,12 +57,18 @@ export const MeshV2 = Plugin.define({
     // (relayed broadcasts arriving from peers).
     const fanout = createFanout({ db, identity });
 
-    const { server, port, address } = await startMeshServer({
+    // TLS material is derived from the node identity: the cert presents the
+    // very key peers already pin, so TLS adds zero new trust.
+    const tlsMaterial = nodeTlsMaterial(dataDir);
+    const { server, port, address, insecureServer } = await startMeshServer({
       db,
       port: options.port ?? DEFAULT_PORT,
       ...(options.bind !== undefined ? { bind: options.bind } : {}),
       fanout,
       self: { node_id: identity.node_id, pk: identity.public_key, hostname: identity.hostname },
+      tlsMaterial,
+      ...(options.tls === false ? { tls: false } : {}),
+      ...(options.insecureHttp === true ? { insecureHttp: true } : {}),
     });
     // Prefer an injected client (tests, hosts that pass one), then adapt the
     // 2.x in-process worktree domain to the REST-shaped WorktreeClient. The
@@ -267,7 +274,12 @@ export const MeshV2 = Plugin.define({
       advertiseHandle?.close();
       browseHandle?.close();
       rpc.dispose();
-      await new Promise<void>((resolve) => server.close(() => resolve()));
+      await Promise.all([
+        new Promise<void>((resolve) => server.close(() => resolve())),
+        ...(insecureServer !== undefined
+          ? [new Promise<void>((resolve) => insecureServer.close(() => resolve()))]
+          : []),
+      ]);
       db.close();
     };
     return cleanup;

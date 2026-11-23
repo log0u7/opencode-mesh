@@ -14,6 +14,8 @@ export type OfferPayload = {
   pk: string;
   address?: string;
   hostname?: string;
+  /** Emitter serves TLS on its mesh port (0.11+). */
+  tls?: boolean;
 };
 
 export function buildOfferBlob(
@@ -27,6 +29,7 @@ export function buildOfferBlob(
     pk: self.pk,
     address: self.address,
     hostname: self.hostname,
+    tls: true,
   };
   return PREFIX + Buffer.from(JSON.stringify(payload), "utf8").toString("base64url");
 }
@@ -52,6 +55,7 @@ export function parseOfferBlob(offer: string): OfferPayload | null {
       pk: parsed.pk,
       ...(typeof parsed.address === "string" ? { address: parsed.address } : {}),
       ...(typeof parsed.hostname === "string" ? { hostname: parsed.hostname } : {}),
+      ...(parsed.tls === true ? { tls: true } : {}),
     };
   } catch {
     return null;
