@@ -5,6 +5,42 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.0] - 2026-11-23
+
+### Changed
+
+- **BREAKING — TLS on all mesh traffic**: the mesh server speaks HTTPS on its
+  port (default 4399) and every client call (`sendMail`, `getPools`,
+  `postPairCode`) upgrades to TLS when the target does. Peers on 0.10.x can no
+  longer send to a 0.11+ node until both hosts upgrade (assumed: mesh hosts on
+  a team upgrade together). A documented escape hatch exists: plugin option
+  `"insecureHttp": true` opens an extra plain-HTTP listener on port+1, and
+  `"tls": false` turns TLS off entirely — both default off.
+- **Certificates derive from the node identity**: the Ed25519 key that already
+  signs pairing proofs mints the node's self-signed X.509 certificate (a
+  minimal RFC 5280 DER encoder in `src/lib/tls.ts`; node:crypto does the
+  signing). Zero new trust: the certificate presents the exact key peers
+  already pin.
+- **Certificate key pinning**: clients verify the peer's certificate SPKI
+  against the pinned pairing key during the handshake; a mismatched
+  certificate is rejected before any response body is read. Unpinned peers
+  (legacy manual pairings) fall back to TOFU semantics.
+- **TOFU on code pairing**: the first `POST /pair-code` over TLS accepts the
+  peer's self-signed certificate without a pin, then pins the certificate key,
+  which must equal the counter-offer's public key (the node key). Subsequent
+  connections to that peer are pinned.
+- New pairings and discovered 0.11+ peers (mDNS TXT `tls=1`, offer blobs
+  `tls: true`) store `tls = 1` in the peers table (schema v7, guarded
+  `ALTER TABLE`); `mesh_send` and fanout choose `https` + pin per peer.
+- `mesh_pair(code=…, address=…)` addresses an assumed-TLS peer; legacy peers
+  discovered over mDNS without the `tls` flag keep plain HTTP.
+
+### Added
+
+- Plugin options `tls` (default `true`) and `insecureHttp` (default `false`).
+- `src/lib/tls.ts`: `nodeTlsMaterial(dataDir)` (identity-derived key + cert,
+  cached per process), `buildTlsMaterial(identity)`, `certPkSpki(certPem)`.
+
 ## [0.10.11] - 2026-11-23
 
 ### Fixed

@@ -13,6 +13,7 @@ import { defaultDataDir, parseOptions, type PluginOptions } from "./options.js";
 import { extractClientFetch, type WorktreeClient, type WorktreeFactory } from "./lib/worktree.js";
 import { reconcileWorkers } from "./lib/workers.js";
 import { startMeshServer } from "./lib/serve.js";
+import { nodeTlsMaterial } from "./lib/tls.js";
 import { buildToolSpecs } from "./tools.js";
 
 export { defaultDataDir, parseOptions } from "./options.js";
@@ -54,11 +55,16 @@ export const MeshPlugin: Plugin = async (input, rawOptions?: PluginOptions) => {
   // in-memory map is gone: mark dead pids before anything else uses the table.
   reconcileWorkers(db);
 
-  const { server, port, address } = await startMeshServer({
+  // TLS material is derived from the node identity: the cert presents the
+  // very key peers already pin, so TLS adds zero new trust.
+  const { server, port, address, insecureServer } = await startMeshServer({
     db,
     port: options.port ?? DEFAULT_PORT,
     ...(options.bind !== undefined ? { bind: options.bind } : {}),
     self: { node_id: identity.node_id, pk: identity.public_key, hostname: identity.hostname },
+    tlsMaterial: nodeTlsMaterial(dataDir),
+    ...(options.tls === false ? { tls: false } : {}),
+    ...(options.insecureHttp === true ? { insecureHttp: true } : {}),
   });
   const worktreeClient: WorktreeClient =
     options.worktreeClient ??
@@ -119,7 +125,12 @@ export const MeshPlugin: Plugin = async (input, rawOptions?: PluginOptions) => {
       stopAllWorkers(db);
       advertiseHandle?.close();
       browseHandle?.close();
-      await new Promise<void>((resolve) => server.close(() => resolve()));
+      await Promise.all([
+        new Promise<void>((resolve) => server.close(() => resolve())),
+        ...(insecureServer !== undefined
+          ? [new Promise<void>((resolve) => insecureServer.close(() => resolve()))]
+          : []),
+      ]);
       db.close();
     },
   };

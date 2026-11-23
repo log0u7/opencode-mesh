@@ -121,7 +121,9 @@ describe("v2 fanout wiring", () => {
     const joinTool = added.find((t) => t.name === "mesh_join");
     await joinTool?.execute({ pool: "team:x" }, { sessionID: "s1" });
 
-    // Pair the fake peer (address = the recording server).
+    // Pair the fake peer (address = the recording server). The plain-HTTP
+    // fake is a LEGACY peer: pairing flags tls=1 by default (0.11+), so the
+    // row is downgraded here to exercise the pre-TLS fanout path.
     const pairDb = openMeshDb(join(dir, "mesh.db"));
     pairWithToken(pairDb, {
       node_id: "peer-far",
@@ -130,6 +132,7 @@ describe("v2 fanout wiring", () => {
       token: "tok-far",
       addresses: [`127.0.0.1:${port}`],
     });
+    pairDb.conn.run("UPDATE peers SET tls = 0 WHERE node_id = 'peer-far'");
     pairDb.close();
 
     const send = added.find((t) => t.name === "mesh_send");

@@ -75,7 +75,7 @@ describe("advertiseMesh", () => {
       name: "n1",
       type: "opencode-mesh",
       port: 4399,
-      txt: { id: "n1", fp: "abcd1234", pk: "PKDATA" },
+      txt: { id: "n1", fp: "abcd1234", pk: "PKDATA", tls: "1" },
     });
 
     handle.close();
@@ -125,6 +125,29 @@ describe("browseMesh", () => {
     expect(seen[0]?.addresses).toEqual([]);
   });
 
+  it("marks the peer TLS when the record advertises tls=1", () => {
+    const fake = fakeBonjour();
+    const seen: DiscoveredPeer[] = [];
+    browseMesh({ bonjour: fake.bonjour as never, onDiscovered: (p) => seen.push(p) });
+
+    fake.emit({
+      port: 4399,
+      txt: { id: "peer-3", fp: "ff22", pk: "PKDATA", tls: "1" },
+      name: "peer-3",
+      addresses: ["10.0.0.3"],
+    });
+    // Absent flag (a pre-0.11 peer) stays non-TLS.
+    fake.emit({
+      port: 4399,
+      txt: { id: "peer-4", fp: "ff33" },
+      name: "peer-4",
+      addresses: ["10.0.0.4"],
+    });
+
+    expect(seen[0]?.tls).toBe(true);
+    expect(seen[1]?.tls).toBeUndefined();
+  });
+
   it("upsertDiscoveredPeer stores the discovery in the peer table", () => {
     const db = openMeshDb(":memory:");
     upsertDiscoveredPeer(db, {
@@ -144,6 +167,7 @@ describe("browseMesh", () => {
         token: null,
         public_key: null,
         last_seen: expect.any(Number),
+        tls: false,
       },
     ]);
     db.close();

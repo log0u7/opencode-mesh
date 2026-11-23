@@ -22,6 +22,10 @@ export type PluginOptions = {
   wake?: boolean;
   /** Wake poll interval in ms (default 5000). */
   wakeIntervalMs?: number;
+  /** Serve TLS on the mesh port (default true). */
+  tls?: boolean;
+  /** Open a documented plain-HTTP side channel on port+1 (default false). */
+  insecureHttp?: boolean;
   worktreeClient?: WorktreeClient;
   spawnFn?: SpawnFn;
 };
@@ -98,6 +102,18 @@ export function parseOptions(raw: PluginOptions | undefined): PluginOptions {
       throw new Error("opencode-mesh: options.wakeIntervalMs must be a positive integer");
     }
     options.wakeIntervalMs = raw.wakeIntervalMs;
+  }
+  if (raw.tls !== undefined) {
+    if (typeof raw.tls !== "boolean") {
+      throw new Error("opencode-mesh: options.tls must be a boolean");
+    }
+    options.tls = raw.tls;
+  }
+  if (raw.insecureHttp !== undefined) {
+    if (typeof raw.insecureHttp !== "boolean") {
+      throw new Error("opencode-mesh: options.insecureHttp must be a boolean");
+    }
+    options.insecureHttp = raw.insecureHttp;
   }
   // Opaque collaborators are passed through untouched: the plugin cannot
   // validate a client or spawn function beyond its nominal type.

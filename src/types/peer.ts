@@ -8,6 +8,8 @@ export type Peer = {
   /** Ed25519 SPKI (base64) pinned at pairing time; proof-of-possession key. */
   public_key: string | null;
   last_seen: number;
+  /** Peer serves TLS on its mesh port (0.11+): sends go over https + pin. */
+  tls: boolean;
 };
 
 export type MailMessage = {

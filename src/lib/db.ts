@@ -10,7 +10,7 @@ export type MeshDb = {
 
 // Bump when a schema change needs a migration step; the version anchors future
 // migrations that cannot be expressed as idempotent `CREATE ... IF NOT EXISTS`.
-const SCHEMA_VERSION = 6;
+const SCHEMA_VERSION = 7;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS peers (
@@ -21,7 +21,8 @@ CREATE TABLE IF NOT EXISTS peers (
   paired INTEGER NOT NULL DEFAULT 0,
   token TEXT,
   public_key TEXT,
-  last_seen INTEGER NOT NULL
+  last_seen INTEGER NOT NULL,
+  tls INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS messages (
   id TEXT PRIMARY KEY,
@@ -98,6 +99,11 @@ function migrate(conn: SqliteConn): void {
   const peerColumns = conn.all<{ name: string }>("PRAGMA table_info(peers)").map((row) => row.name);
   if (!peerColumns.includes("public_key")) {
     conn.exec("ALTER TABLE peers ADD COLUMN public_key TEXT");
+  }
+  // v7: peers.tls — new pairings speak TLS on the mesh port; discovered peers
+  // carry the flag their mDNS record advertised.
+  if (!peerColumns.includes("tls")) {
+    conn.exec("ALTER TABLE peers ADD COLUMN tls INTEGER NOT NULL DEFAULT 0");
   }
   // v3: named mailboxes. messages gains from_box/reply_to; guarded ALTERs for
   // databases created before v3 (fresh installs already have the columns).
