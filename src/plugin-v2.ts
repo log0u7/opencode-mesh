@@ -226,11 +226,14 @@ export const MeshV2 = Plugin.define({
         if (typeof sessionID === "string" && sessionID.length > 0) {
           sessionRef.sessionID = sessionID;
           sessionsSeen.add(sessionID);
-          // Re-bind every mailbox this instance registered (same project key):
-          // after a restart a box would otherwise stay bound to the dead
-          // session id and the wake loop would never find it. Last binder
-          // wins (handoff when two instances share one project key).
+          // Restart recovery: re-bind stamped boxes whose bound session has
+          // NOT been seen in this process (dead pre-restart id). Boxes bound
+          // to a LIVE session (another tab's hat) are never stolen — the
+          // tab-switch renders would otherwise churn every hat onto the
+          // active session.
           for (const box of mailboxByBindKey(db, bindKey)) {
+            if (box.session_id === sessionID) continue;
+            if (sessionsSeen.has(box.session_id)) continue;
             registerMailbox(db, {
               name: box.name,
               session_id: sessionID,

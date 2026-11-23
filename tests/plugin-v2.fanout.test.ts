@@ -148,3 +148,79 @@ describe("v2 fanout wiring", () => {
     await cleanup?.();
   });
 });
+
+// NOTE: the bind-no-steal semantics get their own describe here because the
+// fakeCtx already wires sessionsSeen via tool calls and bind.
+
+describe("bind no-steal", () => {
+  it("recovers dead bindings but never steals a live tab's hat", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "mesh-bind-nosteal-"));
+    dirs.push(dir);
+    const tools: Array<{
+      name: string;
+      execute: (
+        args: Record<string, unknown>,
+        context: { sessionID: string },
+      ) => Promise<{ content?: string }>;
+    }> = [];
+    const rpcHandlers: Record<string, (input: unknown) => Promise<unknown>> = {};
+    const ctx = {
+      location: {
+        directory: "/work/project",
+        project: { id: "p1", directory: "/work/project", canonical: "/work/project" },
+      },
+      worktree: undefined,
+      options: {
+        dataDir: dir,
+        port: 0,
+        advertise: false,
+        spawnFn: () => ({ pid: -1, kill: async () => {} }) as never,
+      },
+      tool: {
+        transform: async (fn: (editor: { add: (t: never) => void }) => void) =>
+          fn({ add: (t: never) => tools.push(t as never) } as never),
+      },
+      session: { hook: async () => {}, get: async () => undefined, prompt: async () => {} },
+      event: { subscribe: () => (async function* () {})() },
+      storage: { get: async () => undefined, set: async () => {} },
+      rpc: {
+        register: async (
+          _id: unknown,
+          handlers: Record<string, (input: unknown) => Promise<unknown>>,
+        ) => {
+          Object.assign(rpcHandlers, handlers);
+          return { dispose: async () => {}, events: { emit: async () => {} } };
+        },
+      },
+    } as unknown as Parameters<typeof pluginModule.setup>[0];
+
+    const cleanup = await pluginModule.setup(ctx);
+
+    // Tab A registers its hat and runs a tool → hat-a bound to tab-a, seen.
+    const registerTool = tools.find((t) => t.name === "mesh_register");
+    await registerTool?.execute({ name: "hat-a" }, { sessionID: "tab-a" });
+
+    // Tab B (another tab of the same TUI) binds on switch.
+    await rpcHandlers.bind?.({ sessionID: "tab-b" });
+
+    const meshDb = openMeshDb(join(dir, "mesh.db"));
+    const hatA = meshDb.conn.get<{ session_id: string }>(
+      "SELECT session_id FROM mailboxes WHERE name = 'hat-a'",
+    );
+    // Live tab keeps its hat.
+    expect(hatA?.session_id).toBe("tab-a");
+
+    // A box bound to a DEAD (never-seen) session gets recovered by the bind.
+    meshDb.conn.run(
+      "INSERT INTO mailboxes (name, session_id, role, pools, bind_key, last_seen, created_at) VALUES ('hat-dead', 'ses-dead', 'pair', '[]', 'p1:/work/project', 0, 0)",
+    );
+    await rpcHandlers.bind?.({ sessionID: "tab-c" });
+    const hatDead = meshDb.conn.get<{ session_id: string }>(
+      "SELECT session_id FROM mailboxes WHERE name = 'hat-dead'",
+    );
+    expect(hatDead?.session_id).toBe("tab-c");
+    meshDb.close();
+
+    await cleanup?.();
+  });
+});
