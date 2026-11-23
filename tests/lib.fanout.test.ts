@@ -172,6 +172,41 @@ describe("createFanout", () => {
     local.close();
   });
 
+  it("forwards the wake flag to peers (0.17.0)", async () => {
+    const local = db();
+    const p1 = await startFakePeer("p1w", { "team:infra": ["sre"] });
+    pairPeer(local, {
+      node_id: p1.node_id,
+      hostname: p1.node_id,
+      fingerprint: p1.node_id,
+      token: "tok",
+      addresses: [p1.url.replace("http://", "")],
+    });
+    local.conn.run("UPDATE peers SET tls = 0");
+
+    const fanout = createFanout({
+      db: local,
+      identity: loadOrCreateIdentity(join(tmpdir(), "fanout-id-wake")) as NodeIdentity,
+    });
+    const forwarded = await fanout.fanout({
+      to_box: "team:infra",
+      origin_id: "55555555-5555-4555-8555-555555555555",
+      from: "self-1",
+      from_box: "ops",
+      subject: "r8 go",
+      body: "...",
+      via: [],
+      wake: true,
+    });
+
+    expect(forwarded).toEqual(["p1w"]);
+    const mail = p1.received[0] as Record<string, unknown>;
+    expect(mail.wake).toBe(true);
+
+    (p1 as unknown as { server: { close(): void } }).server.close();
+    local.close();
+  });
+
   it("deliverMessage dedups by origin_id: second arrival is a no-op", () => {
     const d = db();
     registerMailbox(d, { name: "sre", session_id: "s1", now: 1000 });

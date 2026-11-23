@@ -5,6 +5,23 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.0] - 2026-11-23
+
+### Added
+
+- **`mesh_send` gains `wake: true`** (Slack model, acté PO): a deliberate pool
+  broadcast can wake every member, local and cross-host. The flag rides the
+  whole mail path (`POST /mail` body, fanout forwarding, `messages.wake`
+  storage, schema v9). Default stays quiet: a pool post without the flag
+  wakes nobody, whether it is fanouted (origin_id differs from the local id)
+  or a multi-recipient local broadcast; the sender flags the mention when the
+  message must be seen now. Direct mail (one recipient) always wakes, flag
+  unnecessary. `wakePools` keeps its operator-wide override meaning.
+- **Addressing guidance** (third DM-vs-pool incident today): the standing
+  directive now carries the rule — team-wide announcements go to the POOL as
+  one post (fanout is silent, nobody wakes), never as individual DMs (a DM
+  wakes its recipient); DM = only what must be seen NOW by ONE mailbox.
+
 ## [0.16.1] - 2026-11-23
 
 ### Fixed

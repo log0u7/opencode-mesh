@@ -4,10 +4,12 @@ import {
   ackMessages,
   deliverMessage,
   firstPendingSubject,
-  hasDirectUnread,
+  hasWakeableUnread,
   inboxRead,
+  joinPool,
   receiveMessage,
   registerMailbox,
+  unreadBoxCount,
   unreadCount,
   unreadMessages,
   waitReplyRead,
@@ -114,16 +116,131 @@ describe("transactional inbox read (0.16.1 hot-swap race fix)", () => {
   });
 });
 
-describe("wake gates (0.16.0 token economy)", () => {
-  it("hasDirectUnread: true for a direct mail, false for a fanout", () => {
+describe("wake flag (0.17.0 Slack model)", () => {
+  function poolDb() {
     const db = openMeshDb(":memory:");
     registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
-    deliverMessage(db, { from: "n", to_box: "a", subject: "dm", body: "b", created_at: 1000 });
-    expect(hasDirectUnread(db, "a")).toBe(true);
+    registerMailbox(db, { name: "b", session_id: "s2", now: 1000 });
+    registerMailbox(db, { name: "c", session_id: "s3", now: 1000 });
+    joinPool(db, "a", "team:x");
+    joinPool(db, "b", "team:x");
+    joinPool(db, "c", "team:x");
+    return db;
+  }
+
+  it("a local pool broadcast without the flag is quiet on every member box", () => {
+    const db = poolDb();
+    const r = deliverMessage(db, {
+      from: "n",
+      from_box: "a",
+      to_box: "team:x",
+      subject: "status: go",
+      body: "b",
+      created_at: 2000,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.recipients).toEqual(["b", "c"]);
+
+    expect(unreadBoxCount(db, "b")).toBe(1);
+    expect(unreadBoxCount(db, "c")).toBe(1);
+    expect(hasWakeableUnread(db, "b")).toBe(false);
+    expect(hasWakeableUnread(db, "c")).toBe(false);
     db.close();
   });
 
-  it("hasDirectUnread: fanout (origin_id differs from id) is not direct", () => {
+  it("the same broadcast with wake:true wakes every member box", () => {
+    const db = poolDb();
+    const r = deliverMessage(db, {
+      from: "n",
+      from_box: "a",
+      to_box: "team:x",
+      subject: "r8 go: build is green",
+      body: "b",
+      wake: true,
+      created_at: 2000,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+
+    expect(hasWakeableUnread(db, "b")).toBe(true);
+    expect(hasWakeableUnread(db, "c")).toBe(true);
+    db.close();
+  });
+
+  it("deliverMessage stores the flag: 1 when wake, 0 by default", () => {
+    const db = poolDb();
+    deliverMessage(db, {
+      from: "n",
+      from_box: "a",
+      to_box: "team:x",
+      subject: "flagged",
+      body: "b",
+      wake: true,
+      created_at: 2000,
+    });
+    deliverMessage(db, {
+      from: "n",
+      from_box: "a",
+      to_box: "team:x",
+      subject: "not flagged",
+      body: "b",
+      created_at: 2100,
+    });
+    const wakes = db.conn
+      .all<{ subject: string; wake: number }>(
+        "SELECT subject, wake FROM messages ORDER BY created_at",
+      )
+      .map((r) => `${r.subject}:${r.wake}`);
+    expect(wakes).toEqual(["flagged:1", "not flagged:0"]);
+    db.close();
+  });
+
+  it("a cross-host fanout with wake:true wakes despite origin_id != id", () => {
+    const db = openMeshDb(":memory:");
+    registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
+    deliverMessage(db, {
+      from: "n",
+      to_box: "a",
+      subject: "status: pool broadcast",
+      body: "b",
+      origin_id: "origin-1",
+      created_at: 1000,
+    });
+    expect(hasWakeableUnread(db, "a")).toBe(false);
+
+    deliverMessage(db, {
+      from: "n",
+      to_box: "a",
+      subject: "r8 go (deliberate)",
+      body: "b",
+      origin_id: "origin-2",
+      wake: true,
+      created_at: 2000,
+    });
+    expect(hasWakeableUnread(db, "a")).toBe(true);
+    db.close();
+  });
+
+  it("a DM always wakes, flag or not", () => {
+    const db = openMeshDb(":memory:");
+    registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
+    deliverMessage(db, { from: "n", to_box: "a", subject: "dm", body: "b", created_at: 1000 });
+    expect(hasWakeableUnread(db, "a")).toBe(true);
+    db.close();
+  });
+});
+
+describe("wake gates (0.16.0 token economy)", () => {
+  it("hasWakeableUnread: true for a direct mail, false for a fanout", () => {
+    const db = openMeshDb(":memory:");
+    registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
+    deliverMessage(db, { from: "n", to_box: "a", subject: "dm", body: "b", created_at: 1000 });
+    expect(hasWakeableUnread(db, "a")).toBe(true);
+    db.close();
+  });
+
+  it("hasWakeableUnread: fanout (origin_id differs from id) is not direct", () => {
     const db = openMeshDb(":memory:");
     registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
     deliverMessage(db, {
@@ -134,11 +251,11 @@ describe("wake gates (0.16.0 token economy)", () => {
       origin_id: "origin-1",
       created_at: 1000,
     });
-    expect(hasDirectUnread(db, "a")).toBe(false);
+    expect(hasWakeableUnread(db, "a")).toBe(false);
     db.close();
   });
 
-  it("hasDirectUnread: legacy rows (origin_id NULL) count as direct", () => {
+  it("hasWakeableUnread: legacy rows (origin_id NULL) count as direct", () => {
     const db = openMeshDb(":memory:");
     registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
     db.conn.run(
@@ -148,7 +265,7 @@ describe("wake gates (0.16.0 token economy)", () => {
     db.conn.run(
       "INSERT INTO deliveries (id, message_id, to_box, status, created_at) VALUES ('d-legacy', 'm-legacy', 'a', 'unread', 1000)",
     );
-    expect(hasDirectUnread(db, "a")).toBe(true);
+    expect(hasWakeableUnread(db, "a")).toBe(true);
     db.close();
   });
 

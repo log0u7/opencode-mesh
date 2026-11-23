@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { openMeshDb } from "../src/lib/db.js";
-import { deliverMessage, registerMailbox } from "../src/lib/mail.js";
+import { deliverMessage, joinPool, registerMailbox } from "../src/lib/mail.js";
 import {
   startWakeLoop,
   DEFAULT_WAKE_INTERVAL_MS,
@@ -236,6 +236,99 @@ describe("fatigue guard", () => {
     handle.stop();
 
     expect(prompts.length).toBeGreaterThanOrEqual(2);
+    db.close();
+  });
+});
+
+describe("wake flag (0.17.0 Slack model)", () => {
+  function poolSetup(hostSessions: string[]) {
+    const s = setup(hostSessions);
+    for (const [name, sid] of [
+      ["a", "s1"],
+      ["b", "s2"],
+      ["c", "s3"],
+    ] as const) {
+      registerMailbox(s.db, { name, session_id: sid, now: 1000 });
+      joinPool(s.db, name, "team:x");
+    }
+    return s;
+  }
+
+  it("stays silent on a local pool broadcast without the flag", async () => {
+    const { db, prompt } = poolSetup(["s1", "s2", "s3"]);
+    const r = deliverMessage(db, {
+      from: "n",
+      from_box: "a",
+      to_box: "team:x",
+      subject: "status: quota transmise",
+      body: "b",
+      created_at: 2000,
+    });
+    expect(r.ok).toBe(true);
+    const handle = startWakeLoop({
+      db,
+      prompt,
+      sessionKnown: () => true,
+      intervalMs: 10,
+      cooldownMs: 5000,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    handle.stop();
+
+    expect(prompt).not.toHaveBeenCalled();
+    db.close();
+  });
+
+  it("wakes every member when the broadcast carries wake:true", async () => {
+    const { db, prompt, prompts } = poolSetup(["s1", "s2", "s3"]);
+    deliverMessage(db, {
+      from: "n",
+      from_box: "a",
+      to_box: "team:x",
+      subject: "r8 go: build is green",
+      body: "b",
+      wake: true,
+      created_at: 2000,
+    });
+    const handle = startWakeLoop({
+      db,
+      prompt,
+      sessionKnown: () => true,
+      intervalMs: 10,
+      cooldownMs: 5000,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    handle.stop();
+
+    expect(prompts.map((p) => p.sessionID).sort()).toEqual(["s2", "s3"]);
+    expect(prompts[0]?.text).toContain('mesh: 1 unread — "r8 go: build is green"');
+    db.close();
+  });
+
+  it("wakes on a cross-host fanout carrying wake:true (origin_id differs)", async () => {
+    const { db, prompt, prompts } = setup(["s1"]);
+    registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
+    deliverMessage(db, {
+      from: "n",
+      to_box: "a",
+      subject: "r8 go (deliberate)",
+      body: "b",
+      origin_id: "origin-1",
+      wake: true,
+      created_at: 1000,
+    });
+    const handle = startWakeLoop({
+      db,
+      prompt,
+      sessionKnown: () => true,
+      intervalMs: 10,
+      cooldownMs: 5000,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    handle.stop();
+
+    expect(prompts).toHaveLength(1);
+    expect(prompts[0]?.sessionID).toBe("s1");
     db.close();
   });
 });

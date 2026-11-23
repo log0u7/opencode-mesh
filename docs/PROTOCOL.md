@@ -102,7 +102,7 @@ the node must already be known.
 
 | Method | Path | Auth | Body | Response |
 |---|---|---|---|---|
-| `POST` | `/mail` | peer token | `{"from": "...", "subject": "...", "body": "...", "proof"?: "<pk>.<sig>", "to"?: "<mailbox or team:<pool> or all>", "from_box"?: "<sender mailbox>", "reply_to"?: "<message id>", "via"?: ["<node id>", ...], "origin_id"?: "<message id>"}` | `200 {"ok": true, "unread": N, "delivered": M}` |
+| `POST` | `/mail` | peer token | `{"from": "...", "subject": "...", "body": "...", "proof"?: "<pk>.<sig>", "to"?: "<mailbox or team:<pool> or all>", "from_box"?: "<sender mailbox>", "reply_to"?: "<message id>", "via"?: ["<node id>", ...], "origin_id"?: "<message id>", "wake"?: true}` | `200 {"ok": true, "unread": N, "delivered": M}` |
 | `GET` | `/status` | peer token | none | `200 {"node_id": "...", "unread": N}` |
 | `GET` | `/pools` | peer token | none | `200 {"pools": {"<pool>": ["<mailbox>", ...]}}` |
 | `POST` | `/pair-code` | none (bootstrap) | `{"code": "482913", "offer": "MESH1-..."}` | `200 {"ok": true, "counter_offer": "MESH1-..."}` |
