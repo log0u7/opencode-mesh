@@ -121,13 +121,14 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
       name: "mesh_status",
       description: "Show this node's identity, server address, and known peers.",
       fields: [],
-      execute: async () => {
+      execute: async (args, context) => {
         const peers = listPeers(db);
         const tailnet = await tailnetAddresses();
         const now = Date.now();
         return JSON.stringify(
           {
             node_id: identity.node_id,
+            session: sessionID(context),
             hostname: identity.hostname,
             fingerprint: identity.fingerprint,
             server: `${serverAddress}:${port}`,
