@@ -143,7 +143,7 @@ describe("TLS round-trip (two nodes)", () => {
       body: "x",
       proof: pairingProof(b, "tok-b"),
     });
-    expect(result).toBe("unreachable");
+    expect(result).toBe("pin-mismatch");
     // The handshake died before any mail reached the server.
     expect(unreadMessages(a.db)).toHaveLength(0);
 
