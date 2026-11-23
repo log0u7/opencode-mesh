@@ -14,6 +14,7 @@ import { extractClientFetch, type WorktreeClient, type WorktreeFactory } from ".
 import { reconcileWorkers } from "./lib/workers.js";
 import { startMeshServer } from "./lib/serve.js";
 import { nodeTlsMaterial } from "./lib/tls.js";
+import { startMemorySyncPusher } from "./lib/memory-sync.js";
 import { buildToolSpecs } from "./tools.js";
 
 export { defaultDataDir, parseOptions } from "./options.js";
@@ -65,7 +66,19 @@ export const MeshPlugin: Plugin = async (input, rawOptions?: PluginOptions) => {
     tlsMaterial: nodeTlsMaterial(dataDir),
     ...(options.tls === false ? { tls: false } : {}),
     ...(options.insecureHttp === true ? { insecureHttp: true } : {}),
+    dataDir,
   });
+  // Outbound memory sync: push the shareable outbox to paired peers on a cadence.
+  // Reception (the /memory-sync endpoint) is always on; this loop is the gated half.
+  const memorySyncPusher =
+    options.memorySync === false
+      ? null
+      : startMemorySyncPusher({
+          dataDir,
+          db,
+          identity,
+          intervalMs: (options.memorySyncInterval ?? 15) * 60_000,
+        });
   const worktreeClient: WorktreeClient =
     options.worktreeClient ??
     defaultWorktreeFactory(
@@ -122,6 +135,7 @@ export const MeshPlugin: Plugin = async (input, rawOptions?: PluginOptions) => {
   return {
     ...hooks,
     dispose: async () => {
+      memorySyncPusher?.stop();
       stopAllWorkers(db);
       advertiseHandle?.close();
       browseHandle?.close();

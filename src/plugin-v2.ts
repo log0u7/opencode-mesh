@@ -20,6 +20,7 @@ import { v2WorktreeDomainClient } from "./lib/worktree.js";
 import { reconcileWorkers } from "./lib/workers.js";
 import { startMeshServer } from "./lib/serve.js";
 import { nodeTlsMaterial } from "./lib/tls.js";
+import { startMemorySyncPusher } from "./lib/memory-sync.js";
 import { createDurableStore } from "./lib/persist.js";
 import { createFanout } from "./lib/fanout.js";
 import { startWakeLoop } from "./lib/wake.js";
@@ -69,7 +70,19 @@ export const MeshV2 = Plugin.define({
       tlsMaterial,
       ...(options.tls === false ? { tls: false } : {}),
       ...(options.insecureHttp === true ? { insecureHttp: true } : {}),
+      dataDir,
     });
+    // Outbound memory sync: push the shareable outbox to paired peers on a cadence.
+    // Reception (the /memory-sync endpoint) is always on; this loop is the gated half.
+    const memorySyncPusher =
+      options.memorySync === false
+        ? null
+        : startMemorySyncPusher({
+            dataDir,
+            db,
+            identity,
+            intervalMs: (options.memorySyncInterval ?? 15) * 60_000,
+          });
     // Prefer an injected client (tests, hosts that pass one), then adapt the
     // 2.x in-process worktree domain to the REST-shaped WorktreeClient. The
     // domain resolves payloads directly, without the v1 `{ data }` envelope.
@@ -270,6 +283,7 @@ export const MeshV2 = Plugin.define({
 
     const cleanup = async () => {
       wake.stop();
+      memorySyncPusher?.stop();
       stopAllWorkers(db);
       advertiseHandle?.close();
       browseHandle?.close();

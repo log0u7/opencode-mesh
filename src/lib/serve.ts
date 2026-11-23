@@ -14,6 +14,7 @@ import {
   unreadCount,
 } from "./mail.js";
 import type { Fanout } from "./fanout.js";
+import { receiveMemorySync } from "./memory-sync.js";
 import {
   ensurePairingCodeSchema,
   findPendingByCode,
@@ -23,6 +24,11 @@ import {
 import { buildOfferBlob, parseOfferBlob, type OfferPayload } from "./offer-blob.js";
 
 const BODY_LIMIT = 64 * 1024;
+
+// Memory sync payloads are opaque JSONL snapshots of a peer's shareable entries:
+// a large store legitimately exceeds the mail limit, so this endpoint reads up to
+// 1 MiB. Everything above stays a 413, and the sender retries on its next cycle.
+const MEMORY_SYNC_BODY_LIMIT = 1024 * 1024;
 
 // Loopback by default: the mesh HTTP API must not be reachable from the
 // network unless the operator explicitly opted into a LAN pool.
@@ -50,6 +56,9 @@ export type MeshServerOptions = {
   /** Documented escape hatch: an extra PLAIN-HTTP server on port+1 (default
    * off). Peers that cannot speak TLS yet may target it explicitly. */
   insecureHttp?: boolean;
+  /** Where /memory-sync stores peers' pushed JSONL (the inbox tree). Absent =
+   * the endpoint answers 503: the plugin always passes its dataDir. */
+  dataDir?: string;
 };
 
 export type MeshServer = {
@@ -172,13 +181,52 @@ async function handle(
   const url = new URL(req.url ?? "/", "http://localhost");
 
   const contentLength = Number(req.headers["content-length"] ?? "0");
-  if (req.method === "POST" && contentLength > BODY_LIMIT) {
+  if (req.method === "POST" && contentLength > MEMORY_SYNC_BODY_LIMIT) {
     json(res, 413, { error: "body too large" });
     return;
   }
 
   if (req.method !== "GET" && req.method !== "POST") {
     json(res, 405, { error: "method not allowed" });
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/memory-sync") {
+    // Cross-host memory sync: the body is the peer's shareable JSONL, stored
+    // verbatim under inbox/<peer node id>.jsonl. The payload stays opaque, so the
+    // sender identity and pairing proof travel in headers (x-mesh-sender carries
+    // the mail `from`, x-mesh-proof the same pairing proof) and authentication
+    // runs through the same machinery as /mail — including the pending-token
+    // bind, so the first accepted push symmetric-tokenizes the pair exactly like
+    // the first mail does. The authenticated peer's node id names the file; no
+    // identity fields travel inside the payload.
+    if (options.dataDir === undefined) {
+      json(res, 503, { error: "memory-sync storage not configured" });
+      return;
+    }
+    const body = await readBody(req, MEMORY_SYNC_BODY_LIMIT);
+    if ("error" in body) {
+      json(res, body.error === "too_large" ? 413 : 400, {
+        error: body.error === "too_large" ? "body too large" : "malformed request body",
+      });
+      return;
+    }
+    const peer = authenticate(
+      db,
+      req,
+      typeof req.headers["x-mesh-sender"] === "string" ? req.headers["x-mesh-sender"] : null,
+      typeof req.headers["x-mesh-proof"] === "string" ? req.headers["x-mesh-proof"] : undefined,
+    );
+    if (!peer) {
+      json(res, 401, { error: "unauthorized" });
+      return;
+    }
+    try {
+      const accepted = receiveMemorySync(options.dataDir, peer.node_id, body.body);
+      json(res, 200, { accepted });
+    } catch {
+      json(res, 500, { error: "memory-sync storage failed" });
+    }
     return;
   }
 
@@ -356,7 +404,7 @@ function authenticate(
 
 type BodyResult = { body: string } | { error: "too_large" | "read" };
 
-function readBody(req: IncomingMessage): Promise<BodyResult> {
+function readBody(req: IncomingMessage, limit: number = BODY_LIMIT): Promise<BodyResult> {
   return new Promise((resolve) => {
     const chunks: Buffer[] = [];
     let size = 0;
@@ -364,7 +412,7 @@ function readBody(req: IncomingMessage): Promise<BodyResult> {
 
     req.on("data", (chunk: Buffer) => {
       size += chunk.length;
-      if (size > BODY_LIMIT) {
+      if (size > limit) {
         limited = true;
         chunks.length = 0;
         return;

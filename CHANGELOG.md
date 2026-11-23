@@ -5,6 +5,32 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.0] - 2026-11-23
+
+### Added
+
+- **Cross-host memory sync (`/memory-sync`)**: the mesh now transports the shareable
+  memory of opencode-memory 0.19+ between paired hosts. The two plugins stay fully
+  decoupled — the filesystem is the only contract, and the mesh never parses the
+  payload:
+  - `POST /memory-sync` (auth: the mail machinery, token + `x-mesh-from`/`x-mesh-proof`
+    headers) stores the peer's JSONL verbatim under
+    `<dataDir>/memory-sync/inbox/<node id>.jsonl` (atomic tmp + rename, 0600) and
+    answers `{accepted: <bytes>}`. A pending pairing token can bind on the first
+    accepted push (proof attested against the pinned key), like the first mail does;
+    bodies up to 1 MiB (the outbox is a snapshot, mail's 64 KiB limit stays).
+  - **Outbound push loop**: every `memorySyncInterval` minutes (default 15, 0 = off;
+    `memorySync: false` gates the loop entirely — reception is always on) the plugin
+    pushes `<dataDir>/memory-sync/outbox/shareable.jsonl` (written by the memory
+    plugin's `memory_export`) to every paired peer over its pinned TLS connection.
+    The stamp advances only when every peer accepted, so a peer that was down catches
+    up on the next cycle; duplicates are free (the importing side is idempotent per
+    entry id).
+  - **Import** is the memory plugin's job: its housekeeping sweep imports the inbox
+    files and renames them `.imported` (opencode-memory 0.19.0, same path convention).
+- Node ids are validated as inbox filenames (`[A-Za-z0-9._-]{1,64}`) before any
+  filesystem write; a peer row with a hostile id answers 500 instead of writing.
+
 ## [0.11.0] - 2026-11-23
 
 ### Changed
