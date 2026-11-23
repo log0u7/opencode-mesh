@@ -5,6 +5,25 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.1] - 2026-11-23
+
+### Fixed
+
+- **Transactional inbox fetch+ack**: `mesh_inbox` (and the `mesh_wait` reply
+  path) used to fetch the unread rows and mark them read in two separate,
+  non-transactional write phases. A process killed in between (which happens
+  on plugin hot-swap) left deliveries marked `read` but never served, and the
+  agent saw "inbox empty" over a real mail (seen live on ricinus during a
+  0.10.10 → 0.14.2 swap). Fetch and read-marking now run in one SQLite
+  transaction (`inboxRead` / `waitReplyRead` in `src/lib/mail.ts`): either the
+  rows are served and marked read together, or nothing happens. The residual
+  window (the process dying after the transaction commits but before the
+  response reaches the model over RPC) is documented in the code and inherent
+  to RPC over a dying process; it is now microseconds-wide instead of the
+  whole fetch→ack→return span. No re-delivery on boot, on purpose:
+  re-marking recent reads as unread would re-serve duplicates after every
+  normal restart.
+
 ## [0.16.0] - 2026-11-23
 
 ### Changed

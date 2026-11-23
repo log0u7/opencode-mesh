@@ -379,6 +379,65 @@ export function ackReply(db: MeshDb, row: InboxRow): void {
   }
 }
 
+// The repo's SqliteConn wrapper exposes no transaction() method (node:sqlite /
+// bun:sqlite both support plain BEGIN/COMMIT through exec), so transactions are
+// manual. Single connection, synchronous, and no nested use: safe.
+function withTransaction<T>(db: MeshDb, fn: () => T): T {
+  db.conn.exec("BEGIN");
+  try {
+    const result = fn();
+    db.conn.exec("COMMIT");
+    return result;
+  } catch (error) {
+    db.conn.exec("ROLLBACK");
+    throw error;
+  }
+}
+
+/**
+ * Fetch unread inbox rows and, when ack is true, mark them read in ONE SQLite
+ * transaction. Before 0.16.1 fetch and ack were two separate write phases: a
+ * process killed between them (plugin hot-swap) left deliveries marked read
+ * but never served, so a real mail was lost (seen live on ricinus).
+ *
+ * Residual window, documented on purpose: the process can still die after the
+ * COMMIT and before the response reaches the model over RPC. The rows are then
+ * read-marked but unserved. This window is inherent to RPC over a dying
+ * process; the transaction shrinks it to microseconds instead of the whole
+ * fetch, ack, return span. Narrowing it further would mean re-delivering
+ * recent reads on boot, which re-serves duplicates after every normal
+ * restart: worse than the bug it would fix.
+ */
+export function inboxRead(db: MeshDb, session_id: string, ack: boolean): InboxRow[] {
+  return withTransaction(db, () => {
+    const rows = inboxRows(db, session_id);
+    if (ack && rows.length > 0) {
+      ackInbox(
+        db,
+        rows.map((r) => r.delivery_id),
+      );
+      // Legacy global rows have no delivery: ack the message rows instead.
+      ackMessages(
+        db,
+        rows.filter((r) => r.delivery_id === "").map((r) => r.id),
+      );
+    }
+    return rows;
+  });
+}
+
+/**
+ * First unread reply for mesh_wait, with the same atomic fetch+ack as
+ * inboxRead (same hot-swap race, same fix, same residual window).
+ */
+export function waitReplyRead(db: MeshDb, reply_to: string, session_id: string): InboxRow | null {
+  return withTransaction(db, () => {
+    const row = firstReply(db, reply_to, session_id);
+    if (row) ackReply(db, row);
+    return row;
+  });
+}
+
 // ---- legacy API kept for the remote wire path and existing callers ----
 
 export function receiveMessage(
