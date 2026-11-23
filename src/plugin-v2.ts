@@ -7,6 +7,7 @@ import { listLocks } from "./lib/locks.js";
 import {
   listMailboxes,
   mailboxByBindKey,
+  mailboxByName,
   mailboxBySession,
   registerMailbox,
   unreadBoxCount,
@@ -226,31 +227,24 @@ export const MeshV2 = Plugin.define({
         if (typeof sessionID === "string" && sessionID.length > 0) {
           sessionRef.sessionID = sessionID;
           sessionsSeen.add(sessionID);
-          // Restart recovery: re-bind stamped boxes whose bound session has
-          // NOT been seen in this process (dead pre-restart id). Boxes bound
-          // to a LIVE session (another tab's hat) are never stolen — the
-          // tab-switch renders would otherwise churn every hat onto the
-          // active session.
-          for (const box of mailboxByBindKey(db, bindKey)) {
-            if (box.session_id === sessionID) continue;
-            if (sessionsSeen.has(box.session_id)) continue;
-            registerMailbox(db, {
-              name: box.name,
-              session_id: sessionID,
-              role: box.role,
-              bind_key: bindKey,
-              now: Date.now(),
-            });
-          }
-          // Optional declarative mailbox: applied after the dynamic boxes, so
-          // on a name collision the configuration wins (last act).
+          // NO dynamic re-bind: opencode sessions are durable — they resume
+          // with the same id after a restart, so stamped boxes stay
+          // correctly bound to their registration session forever. Recovery
+          // after a lost identity goes through the agent's first-turn
+          // mesh_register (AGENTS.md check-in). Earlier versions re-bound on
+          // every bind, which let the first rendered tab steal every hat at
+          // boot. The OPTIONAL static mailbox still re-applies here: it is
+          // explicit configuration, and it follows the window on purpose.
           if (options.mailbox !== undefined) {
-            registerMailbox(db, {
-              name: options.mailbox,
-              session_id: sessionID,
-              ...(options.mailboxRole !== undefined ? { role: options.mailboxRole } : {}),
-              now: Date.now(),
-            });
+            const existing = mailboxByName(db, options.mailbox);
+            if (!existing || existing.session_id !== sessionID) {
+              registerMailbox(db, {
+                name: options.mailbox,
+                session_id: sessionID,
+                ...(options.mailboxRole !== undefined ? { role: options.mailboxRole } : {}),
+                now: Date.now(),
+              });
+            }
           }
         }
         return { bound: true };

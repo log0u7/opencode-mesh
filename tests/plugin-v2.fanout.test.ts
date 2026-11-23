@@ -152,8 +152,8 @@ describe("v2 fanout wiring", () => {
 // NOTE: the bind-no-steal semantics get their own describe here because the
 // fakeCtx already wires sessionsSeen via tool calls and bind.
 
-describe("bind no-steal", () => {
-  it("recovers dead bindings but never steals a live tab's hat", async () => {
+describe("bind no-rebind", () => {
+  it("never re-binds: live hats stay on their registration sessions", async () => {
     const dir = mkdtempSync(join(tmpdir(), "mesh-bind-nosteal-"));
     dirs.push(dir);
     const tools: Array<{
@@ -200,17 +200,17 @@ describe("bind no-steal", () => {
     const registerTool = tools.find((t) => t.name === "mesh_register");
     await registerTool?.execute({ name: "hat-a" }, { sessionID: "tab-a" });
 
-    // Tab B (another tab of the same TUI) binds on switch.
+    // Tab B (another tab of the same TUI) binds on switch: hat-a STAYS on tab-a.
     await rpcHandlers.bind?.({ sessionID: "tab-b" });
 
     const meshDb = openMeshDb(join(dir, "mesh.db"));
     const hatA = meshDb.conn.get<{ session_id: string }>(
       "SELECT session_id FROM mailboxes WHERE name = 'hat-a'",
     );
-    // Live tab keeps its hat.
     expect(hatA?.session_id).toBe("tab-a");
 
-    // A box bound to a DEAD (never-seen) session gets recovered by the bind.
+    // A box bound to a DEAD session is NOT touched by the bind either —
+    // recovery goes through the agent's first-turn mesh_register.
     meshDb.conn.run(
       "INSERT INTO mailboxes (name, session_id, role, pools, bind_key, last_seen, created_at) VALUES ('hat-dead', 'ses-dead', 'pair', '[]', 'p1:/work/project', 0, 0)",
     );
@@ -218,7 +218,7 @@ describe("bind no-steal", () => {
     const hatDead = meshDb.conn.get<{ session_id: string }>(
       "SELECT session_id FROM mailboxes WHERE name = 'hat-dead'",
     );
-    expect(hatDead?.session_id).toBe("tab-c");
+    expect(hatDead?.session_id).toBe("ses-dead");
     meshDb.close();
 
     await cleanup?.();
