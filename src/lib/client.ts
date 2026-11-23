@@ -27,7 +27,15 @@ export type SendTarget = {
   pk?: string;
 };
 
-export type SendResult = "ok" | "unreachable" | "unauthorized" | "error";
+export type SendResult =
+  | "ok"
+  | "unreachable"
+  | "unauthorized"
+  | "error"
+  /** TLS refused the peer: the pinned SPKI no longer matches what the peer presents
+   * (its identity rotated or was re-paired). Reporting it as plain "unreachable"
+   * hides the remedy — the peer is up, the pin is stale. */
+  | "pin-mismatch";
 
 // TLS is implied by the scheme; the flag covers callers that state it twice.
 function isTls(target: { url: string; tls?: boolean }): boolean {
@@ -72,7 +80,13 @@ export async function sendMail(target: SendTarget): Promise<SendResult> {
       return "ok";
     }
     return response.status === 401 ? "unauthorized" : "error";
-  } catch {
+  } catch (cause) {
+    // pinCheck rejects the handshake with a precise message; collapsing it into
+    // "unreachable" made a rotated peer identity look like a dead host.
+    const message = cause instanceof Error ? cause.message : "";
+    if (message.includes("peer certificate key mismatch")) {
+      return "pin-mismatch";
+    }
     return "unreachable";
   }
 }
@@ -120,7 +134,13 @@ export async function pushMemorySync(target: {
       return "ok";
     }
     return response.status === 401 ? "unauthorized" : "error";
-  } catch {
+  } catch (cause) {
+    // pinCheck rejects the handshake with a precise message; collapsing it into
+    // "unreachable" made a rotated peer identity look like a dead host.
+    const message = cause instanceof Error ? cause.message : "";
+    if (message.includes("peer certificate key mismatch")) {
+      return "pin-mismatch";
+    }
     return "unreachable";
   }
 }

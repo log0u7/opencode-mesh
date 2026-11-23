@@ -434,7 +434,11 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
             proof: pairingProof(identity, target.token ?? ""),
             ...extras,
           });
-          return `sent to ${target.node_id}: ${result}`;
+          const hint =
+            result === "pin-mismatch"
+              ? " — the peer's identity changed: re-pair with mesh_pair to refresh the pin"
+              : "";
+          return `sent to ${target.node_id}: ${result}${hint}`;
         }
         return await selfSendLocal();
       },
