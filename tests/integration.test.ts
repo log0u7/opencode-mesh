@@ -22,7 +22,12 @@ afterEach(() => {
 
 async function startNode(name: string) {
   const db = openMeshDb(join(dir, `${name}.db`));
-  const { server, port } = await startMeshServer({ db, port: 0, tls: false });
+  const { server, port } = await startMeshServer({
+    db,
+    port: 0,
+    tls: false,
+    self: { node_id: name, pk: "test-pk", hostname: name },
+  });
   return { db, server, url: `http://127.0.0.1:${port}` };
 }
 

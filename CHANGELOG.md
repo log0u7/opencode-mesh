@@ -5,6 +5,22 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.18.1] - 2026-11-23
+
+### Fixed
+
+- **CI `Typecheck tests` green again** — the 37 pre-existing test typing
+  errors fixed (required `self` on `startMeshServer` test fixtures, the
+  `execFile` callback's missing `stderr` parameter, `exactOptionalPropertyTypes`-
+  clean peer fixtures, `SidebarRpc.bind` / `MeshContext.bindKey` in mocks,
+  `DeliverResult` narrowing, dead fields dropped from legacy-mail tests).
+- **Coverage gate green again** — fixing the typecheck step unmasked a latent
+  branch-coverage shortfall (79.3% < 80): the option-validation branches for
+  `wake`, `tls`, `insecureHttp`, `memorySync`, `memorySyncInterval`, `mailbox`
+  and `mailboxRole` were never exercised; new `parseOptions` validation tests
+  bring branches to 80.7%. Test-only: no runtime behavior change. The
+  `[0.14.2]` section, lost with the peer-fix commit, is restored below.
+
 ## [0.18.0] - 2026-11-23
 
 ### Fixed
@@ -119,6 +135,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tailscale extraction keeps its exported names from `lib/discovery.ts`, and
   new overlays land as one function + one array entry, by PR — no runtime
   plugin system.
+
+## [0.14.2] - 2026-11-23
+
+### Fixed
+
+- 0.14.1 pinned the @opentui peers to `>= 0.9.4`, making the package
+  uninstallable on hosts resolving opentui lower; the host owns the opentui
+  version — permissive peers (`>= 0.5.0`) restored.
 
 ## [0.14.1] - 2026-11-23
 

@@ -4,11 +4,13 @@ import { createServer as createHttpsServer } from "node:https";
 import { openMeshDb } from "../src/lib/db.js";
 import { sendMail } from "../src/lib/client.js";
 
+const SELF = { node_id: "self", pk: "test-pk", hostname: "localhost" };
+
 describe("sendMail result mapping", () => {
   it("maps 401 to unauthorized", async () => {
     const { startMeshServer } = await import("../src/lib/serve.js");
     const db = openMeshDb(":memory:");
-    const { server, port } = await startMeshServer({ db, port: 0, tls: false });
+    const { server, port } = await startMeshServer({ db, port: 0, tls: false, self: SELF });
 
     const result = await sendMail({
       url: `http://127.0.0.1:${port}`,
@@ -26,7 +28,7 @@ describe("sendMail result mapping", () => {
   it("maps server errors to error", async () => {
     const { startMeshServer } = await import("../src/lib/serve.js");
     const db = openMeshDb(":memory:");
-    const { server, port } = await startMeshServer({ db, port: 0, tls: false });
+    const { server, port } = await startMeshServer({ db, port: 0, tls: false, self: SELF });
     const { pairWithToken } = await import("../src/lib/peers.js");
     pairWithToken(db, { node_id: "node-a", hostname: "a", fingerprint: "f", token: "tok-a" });
     const token = "tok-a";
@@ -82,6 +84,7 @@ describe("sendMail TLS pinning", () => {
       port: 0,
       tls: true,
       tlsMaterial: material,
+      self: SELF,
     });
 
     // The client pins a DIFFERENT key than the one the server presents: the classic
@@ -106,7 +109,7 @@ describe("sendMail version skew", () => {
   it("maps a plaintext listener to plaintext-peer, not unreachable", async () => {
     const { startMeshServer } = await import("../src/lib/serve.js");
     const db = openMeshDb(":memory:");
-    const { server, port } = await startMeshServer({ db, port: 0, tls: false });
+    const { server, port } = await startMeshServer({ db, port: 0, tls: false, self: SELF });
 
     // A 0.11+ TLS client against a 0.10.x plaintext peer: the host is up, the
     // handshake is not. The error must name the skew, not blame the network.

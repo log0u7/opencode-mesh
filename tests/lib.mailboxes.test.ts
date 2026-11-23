@@ -251,7 +251,7 @@ describe("pool broadcast", () => {
 describe("legacy global inbox compatibility", () => {
   it("mail without a target box stays global and reaches unregistered sessions", () => {
     const d = db();
-    receiveMessage(d, { from: "node-a", subject: "remote", body: "hi", created_at: 1000 });
+    receiveMessage(d, { from: "node-a", subject: "remote", body: "hi" });
 
     const global = unreadMessages(d);
     expect(global).toHaveLength(1);
@@ -262,7 +262,7 @@ describe("legacy global inbox compatibility", () => {
   it("a registered session still sees legacy global mail in its inbox", () => {
     const d = db();
     registerMailbox(d, { name: "a", session_id: "s1", now: 1000 });
-    receiveMessage(d, { from: "node-a", subject: "remote", body: "hi", created_at: 1000 });
+    receiveMessage(d, { from: "node-a", subject: "remote", body: "hi" });
     deliverMessage(d, {
       from: "node",
       to_box: "a",
