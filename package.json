@@ -1,6 +1,6 @@
 {
   "name": "@log0u7/opencode-mesh",
-  "version": "0.14.1",
+  "version": "0.14.2",
   "description": "Multi-session coordination for OpenCode: session coordination on one machine and a peer pool across LAN or Tailscale, with pairing, mailbox, and worktree locks.",
   "type": "module",
   "license": "Apache-2.0",
@@ -31,8 +31,8 @@
   "peerDependencies": {
     "@opencode-ai/plugin": "^1.18.32",
     "@opencode/plugin": "^2.0.26",
-    "@opentui/core": ">=0.9.4",
-    "@opentui/solid": ">=0.9.4",
+    "@opentui/core": ">=0.5.0",
+    "@opentui/solid": ">=0.5.0",
     "solid-js": ">=1.9.0"
   },
   "peerDependenciesMeta": {
