@@ -8,7 +8,7 @@ import {
   listMailboxes,
   mailboxByBindKey,
   mailboxByName,
-  mailboxBySession,
+  mailboxesBySession,
   registerMailbox,
   unreadBoxCount,
 } from "./lib/mail.js";
@@ -185,10 +185,10 @@ export const MeshV2 = Plugin.define({
           typeof input === "object" && input !== null && "sessionID" in input
             ? (input as { sessionID: unknown }).sessionID
             : undefined;
-        const myBox =
+        const sessionBoxes =
           typeof sessionID === "string" && sessionID.length > 0
-            ? mailboxBySession(db, sessionID)
-            : null;
+            ? mailboxesBySession(db, sessionID)
+            : [];
         const boxes = listMailboxes(db);
         const pools: Record<string, string[]> = {};
         for (const box of boxes) {
@@ -203,13 +203,11 @@ export const MeshV2 = Plugin.define({
           peers: listPeers(db),
           locks: listLocks(db, { now: Date.now() }),
           server: `${address}:${port}`,
-          my: myBox
-            ? {
-                name: myBox.name,
-                role: myBox.role,
-                unread: unreadBoxCount(db, myBox.name),
-              }
-            : null,
+          hats: sessionBoxes.map((box) => ({
+            name: box.name,
+            role: box.role,
+            unread: unreadBoxCount(db, box.name),
+          })),
           mailboxes: boxes.map((box) => ({
             name: box.name,
             role: box.role,

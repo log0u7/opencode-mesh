@@ -17,8 +17,9 @@ export type MeshSnapshot = {
   /** Paired peers only: discovery alone never makes a peer sendable. */
   peers: Array<{ node_id: string; hostname: string; address?: string }>;
   active_locks: number;
-  /** The mailbox bound to the session that asked (null when unregistered). */
-  me: { name: string; role: string | null; unread: number } | null;
+  /** The session's hats: every mailbox bound to the asking session (empty when
+   * unregistered). Each carries its own unread count. */
+  hats: Array<{ name: string; role: string | null; unread: number }>;
   /** Every registered mailbox on this node, oldest first. */
   mailboxes: MailboxInfo[];
   /** pool id -> member mailbox names. */
@@ -31,7 +32,7 @@ export type SnapshotInput = {
   peers: ReadonlyArray<{ node_id: string; hostname: string; paired: boolean }>;
   locks: ReadonlyArray<unknown>;
   server: string;
-  my: { name: string; role: string | null; unread: number } | null;
+  hats: Array<{ name: string; role: string | null; unread: number }>;
   mailboxes: ReadonlyArray<MailboxInfo>;
   pools: Record<string, string[]>;
 };
@@ -44,7 +45,7 @@ export function snapshotFromMesh(data: SnapshotInput): MeshSnapshot {
       .filter((p) => p.paired)
       .map((p) => ({ node_id: p.node_id, hostname: p.hostname })),
     active_locks: data.locks.length,
-    me: data.my,
+    hats: [...data.hats],
     mailboxes: [...data.mailboxes],
     pools: { ...data.pools },
   };
@@ -92,13 +93,18 @@ export function peerLabel(peer: { node_id: string; hostname: string; address?: s
   return peer.address !== undefined ? `${id}@${peer.address}` : id;
 }
 
-/** Sidebar lines: my mailbox (unread first), one line per pool, peers, locks. */
+/** Sidebar lines: the session's hats (unread first), one line per pool, peers, locks. */
 export function formatMeshLines(s: MeshSnapshot): string[] {
   const lines: string[] = [];
-  if (s.me) {
-    const role = s.me.role ? ` (${s.me.role})` : "";
-    const unread = s.me.unread > 0 ? ` ● ${s.me.unread} unread` : "";
-    lines.push(`${s.me.name}${role}${unread}`);
+  if (s.hats.length > 0) {
+    const totalUnread = s.hats.reduce((sum, h) => sum + h.unread, 0);
+    const rendered = s.hats.map((h) => {
+      const role = h.role ? ` (${h.role})` : "";
+      const unread = h.unread > 0 ? ` ● ${h.unread}` : "";
+      return `${h.name}${role}${unread}`;
+    });
+    const prefix = totalUnread > 0 ? ` ● ${totalUnread} unread —` : "";
+    lines.push(`hats:${prefix} ${rendered.join(" · ")}`);
   } else {
     lines.push("no mailbox — mesh_register");
   }
@@ -121,16 +127,18 @@ export function formatMeshLines(s: MeshSnapshot): string[] {
 }
 
 /** Collapsed: header summary is rendered by the component; this returns the
- * counts it needs (unread, agents, pools) as one muted line. */
+ * counts it needs (unread, agents, pools, hosts) as one muted line. */
 export function formatMeshSidebar(s: MeshSnapshot, collapsed: boolean): string[] {
   if (!collapsed) {
     return formatMeshLines(s);
   }
-  const unread = s.me?.unread ?? 0;
+  const unread = s.hats.reduce((sum, h) => sum + h.unread, 0);
+  const hosts = 1 + s.peers.length;
   const parts: string[] = [];
   if (unread > 0) parts.push(`${unread} unread`);
   parts.push(`${s.mailboxes.length} agents`);
   parts.push(`${Object.keys(s.pools).length} pools`);
+  parts.push(`${hosts} hôte${hosts > 1 ? "s" : ""}`);
   return [parts.join(" · ")];
 }
 
@@ -164,16 +172,19 @@ export const MeshRpc = Rpc.define({
             description: "Paired peers",
           },
           active_locks: { type: "number", description: "Active local file locks" },
-          me: {
-            type: ["object", "null"],
-            properties: {
-              name: { type: "string" },
-              role: { type: ["string", "null"] },
-              unread: { type: "number" },
+          hats: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: {
+                name: { type: "string" },
+                role: { type: ["string", "null"] },
+                unread: { type: "number" },
+              },
+              required: ["name", "role", "unread"],
+              additionalProperties: false,
             },
-            required: ["name", "role", "unread"],
-            additionalProperties: false,
-            description: "The asking session's mailbox, null when unregistered",
+            description: "The asking session's mailboxes (multi-hat sessions own several)",
           },
           mailboxes: {
             type: "array",
@@ -196,7 +207,7 @@ export const MeshRpc = Rpc.define({
             description: "Pool id -> member mailbox names",
           },
         },
-        required: ["node_id", "hostname", "peers", "active_locks", "me", "mailboxes", "pools"],
+        required: ["node_id", "hostname", "peers", "active_locks", "hats", "mailboxes", "pools"],
         additionalProperties: false,
       },
     },

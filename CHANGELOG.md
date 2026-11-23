@@ -5,6 +5,23 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.11] - 2026-11-23
+
+### Fixed
+
+- **Per-tab panel**: the snapshot now exposes the asking session's hats —
+  every mailbox bound to that session, each with its own unread count —
+  instead of a single `me` mailbox. A multi-hat session (one tab owning
+  several agent boxes) sees all of its boxes; the collapsed sidebar shows
+  their total unread.
+
+### Changed
+
+- The collapsed header shows the full counters line — unread · agents ·
+  pools · hosts — reusing the sidebar summary instead of building a subset.
+- Hosts = 1 (this node) + paired peers: a lone node reads "1 hôte", one
+  paired peer "2 hôtes".
+
 ## [0.10.8] - 2026-11-23
 
 ### Fixed
