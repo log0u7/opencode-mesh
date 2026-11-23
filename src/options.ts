@@ -26,6 +26,11 @@ export type PluginOptions = {
   tls?: boolean;
   /** Open a documented plain-HTTP side channel on port+1 (default false). */
   insecureHttp?: boolean;
+  /** Push the local shareable-memory outbox to paired peers (default true).
+   * Reception of peers' pushes is always on: only the outbound loop is gated. */
+  memorySync?: boolean;
+  /** Outbox push cadence in minutes (default 15). 0 disables the push loop. */
+  memorySyncInterval?: number;
   worktreeClient?: WorktreeClient;
   spawnFn?: SpawnFn;
 };
@@ -114,6 +119,24 @@ export function parseOptions(raw: PluginOptions | undefined): PluginOptions {
       throw new Error("opencode-mesh: options.insecureHttp must be a boolean");
     }
     options.insecureHttp = raw.insecureHttp;
+  }
+  if (raw.memorySync !== undefined) {
+    if (typeof raw.memorySync !== "boolean") {
+      throw new Error("opencode-mesh: options.memorySync must be a boolean");
+    }
+    options.memorySync = raw.memorySync;
+  }
+  if (raw.memorySyncInterval !== undefined) {
+    if (
+      typeof raw.memorySyncInterval !== "number" ||
+      !Number.isInteger(raw.memorySyncInterval) ||
+      raw.memorySyncInterval < 0
+    ) {
+      throw new Error(
+        "opencode-mesh: options.memorySyncInterval must be a non-negative integer (minutes, 0 = off)",
+      );
+    }
+    options.memorySyncInterval = raw.memorySyncInterval;
   }
   // Opaque collaborators are passed through untouched: the plugin cannot
   // validate a client or spawn function beyond its nominal type.

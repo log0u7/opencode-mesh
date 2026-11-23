@@ -1,10 +1,13 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { MeshPlugin } from "../src/plugin.js";
+import { openMeshDb } from "../src/lib/db.js";
+import { loadOrCreateIdentity } from "../src/lib/identity.js";
+import { inboxDir, outboxFile, pushOutbox } from "../src/lib/memory-sync.js";
 
 let dir: string;
 
@@ -100,6 +103,88 @@ describe("e2e: two plugin instances", () => {
     const after = String(await a.tool?.mesh_inbox?.execute({}, ctx("s-a")));
     expect(after).toContain("empty");
 
+    await a.dispose?.();
+    await b.dispose?.();
+  });
+
+  it("pushes the shareable memory outbox over TLS into the peer's inbox", async () => {
+    const a = await MeshPlugin(input(), { dataDir: `${dir}/ma`, port: 0, advertise: false });
+    const b = await MeshPlugin(input(), { dataDir: `${dir}/mb`, port: 0, advertise: false });
+
+    // Pair both sides over TLS (default), as the operators would.
+    const offerA = String(await a.tool?.mesh_pair?.execute({}, ctx("s-a")));
+    const nodeIdA = /node_id="([^"]+)"/.exec(offerA)?.[1];
+    const tokenA = /token="([^"]+)"/.exec(offerA)?.[1];
+    const addressA = /address="([^"]+)"/.exec(addressPart(offerA))?.[1];
+    const pkA = /pk="([^"]+)"/.exec(addressPart(offerA))?.[1];
+    const offerB = String(await b.tool?.mesh_pair?.execute({}, ctx("s-b")));
+    const tokenB = /token="([^"]+)"/.exec(offerB)?.[1];
+    const nodeIdB = /node_id="([^"]+)"/.exec(offerB)?.[1];
+    const addressB = /address="([^"]+)"/.exec(addressPart(offerB))?.[1];
+    const pkB = /pk="([^"]+)"/.exec(addressPart(offerB))?.[1];
+    await b.tool?.mesh_pair?.execute(
+      { node_id: nodeIdA, token: tokenA, address: addressA, pk: pkA },
+      ctx("s-b"),
+    );
+    await a.tool?.mesh_pair?.execute(
+      { node_id: nodeIdB, token: tokenB, address: addressB, pk: pkB },
+      ctx("s-a"),
+    );
+
+    // The memory plugin's side of the contract: a fixture shareable export sits
+    // in A's outbox. The mesh must move those bytes to B's inbox, verbatim.
+    const outbox = [
+      JSON.stringify({
+        id: "mem-1",
+        scope: "/work/proj",
+        kind: "lesson",
+        title: "pin before push",
+        body: "always pin the peer key",
+        tags: [],
+        created_at: 1000,
+        updated_at: 1000,
+        expires_at: null,
+        source: "agent-a",
+        endorsed_by: ["agent-b"],
+      }),
+      JSON.stringify({
+        id: "mem-2",
+        scope: "/work/proj",
+        kind: "fact",
+        title: "second entry",
+        body: "travels too",
+        tags: [],
+        created_at: 2000,
+        updated_at: 2000,
+        expires_at: null,
+        source: "agent-a",
+        endorsed_by: ["agent-a"],
+      }),
+      "",
+    ].join("\n");
+    // The outbox tree belongs to the memory plugin's export; the fixture replicates it.
+    const outboxPath = outboxFile(`${dir}/ma`);
+    mkdirSync(dirname(outboxPath), { recursive: true });
+    writeFileSync(outboxPath, outbox);
+
+    const dbA = openMeshDb(`${dir}/ma/mesh.db`);
+    const identityA = loadOrCreateIdentity(`${dir}/ma`);
+    const state = { lastPushedMtimeMs: -1 };
+    const results = await pushOutbox({ dataDir: `${dir}/ma`, db: dbA, identity: identityA, state });
+    expect(results).toEqual([
+      { node_id: nodeIdB, outcome: "ok", bytes: Buffer.byteLength(outbox) },
+    ]);
+    expect(state.lastPushedMtimeMs).toBeGreaterThan(0);
+
+    // B received A's snapshot under the sender's node id, byte for byte.
+    expect(readFileSync(join(inboxDir(`${dir}/mb`), `${nodeIdA}.jsonl`), "utf8")).toBe(outbox);
+
+    // An unchanged outbox is not pushed again (the stamp mutes the loop).
+    expect(await pushOutbox({ dataDir: `${dir}/ma`, db: dbA, identity: identityA, state })).toEqual(
+      [],
+    );
+
+    dbA.close();
     await a.dispose?.();
     await b.dispose?.();
   });

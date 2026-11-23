@@ -77,6 +77,54 @@ export async function sendMail(target: SendTarget): Promise<SendResult> {
   }
 }
 
+// Push the local shareable-memory outbox to a peer's /memory-sync endpoint. The
+// body is opaque bytes (JSONL written by the opencode-memory plugin): the mesh
+// transports it, it never parses it. Sender identity and pairing proof travel in
+// headers (the payload must stay opaque), mirroring the mail fields they correspond
+// to: the first accepted push binds the pairing token on the peer, as the first
+// mail does. The sender header deliberately reads x-mesh-sender rather than the
+// mail field name: the static import audit scans dist for the keyword-from + quote
+// pattern, and a header ending in that word would forge a match.
+export async function pushMemorySync(target: {
+  url: string;
+  token: string;
+  from: string;
+  proof?: string;
+  tls?: boolean;
+  pk?: string;
+  body: string;
+}): Promise<SendResult> {
+  const headers = {
+    "content-type": "application/x-ndjson",
+    authorization: `Bearer ${target.token}`,
+    "x-mesh-sender": target.from,
+    ...(target.proof !== undefined ? { "x-mesh-proof": target.proof } : {}),
+  };
+  try {
+    const response = isTls(target)
+      ? await tlsRequest({
+          url: `${target.url}/memory-sync`,
+          ...(target.pk !== undefined ? { pk: target.pk } : {}),
+          method: "POST",
+          headers,
+          body: target.body,
+          timeoutMs: 10_000,
+        })
+      : await plainRequest(`${target.url}/memory-sync`, {
+          method: "POST",
+          headers,
+          body: target.body,
+          timeoutMs: 10_000,
+        });
+    if (response.status === 200) {
+      return "ok";
+    }
+    return response.status === 401 ? "unauthorized" : "error";
+  } catch {
+    return "unreachable";
+  }
+}
+
 // Fetch a peer's local pool map. Never throws: null = unreachable or error.
 export async function getPools(target: {
   url: string;
