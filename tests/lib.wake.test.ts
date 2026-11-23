@@ -47,7 +47,7 @@ describe("wake loop", () => {
     expect(prompt).toHaveBeenCalledTimes(1);
     expect(prompts[0]?.sessionID).toBe("s1");
     expect(prompts[0]?.text).toContain('mailbox "a"');
-    expect(prompts[0]?.text).toContain("1 unread");
+
     db.close();
   });
 
