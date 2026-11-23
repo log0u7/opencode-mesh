@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { openMeshDb } from "../src/lib/db.js";
 import type { NodeIdentity } from "../src/lib/identity.js";
-import { deliverMessage, inboxRows, registerMailbox } from "../src/lib/mail.js";
+import { deliverMessage, inboxRows, mailboxByName, registerMailbox } from "../src/lib/mail.js";
 import { buildToolSpecs, type MeshContext, type ToolSpec } from "../src/tools.js";
 
 function setup() {
@@ -38,6 +38,50 @@ describe("mesh_register", () => {
     expect(await call("mesh_register", { name: "" })).toMatch(/^error:/);
     expect(await call("mesh_register", { name: "a".repeat(65) })).toMatch(/^error:/);
     expect(await call("mesh_register", { name: "bad name!" })).toMatch(/^error:/);
+  });
+
+  it("stores the primary pool when it exists and reports it via mesh_status", async () => {
+    const { call } = setup();
+    // The pool exists once any box carries it: a first box joins, then the
+    // new box declares it primary.
+    await call("mesh_register", { name: "orchestrator" }, "s0");
+    await call("mesh_join", { pool: "team:infra" }, "s0");
+    expect(await call("mesh_register", { name: "alice", primary: "team:infra" }, "s1")).toBe(
+      "mailbox alice registered for this session",
+    );
+    const status = JSON.parse(await call("mesh_status")) as {
+      mailboxes: Array<{ name: string; primary?: string }>;
+    };
+    expect(status.mailboxes.find((m) => m.name === "alice")?.primary).toBe("team:infra");
+  });
+
+  it("rejects a primary pool that does not exist", async () => {
+    const { call } = setup();
+    await expect(call("mesh_register", { name: "alice", primary: "team:ghost" })).resolves.toMatch(
+      /^error: unknown pool team:ghost/,
+    );
+  });
+
+  it("without primary the box has none and mesh_status omits the field", async () => {
+    const { db, call } = setup();
+    await call("mesh_register", { name: "alice" }, "s1");
+    const status = JSON.parse(await call("mesh_status")) as {
+      mailboxes: Array<{ name: string; primary?: string }>;
+    };
+    expect(status.mailboxes.find((m) => m.name === "alice")?.primary).toBeUndefined();
+    expect(mailboxByName(db, "alice")?.primary_pool).toBeNull();
+  });
+
+  it("re-registering without primary keeps the declared one", async () => {
+    const { call } = setup();
+    await call("mesh_register", { name: "lead" }, "s0");
+    await call("mesh_join", { pool: "team:x" }, "s0");
+    await call("mesh_register", { name: "alice", primary: "team:x" }, "s1");
+    await call("mesh_register", { name: "alice", role: "new" }, "s1");
+    const status = JSON.parse(await call("mesh_status")) as {
+      mailboxes: Array<{ name: string; primary?: string }>;
+    };
+    expect(status.mailboxes.find((m) => m.name === "alice")?.primary).toBe("team:x");
   });
 });
 

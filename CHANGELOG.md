@@ -5,6 +5,27 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.0] - 2026-11-23
+
+### Added
+
+- **Primary group**: every mailbox can declare one primary group at enrollment
+  (`mesh_register(primary="team:x")`, validated against the pools that exist on
+  the node). The declaration is stored on the mailbox (`mailboxes.primary_pool`,
+  schema v8), reported by `mesh_status` (`primary=<pool>`) and carried in the
+  sidebar snapshot (`primary_pool`) for the panel to display. Usage convention:
+  the lead of the primary group receives the mailbox's enrollment confirmation,
+  falling back to the orchestrator; the human can dictate the primary at
+  enrollment. Declarative only — mail routing is unchanged.
+
+### Changed
+
+- **Collapsed sidebar header renders two lines**: the toggle line carries the
+  unread marker only (`▶ Mesh ● N unread`, nothing else on that line), the
+  counts move to their own line (`N agents · N pools · N hôte(s)`). Expanded
+  format is unchanged; with no snapshot the collapsed header is the bare
+  toggle line.
+
 ## [0.12.0] - 2026-11-23
 
 ### Added

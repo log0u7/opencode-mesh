@@ -83,7 +83,9 @@ export default Plugin.define({
         snapBySession.set(sid, snap);
         if (currentSession === sid) {
           setSnapshot(snap);
-          setLines(formatMeshSidebar(snap, store.collapsed));
+          // The body renders only when expanded: keep the expanded shape ready
+          // so toggling shows it without waiting for the next refresh.
+          setLines(formatMeshSidebar(snap, false));
         }
       } catch {
         if (currentSession === sid) setLines(null);
@@ -122,7 +124,9 @@ export default Plugin.define({
         }
         const unread = (snapshot()?.hats ?? []).reduce((s, h) => s + h.unread, 0);
         const snap = snapshot();
-        const summary = snap ? (formatMeshSidebar(snap, true)[0] ?? "") : "0 agents";
+        // Collapsed: two lines — toggle + unread marker, then the counts
+        // (formatMeshSidebar returns both). No snapshot: the bare toggle line.
+        const collapsedLines = snap ? formatMeshSidebar(snap, true) : null;
         return (
           <box gap={0}>
             <box flexDirection="row">
@@ -136,11 +140,16 @@ export default Plugin.define({
               >
                 <b>{store.collapsed ? "▶ Mesh" : "▼ Mesh"}</b>
               </text>
-              <Show when={store.collapsed}>
-                <text fg={theme.text.muted}>{` (${summary})`}</text>
+              <Show when={store.collapsed && unread > 0}>
+                <text fg={theme.text.base}>{` ● ${unread} unread`}</text>
               </Show>
             </box>
-            <box gap={0}>{themedBody(theme, lines, unread)}</box>
+            <Show when={store.collapsed ? collapsedLines : null} keyed>
+              {(collapsed) => <text fg={theme.text.muted}>{collapsed[1]}</text>}
+            </Show>
+            <Show when={!store.collapsed}>
+              <box gap={0}>{themedBody(theme, lines, unread)}</box>
+            </Show>
           </box>
         );
       },

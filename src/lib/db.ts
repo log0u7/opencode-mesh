@@ -10,7 +10,7 @@ export type MeshDb = {
 
 // Bump when a schema change needs a migration step; the version anchors future
 // migrations that cannot be expressed as idempotent `CREATE ... IF NOT EXISTS`.
-const SCHEMA_VERSION = 7;
+const SCHEMA_VERSION = 8;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS peers (
@@ -41,6 +41,7 @@ CREATE TABLE IF NOT EXISTS mailboxes (
   role TEXT,
   pools TEXT NOT NULL DEFAULT '[]',
   bind_key TEXT,
+  primary_pool TEXT,
   last_seen INTEGER NOT NULL,
   created_at INTEGER NOT NULL
 );
@@ -143,6 +144,15 @@ function migrate(conn: SqliteConn): void {
     conn.exec("DROP TABLE mailboxes");
     conn.exec("ALTER TABLE mailboxes_new RENAME TO mailboxes");
     conn.exec("CREATE INDEX IF NOT EXISTS idx_mailboxes_session ON mailboxes(session_id)");
+  }
+  // v8: mailboxes.primary_pool — the box's declared primary group; the lead of
+  // that pool receives its enrollment confirmation. Checked AFTER the v6
+  // rebuild above: a rebuilt table carries only the pre-v6 columns.
+  const mailboxColumnsLive = conn
+    .all<{ name: string }>("PRAGMA table_info(mailboxes)")
+    .map((row) => row.name);
+  if (!mailboxColumnsLive.includes("primary_pool")) {
+    conn.exec("ALTER TABLE mailboxes ADD COLUMN primary_pool TEXT");
   }
   conn.exec(INDEXES_V3);
   conn.exec("CREATE INDEX IF NOT EXISTS idx_messages_origin ON messages(origin_id);");
