@@ -15,6 +15,7 @@ export type Mailbox = {
   role: string | null;
   pools: string[];
   bind_key: string | null;
+  primary_pool: string | null;
   last_seen: number;
 };
 
@@ -22,6 +23,9 @@ export type RegisterMailboxInput = {
   name: string;
   session_id: string;
   role?: string | null;
+  /** Declared primary group (pool id): its lead receives this box's
+   * enrollment confirmation. Declarative only — mail routing is unchanged. */
+  primary_pool?: string | null;
   /** Instance binding: the registering instance's project key. A later bind
    * from an instance with the same key re-binds the box to its live session. */
   bind_key?: string | null;
@@ -78,6 +82,7 @@ function rowToMailbox(row: MailboxRow): Mailbox {
     role: row.role ?? null,
     pools: parsePools(row.pools),
     bind_key: row.bind_key ?? null,
+    primary_pool: row.primary_pool ?? null,
     last_seen: row.last_seen,
   };
 }
@@ -88,6 +93,7 @@ type MailboxRow = {
   role: string | null;
   pools: string;
   bind_key: string | null;
+  primary_pool: string | null;
   last_seen: number;
   created_at: number;
 };
@@ -108,18 +114,22 @@ type MessageRow = {
 export function registerMailbox(db: MeshDb, input: RegisterMailboxInput): Mailbox {
   // A session may own SEVERAL mailboxes (one TUI, several agent hats).
   // Re-registering an existing name rebinds it to this session (handoff).
+  // A re-register without a primary keeps the declared one (identity trait,
+  // same lifetime as bind_key).
   db.conn.run(
-    `INSERT INTO mailboxes (name, session_id, role, pools, bind_key, last_seen, created_at)
-     VALUES (?, ?, ?, '[]', ?, ?, ?)
+    `INSERT INTO mailboxes (name, session_id, role, pools, bind_key, primary_pool, last_seen, created_at)
+     VALUES (?, ?, ?, '[]', ?, ?, ?, ?)
      ON CONFLICT(name) DO UPDATE SET session_id = excluded.session_id,
        role = excluded.role,
        bind_key = COALESCE(excluded.bind_key, mailboxes.bind_key),
+       primary_pool = COALESCE(excluded.primary_pool, mailboxes.primary_pool),
        last_seen = excluded.last_seen`,
     [
       input.name,
       input.session_id,
       input.role ?? null,
       input.bind_key ?? null,
+      input.primary_pool ?? null,
       input.now,
       input.now,
     ],
@@ -160,6 +170,12 @@ export function listMailboxes(db: MeshDb): Mailbox[] {
   return db.conn
     .all<MailboxRow>("SELECT * FROM mailboxes ORDER BY created_at ASC")
     .map(rowToMailbox);
+}
+
+/** A pool exists when any mailbox on this node carries it: pools are derived
+ * from membership, there is no dedicated table. */
+export function poolExists(db: MeshDb, pool: string): boolean {
+  return listMailboxes(db).some((b) => b.pools.includes(pool));
 }
 
 export function touchMailbox(db: MeshDb, session_id: string, now: number): void {

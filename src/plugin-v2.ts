@@ -232,6 +232,7 @@ export const MeshV2 = Plugin.define({
             name: box.name,
             role: box.role,
             pools: [...box.pools],
+            primary_pool: box.primary_pool,
             age_s: Math.max(0, Math.round((Date.now() - box.last_seen) / 1000)),
           })),
           pools,

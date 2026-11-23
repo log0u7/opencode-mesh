@@ -76,6 +76,20 @@ describe("mailbox registration", () => {
     expect(mailboxByName(d, "a")?.pools).toEqual(["team:x"]);
     d.close();
   });
+
+  it("stores the declared primary pool, null when absent, kept across a handoff", () => {
+    const d = db();
+    registerMailbox(d, { name: "a", session_id: "s1", now: 1000 });
+    expect(mailboxByName(d, "a")?.primary_pool).toBeNull();
+
+    registerMailbox(d, { name: "b", session_id: "s1", primary_pool: "team:x", now: 1000 });
+    expect(mailboxByName(d, "b")?.primary_pool).toBe("team:x");
+
+    // Handoff (re-register without a primary) preserves the declaration.
+    registerMailbox(d, { name: "b", session_id: "s2", now: 2000 });
+    expect(mailboxByName(d, "b")?.primary_pool).toBe("team:x");
+    d.close();
+  });
 });
 
 describe("targeted delivery", () => {
@@ -278,6 +292,7 @@ describe("presence and purge", () => {
         role: "manager",
         pools: ["team:x"],
         bind_key: null,
+        primary_pool: null,
         last_seen: 1000,
       },
     ]);

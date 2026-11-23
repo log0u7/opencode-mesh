@@ -8,6 +8,8 @@ export type MailboxInfo = {
   name: string;
   role: string | null;
   pools: string[];
+  /** Declared primary group (pool id), when the box declared one. */
+  primary_pool?: string | null;
   age_s: number;
 };
 
@@ -126,20 +128,19 @@ export function formatMeshLines(s: MeshSnapshot): string[] {
   return lines;
 }
 
-/** Collapsed: header summary is rendered by the component; this returns the
- * counts it needs (unread, agents, pools, hosts) as one muted line. */
+/** Collapsed: two lines. Line 1 is the toggle line — the TUI renders the
+ * ▶/▼ prefix itself, so this returns `Mesh` plus the unread marker only.
+ * Line 2 carries the counts (agents, pools, hosts). */
 export function formatMeshSidebar(s: MeshSnapshot, collapsed: boolean): string[] {
   if (!collapsed) {
     return formatMeshLines(s);
   }
   const unread = s.hats.reduce((sum, h) => sum + h.unread, 0);
   const hosts = 1 + s.peers.length;
-  const parts: string[] = [];
-  if (unread > 0) parts.push(`${unread} unread`);
-  parts.push(`${s.mailboxes.length} agents`);
-  parts.push(`${Object.keys(s.pools).length} pools`);
-  parts.push(`${hosts} hôte${hosts > 1 ? "s" : ""}`);
-  return [parts.join(" · ")];
+  return [
+    unread > 0 ? `Mesh ● ${unread} unread` : "Mesh",
+    `${s.mailboxes.length} agents · ${Object.keys(s.pools).length} pools · ${hosts} hôte${hosts > 1 ? "s" : ""}`,
+  ];
 }
 
 export const MeshRpc = Rpc.define({
@@ -194,6 +195,10 @@ export const MeshRpc = Rpc.define({
                 name: { type: "string" },
                 role: { type: ["string", "null"] },
                 pools: { type: "array", items: { type: "string" } },
+                primary_pool: {
+                  type: ["string", "null"],
+                  description: "Declared primary group (pool id)",
+                },
                 age_s: { type: "number" },
               },
               required: ["name", "role", "pools", "age_s"],

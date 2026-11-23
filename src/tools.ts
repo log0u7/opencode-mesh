@@ -19,6 +19,7 @@ import {
   mailboxesBySession,
   mailboxByName,
   mailboxBySession,
+  poolExists,
   registerMailbox,
   touchMailbox,
   unreadCount,
@@ -150,6 +151,7 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
               name: b.name,
               role: b.role,
               pools: b.pools,
+              ...(b.primary_pool ? { primary: b.primary_pool } : {}),
               last_seen: b.last_seen,
               age_s: Math.round((now - b.last_seen) / 1000),
             })),
@@ -295,15 +297,24 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
     {
       name: "mesh_register",
       description:
-        "Register this session's mailbox under a name so other sessions and pools can route mail to it.",
+        "Register this session's mailbox under a name so other sessions and pools can route mail to it. primary: your primary group (pool id) — its lead receives your enrollment confirmation; falls back to the orchestrator",
       fields: [
         str("name", "Mailbox name: letters, digits, . _ - (max 64 chars)"),
         str("role", "Informational role, e.g. manager", false),
+        str(
+          "primary",
+          "Pool id of your primary group, e.g. team:infra (must exist; declarative, no routing change)",
+          false,
+        ),
       ],
       execute: async (args, context) => {
         const name = String(args.name);
         if (!/^[A-Za-z0-9._-]{1,64}$/.test(name)) {
           return "error: mailbox name must be 1-64 chars of letters, digits, . _ -";
+        }
+        const primary = typeof args.primary === "string" ? args.primary : "";
+        if (primary.length > 0 && !poolExists(db, primary)) {
+          return `error: unknown pool ${primary} — join it first (mesh_join) or drop the primary argument`;
         }
         const sid = sessionID(context);
         if (sid.length === 0) {
@@ -313,6 +324,7 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
           name,
           session_id: sid,
           ...(typeof args.role === "string" && args.role.length > 0 ? { role: args.role } : {}),
+          ...(primary.length > 0 ? { primary_pool: primary } : {}),
           bind_key: bindKey,
           now: Date.now(),
         });

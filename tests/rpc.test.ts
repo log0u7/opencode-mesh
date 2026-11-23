@@ -22,7 +22,13 @@ function snapshot() {
       { name: "orchestrator", role: null, unread: 1 },
     ],
     mailboxes: [
-      { name: "purser", role: "lead", pools: ["team:purser"], age_s: 5 },
+      {
+        name: "purser",
+        role: "lead",
+        pools: ["team:purser"],
+        age_s: 5,
+        primary_pool: "team:purser",
+      },
       { name: "6admin", role: "lead", pools: ["team:infra", "team:quartermaster"], age_s: 100 },
       { name: "k8s-oci", role: "pair", pools: ["team:infra"], age_s: 540 },
       { name: "theforeman", role: "lead", pools: ["team:foreman"], age_s: 3600 },
@@ -46,6 +52,7 @@ describe("snapshotFromMesh", () => {
       { name: "orchestrator", role: null, unread: 1 },
     ]);
     expect(s.mailboxes).toHaveLength(4);
+    expect(s.mailboxes[0]?.primary_pool).toBe("team:purser");
     expect(s.pools["team:infra"]).toEqual(["6admin", "k8s-oci"]);
   });
 });
@@ -113,21 +120,22 @@ describe("formatMeshSidebar", () => {
     expect(lines[0]).toBe("hats: ● 3 unread — purser (lead) ● 2 · orchestrator ● 1");
   });
 
-  it("collapses to one summary line led by unread, ending with the host count", () => {
+  it("collapses to two lines: the toggle line (unread marker only), then the counts", () => {
     expect(formatMeshSidebar(snapshot(), true)).toEqual([
-      "3 unread · 4 agents · 3 pools · 2 hôtes",
+      "Mesh ● 3 unread",
+      "4 agents · 3 pools · 2 hôtes",
     ]);
   });
 
   it("counts hosts as self plus paired peers only", () => {
     const s = snapshot();
     s.peers = [];
-    expect(formatMeshSidebar(s, true)).toEqual(["3 unread · 4 agents · 3 pools · 1 hôte"]);
+    expect(formatMeshSidebar(s, true)).toEqual(["Mesh ● 3 unread", "4 agents · 3 pools · 1 hôte"]);
   });
 
-  it("collapsed without unread shows agents, pools and hosts only", () => {
+  it("collapsed without unread shows a bare toggle line, then agents, pools and hosts", () => {
     const s = snapshot();
     s.hats = s.hats.map((h) => ({ ...h, unread: 0 }));
-    expect(formatMeshSidebar(s, true)).toEqual(["4 agents · 3 pools · 2 hôtes"]);
+    expect(formatMeshSidebar(s, true)).toEqual(["Mesh", "4 agents · 3 pools · 2 hôtes"]);
   });
 });

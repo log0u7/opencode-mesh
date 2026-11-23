@@ -64,7 +64,7 @@ describe("mesh database schema", () => {
       legacy.close();
 
       const db = openMeshDb(file);
-      expect(db.conn.get<{ user_version: number }>("PRAGMA user_version")?.user_version).toBe(7);
+      expect(db.conn.get<{ user_version: number }>("PRAGMA user_version")?.user_version).toBe(8);
       const names = db.conn
         .all<{ name: string }>("SELECT name FROM sqlite_master WHERE type = 'index'")
         .map((row) => row.name);
@@ -89,7 +89,7 @@ describe("mesh database schema", () => {
       v1.close();
 
       const db = openMeshDb(file);
-      expect(db.conn.get<{ user_version: number }>("PRAGMA user_version")?.user_version).toBe(7);
+      expect(db.conn.get<{ user_version: number }>("PRAGMA user_version")?.user_version).toBe(8);
       const columns = db.conn
         .all<{ name: string }>("PRAGMA table_info(peers)")
         .map((row) => row.name);
@@ -101,9 +101,38 @@ describe("mesh database schema", () => {
       // migration pass, no version churn.
       const reopened = openMeshDb(file);
       expect(reopened.conn.get<{ user_version: number }>("PRAGMA user_version")?.user_version).toBe(
-        7,
+        8,
       );
       reopened.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // v6 rebuilds the mailboxes table (UNIQUE(session_id) drop); the later
+  // primary_pool ALTER must survive that rebuild — a pre-v6 database carries
+  // no such column and the rebuilt table would silently lose it.
+  it("adds primary_pool to a UNIQUE-constrained mailboxes table rebuilt from pre-v6", () => {
+    const dir = mkdtempSync(join(tmpdir(), "opencode-mesh-db-"));
+    const file = join(dir, "v6.db");
+    try {
+      const v6 = openSqlite(file);
+      v6.exec(`
+        CREATE TABLE mailboxes (name TEXT PRIMARY KEY, session_id TEXT NOT NULL UNIQUE, role TEXT,
+          pools TEXT NOT NULL DEFAULT '[]', bind_key TEXT, last_seen INTEGER NOT NULL, created_at INTEGER NOT NULL);
+        INSERT INTO mailboxes (name, session_id, role, pools, bind_key, last_seen, created_at)
+          VALUES ('alice', 's1', NULL, '[]', NULL, 1, 1);
+        PRAGMA user_version = 6;
+      `);
+      v6.close();
+
+      const db = openMeshDb(file);
+      const columns = db.conn
+        .all<{ name: string }>("PRAGMA table_info(mailboxes)")
+        .map((row) => row.name);
+      expect(columns).toContain("primary_pool");
+      expect(db.conn.get<{ name: string }>("SELECT name FROM mailboxes")?.name).toBe("alice");
+      db.close();
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
