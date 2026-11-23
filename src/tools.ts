@@ -101,6 +101,13 @@ function defaultBoxName(db: MeshDb, sessionID: string): string | null {
   return [...boxes].sort((a, b) => b.last_seen - a.last_seen)[0]?.name ?? null;
 }
 
+/** Resolve the sending/joining box: the named one, or the session's most
+ * recently touched box (the natural default after a mesh_register). */
+function resolveBox(db: MeshDb, sessionID: string, boxArg?: string): string | null {
+  if (boxArg !== undefined && boxArg.length > 0) return boxArg;
+  return defaultBoxName(db, sessionID);
+}
+
 function peerLabelShort(nodeId: string, hostname?: string | null): string {
   const host =
     hostname !== null && hostname !== undefined && hostname.length > 0 ? hostname : nodeId;
@@ -492,10 +499,12 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
         str("box", "Which of YOUR mailboxes joins (multi-box sessions)", false),
       ],
       execute: async (args, context) => {
-        const box =
-          typeof args.box === "string" && args.box.length > 0
-            ? mailboxByName(db, args.box)
-            : mailboxByName(db, defaultBoxName(db, sessionID(context)) ?? "");
+        const boxName = resolveBox(
+          db,
+          sessionID(context),
+          typeof args.box === "string" ? args.box : undefined,
+        );
+        const box = mailboxByName(db, boxName ?? "");
         if (!box) {
           return "error: run mesh_register first";
         }
@@ -513,10 +522,12 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
         str("box", "Which of YOUR mailboxes leaves (multi-box sessions)", false),
       ],
       execute: async (args, context) => {
-        const box =
-          typeof args.box === "string" && args.box.length > 0
-            ? mailboxByName(db, args.box)
-            : mailboxByName(db, defaultBoxName(db, sessionID(context)) ?? "");
+        const boxName = resolveBox(
+          db,
+          sessionID(context),
+          typeof args.box === "string" ? args.box : undefined,
+        );
+        const box = mailboxByName(db, boxName ?? "");
         if (!box) {
           return "error: run mesh_register first";
         }

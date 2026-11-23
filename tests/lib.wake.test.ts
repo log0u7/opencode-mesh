@@ -191,3 +191,51 @@ describe("wake loop", () => {
     db.close();
   });
 });
+
+describe("fatigue guard", () => {
+  it("stops prompting after MAX_UNDRAINED_PROMPTS cycles without drain", async () => {
+    const { db, prompt, prompts } = setup(["s1"]);
+    registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
+    deliverMessage(db, { from: "n", to_box: "a", subject: "s", body: "b", created_at: 1000 });
+    const handle = startWakeLoop({
+      db,
+      prompt,
+      sessionKnown: () => true,
+      intervalMs: 10,
+      cooldownMs: 0,
+      maxUndrainedPrompts: 3,
+    });
+    await new Promise((r) => setTimeout(r, 120));
+    handle.stop();
+
+    // Prompted exactly 3 times, then gave up (count never drained).
+    expect(prompts.length).toBe(3);
+    db.close();
+  });
+
+  it("resets the fatigue counter when the box gets drained", async () => {
+    const { db, prompt, prompts } = setup(["s1"]);
+    registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
+    const handle = startWakeLoop({
+      db,
+      prompt,
+      sessionKnown: () => true,
+      intervalMs: 10,
+      cooldownMs: 0,
+      maxUndrainedPrompts: 2,
+    });
+    // Cycle 1: mail → prompt (undrained 1).
+    deliverMessage(db, { from: "n", to_box: "a", subject: "s1", body: "b", created_at: 1000 });
+    await new Promise((r) => setTimeout(r, 40));
+    // Drain everything (the agent acked) → the fatigue counter resets.
+    db.conn.run("UPDATE deliveries SET status = 'read' WHERE to_box = 'a'");
+    await new Promise((r) => setTimeout(r, 30));
+    // Cycle 2: fresh mail → prompts again (the counter was reset).
+    deliverMessage(db, { from: "n", to_box: "a", subject: "s2", body: "b", created_at: 2000 });
+    await new Promise((r) => setTimeout(r, 40));
+    handle.stop();
+
+    expect(prompts.length).toBeGreaterThanOrEqual(2);
+    db.close();
+  });
+});

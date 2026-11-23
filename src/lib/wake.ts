@@ -29,6 +29,8 @@ export type WakeOptions = {
   intervalMs?: number;
   /** Minimum delay between two consecutive wake prompts per mailbox. Default 60000. */
   cooldownMs?: number;
+  /** Consecutive undrained prompts before giving up on a box. Default 3. */
+  maxUndrainedPrompts?: number;
 };
 
 export type WakeHandle = {
@@ -37,6 +39,10 @@ export type WakeHandle = {
 
 export const DEFAULT_WAKE_INTERVAL_MS = 5000;
 export const DEFAULT_WAKE_COOLDOWN_MS = 60000;
+/** Consecutive prompts without the box being drained before the wake gives
+ * up on it: the binding is wrong (the bound session never reads this box) —
+ * re-register in the owning session's tab. */
+export const MAX_UNDRAINED_PROMPTS = 3;
 
 export function startWakeLoop(options: WakeOptions): WakeHandle {
   const interval = options.intervalMs ?? DEFAULT_WAKE_INTERVAL_MS;
@@ -45,6 +51,7 @@ export function startWakeLoop(options: WakeOptions): WakeHandle {
   }
   const lastPromptAt = new Map<string, number>();
   const lastUnread = new Map<string, number>();
+  const undrained = new Map<string, number>();
   let stopped = false;
 
   const tick = async (): Promise<void> => {
@@ -56,9 +63,21 @@ export function startWakeLoop(options: WakeOptions): WakeHandle {
         const previous = lastUnread.get(box.name) ?? 0;
         if (unread === 0) {
           lastUnread.delete(box.name);
+          undrained.delete(box.name);
           continue;
         }
         lastUnread.set(box.name, unread);
+        // Drained since the last prompt → the fatigue counter resets.
+        if (unread < previous) {
+          undrained.delete(box.name);
+        }
+        const cycles = undrained.get(box.name) ?? 0;
+        // Fatigue guard: prompted MAX times, never drained, count unchanged
+        // → the binding is wrong (the bound session never reads this box).
+        // Stop prompting; the orphaned box surfaces in host diagnostics.
+        if (unread <= previous && cycles >= MAX_UNDRAINED_PROMPTS) {
+          continue;
+        }
         // Prompt only on new mail (count grew) and outside the per-mailbox
         // cooldown, so an agent idle in front of unread mail is reminded,
         // not spammed.
@@ -84,6 +103,7 @@ export function startWakeLoop(options: WakeOptions): WakeHandle {
           continue;
         }
         lastPromptAt.set(box.name, now);
+        undrained.set(box.name, cycles + 1);
         await options.prompt(
           box.session_id,
           `mesh: ${unread} unread message(s) for mailbox "${box.name}". Run mesh_inbox to read them.`,
