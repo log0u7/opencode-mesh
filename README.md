@@ -68,7 +68,7 @@ Restart OpenCode. The package is installed automatically at startup into opencod
 
 ```json
 {
-  "plugin": ["@log0u7/opencode-mesh@0.18.1"]
+  "plugin": ["@log0u7/opencode-mesh@0.19.0"]
 }
 ```
 

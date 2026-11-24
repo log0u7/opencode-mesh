@@ -310,13 +310,13 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
     {
       name: "mesh_register",
       description:
-        "Register this session's mailbox under a name so other sessions and pools can route mail to it. primary: your primary group (pool id) — its lead receives your enrollment confirmation; falls back to the orchestrator",
+        "Register this session's mailbox under a name so other sessions and pools can route mail to it. primary: your primary group (pool id) — joined automatically if you have not joined it yet; its lead receives your enrollment confirmation",
       fields: [
         str("name", "Mailbox name: letters, digits, . _ - (max 64 chars)"),
         str("role", "Informational role, e.g. manager", false),
         str(
           "primary",
-          "Pool id of your primary group, e.g. team:infra (must exist; declarative, no routing change)",
+          "Pool id of your primary group, e.g. team:infra (must exist; auto-joins if not joined yet)",
           false,
         ),
       ],
@@ -341,6 +341,9 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
           bind_key: bindKey,
           now: Date.now(),
         });
+        // A declared primary that the box has not joined yet is joined here:
+        // one call settles the box, the role and the primary group (idempotent).
+        if (primary.length > 0) joinPool(db, name, primary);
         return `mailbox ${name} registered for this session`;
       },
     },

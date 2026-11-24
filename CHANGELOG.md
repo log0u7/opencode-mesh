@@ -5,6 +5,17 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.19.0] - 2026-11-23
+
+### Changed
+
+- **`mesh_register(primary=X)` auto-joins X** — one natural enrollment call
+  instead of register-then-join-then-reregister: a declared primary the box
+  has not joined yet is joined at registration (pool membership was previously
+  left untouched, so the box declared a primary it was not a member of). A
+  nonexistent pool is still refused. Re-registering without `primary` still
+  keeps the declared one.
+
 ## [0.18.1] - 2026-11-23
 
 ### Fixed
