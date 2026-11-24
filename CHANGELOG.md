@@ -5,6 +5,45 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.21.0] - 2026-11-24
+
+### Added
+
+- **Host capabilities** — `mesh_status` carries a `capa` snapshot: cpu cores +
+  1-minute load average, RAM total/used, GPU VRAM (model + total/used MB) when
+  `nvidia-smi` answers on the machine, workers in flight (`mesh_workers`
+  `running` rows) and sessions mid-turn (the plugin's `session.execution.*`
+  tracking). One 60 s cache shared by every reader — `mesh_status`, the
+  `/status` endpoint and the TUI RPC snapshot — so a poll never doubles the
+  probes; a CPU-only machine (or a missing/timeouted `nvidia-smi`) simply
+  leaves the `gpu` field out, like the address providers do.
+- **`GET /metrics`** — Prometheus text format (`text/plain; version=1.0.0`),
+  the lingua franca VictoriaMetrics ingests natively:
+  `opencode_mesh_cpu_load_avg`, `opencode_mesh_ram_used_mb`,
+  `opencode_mesh_ram_total_mb`, `opencode_mesh_gpu_vram_used_mb` (when the
+  capa snapshot carries a GPU), `opencode_mesh_workers_in_flight`,
+  `opencode_mesh_sessions_running`, `opencode_mesh_messages_total`,
+  `opencode_mesh_deliveries_unread`. Same bearer-token auth as `/status`
+  (Prometheus sends the `Authorization` header natively); the scrape reads the
+  same shared capa cache, zero extra subprocesses.
+
+### Fixed
+
+- **Wake tick reads the database in one statement** — the tick used to run
+  two SQLite queries per mailbox (unread count + wake gate) plus one more at
+  prompt time (preview subject): N boxes cost 3N reads every 5 s. The three
+  per-box reads are regrouped into one grouped query (`wakeBoxStats`, JOIN +
+  CASE + correlated subject subselect) with identical gating semantics
+  (deliberate `wake` flag, direct-mail origin check, oldest-subject preview).
+
+### Changed
+
+- **Tool description diet (−28 %)** — every tool and argument description in
+  the shared v1/v2 spec compressed (3636 → 2623 chars); the contracts stay:
+  pairing flows, wake semantics, defaults, formats, error behaviors are all
+  still stated. Descriptions must not lie: nothing was dropped that the code
+  does not honor.
+
 ## [0.20.0] - 2026-11-24
 
 ### Added

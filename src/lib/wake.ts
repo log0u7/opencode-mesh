@@ -1,5 +1,5 @@
 import type { MeshDb } from "./db.js";
-import { firstPendingSubject, hasWakeableUnread, listMailboxes, unreadBoxCount } from "./mail.js";
+import { listMailboxes, wakeBoxStats } from "./mail.js";
 
 // Wake loop: polls every registered mailbox in the shared local database and,
 // when unread mail appears in a box whose session lives on THIS host, injects
@@ -77,21 +77,27 @@ export function startWakeLoop(options: WakeOptions): WakeHandle {
     ticking = true;
     try {
       const now = Date.now();
+      // One grouped read for the whole host (0.21.0): per-box unread count,
+      // wake gate and preview subject used to cost two queries per mailbox
+      // plus one at prompt time. Boxes without unread deliveries are absent
+      // from the result — their fatigue maps are cleared below like before.
+      const statsByName = new Map(wakeBoxStats(options.db).map((s) => [s.box, s]));
       for (const box of listMailboxes(options.db)) {
-        const unread = unreadBoxCount(options.db, box.name);
+        const stat = statsByName.get(box.name);
         const previous = lastUnread.get(box.name) ?? 0;
-        if (unread === 0) {
+        if (stat === undefined || stat.unread === 0) {
           lastUnread.delete(box.name);
           undrained.delete(box.name);
           continue;
         }
+        const unread = stat.unread;
         // Pool gate (Slack model, 0.17.0): a box wakes only for mail meant to
         // interrupt it — a direct mail (one recipient), or any pending mail
         // the sender flagged wake=1 (deliberate broadcast). A pool broadcast
         // without the flag (fanouted or local multi-recipient) never wakes;
         // wakePools is the operator-wide override. The box looks empty to the
         // loop until a wakeable mail lands — one prompt then drains all.
-        if (!wakePools && !hasWakeableUnread(options.db, box.name)) {
+        if (!wakePools && !stat.wakeable) {
           continue;
         }
         lastUnread.set(box.name, unread);
@@ -135,12 +141,12 @@ export function startWakeLoop(options: WakeOptions): WakeHandle {
         // Dispose during this tick (stop() below the running interval): the
         // prompt would fire into a torn-down host binding.
         if (stopped) return;
-        // The unread count is read from this process' database right here,
-        // one line above the prompt: never an inherited or cached state.
-        // Compact notification (0.16.0): count + first pending subject,
-        // truncated to 60 chars — the message stays self-carrier, the agent
-        // knows mesh_inbox from its standing guidance.
-        const subject = firstPendingSubject(options.db, box.name);
+        // The unread count comes from this process' database, read one line
+        // above the prompt: never an inherited or cached state. Compact
+        // notification (0.16.0): count + first pending subject, truncated to
+        // 60 chars — the message stays self-carrier, the agent knows
+        // mesh_inbox from its standing guidance.
+        const subject = stat.subject;
         const preview =
           subject === null ? "" : subject.length > 60 ? `${subject.slice(0, 59)}…` : subject;
         await options.prompt(

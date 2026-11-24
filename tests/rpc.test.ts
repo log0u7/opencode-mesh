@@ -41,6 +41,31 @@ function snapshot() {
   });
 }
 
+describe("snapshotFromMesh capa", () => {
+  it("passes the host capabilities through and omits them when absent", () => {
+    const base = {
+      identity: { node_id: "n1", hostname: "h" },
+      peers: [],
+      locks: [],
+      server: "127.0.0.1:4399",
+      hats: [],
+      mailboxes: [],
+      pools: {},
+    };
+    const withCapa = snapshotFromMesh({
+      ...base,
+      capa: {
+        cpu: { cores: 4, loadAvg: 0 },
+        ram: { totalMb: 16000, usedMb: 0 },
+        workersInFlight: 0,
+        sessionsRunning: 0,
+      },
+    });
+    expect(withCapa.capa?.cpu.cores).toBe(4);
+    expect("capa" in snapshotFromMesh(base)).toBe(false);
+  });
+});
+
 describe("snapshotFromMesh", () => {
   it("keeps paired peers only, counts locks, passes org data through", () => {
     const s = snapshot();

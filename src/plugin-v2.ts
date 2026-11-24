@@ -23,6 +23,7 @@ import { nodeTlsMaterial } from "./lib/tls.js";
 import { startMemorySyncPusher } from "./lib/memory-sync.js";
 import { createDurableStore } from "./lib/persist.js";
 import { createFanout } from "./lib/fanout.js";
+import { createHostCapa } from "./lib/capa.js";
 import { startWakeLoop } from "./lib/wake.js";
 import { startSessionLister } from "./lib/sessions.js";
 import { MESH_GUIDANCE } from "./lib/guidance.js";
@@ -60,6 +61,16 @@ export const MeshV2 = Plugin.define({
     // (relayed broadcasts arriving from peers).
     const fanout = createFanout({ db, identity });
 
+    // Sessions currently mid-turn, tracked from the host's durable execution
+    // events: a queued wake prompt would fire with a stale unread count after
+    // the turn acked the mail (the orchestrator's "false positives"). Declared
+    // before the server starts: /status and /metrics may be scraped as soon as
+    // the listener binds, and the capa provider reads running.size.
+    const running = new Set<string>();
+    // Host capabilities: ONE 60 s cache shared by mesh_status, /status and
+    // /metrics (a scrape never doubles the probes).
+    const hostCapa = createHostCapa({ db, sessionsRunning: () => running.size });
+
     // TLS material is derived from the node identity: the cert presents the
     // very key peers already pin, so TLS adds zero new trust.
     const tlsMaterial = nodeTlsMaterial(dataDir);
@@ -70,6 +81,7 @@ export const MeshV2 = Plugin.define({
       fanout,
       self: { node_id: identity.node_id, pk: identity.public_key, hostname: identity.hostname },
       tlsMaterial,
+      capa: hostCapa.get,
       ...(options.tls === false ? { tls: false } : {}),
       ...(options.insecureHttp === true ? { insecureHttp: true } : {}),
       dataDir,
@@ -151,6 +163,7 @@ export const MeshV2 = Plugin.define({
         worktreeClient,
         spawnFn,
         addressing: addressingOptions(options),
+        capa: hostCapa.get,
       })) {
         editor.add({
           name: spec.name,
@@ -175,10 +188,6 @@ export const MeshV2 = Plugin.define({
     // Session records outlive their process — ctx.session.get would call a
     // dead pre-restart session "alive".
     const sessionsSeen = new Set<string>();
-    // Sessions currently mid-turn, tracked from the host's durable execution
-    // events: a queued wake prompt would fire with a stale unread count after
-    // the turn acked the mail (the orchestrator's "false positives").
-    const running = new Set<string>();
     const trackExecutions = async () => {
       try {
         for await (const event of ctx.event.subscribe()) {
@@ -253,8 +262,10 @@ export const MeshV2 = Plugin.define({
             pools[pool] = members;
           }
         }
+        const capa = await hostCapa.get().catch(() => undefined);
         return snapshotFromMesh({
           identity,
+          ...(capa !== undefined ? { capa } : {}),
           peers: listPeers(db),
           locks: listLocks(db, { now: Date.now() }),
           server: `${address}:${port}`,

@@ -20,6 +20,7 @@ import {
 import { pairingProof, pairingProofPayload, signPairingProof } from "../src/lib/identity.js";
 import { pairWithToken, upsertDiscoveredPeer, createPairingToken } from "../src/lib/peers.js";
 import { pairCodeThrottled, startMeshServer } from "../src/lib/serve.js";
+import type { HostCapa } from "../src/lib/capa.js";
 
 let dir: string;
 
@@ -657,6 +658,138 @@ describe("mesh server mailboxes", () => {
 
     const { server } = await startMeshServer({ db, port: 0, tls: false, self: SELF });
     expect(unreadMessages(db).map((m) => m.subject)).toEqual(["fresh"]);
+
+    server.close();
+    db.close();
+  });
+});
+
+describe("GET /metrics", () => {
+  async function startWithMetrics(capa?: () => Promise<HostCapa>) {
+    const db = openMeshDb(":memory:");
+    const { server, port } = await startMeshServer({
+      db,
+      port: 0,
+      tls: false,
+      self: SELF,
+      ...(capa !== undefined ? { capa } : {}),
+    });
+    const url = `http://127.0.0.1:${port}`;
+    pairWithToken(db, {
+      node_id: "peer1",
+      hostname: "laptop",
+      fingerprint: "ff00",
+      token: "tok-peer1",
+    });
+    return { db, server, url };
+  }
+
+  async function get(url: string, path: string, token?: string) {
+    const headers: Record<string, string> = {};
+    if (token !== undefined) headers.authorization = `Bearer ${token}`;
+    return fetch(`${url}${path}`, { headers });
+  }
+
+  it("answers 401 without the bearer token (same auth as /status)", async () => {
+    const { db, server, url } = await startWithMetrics();
+
+    expect((await get(url, "/metrics")).status).toBe(401);
+    expect((await get(url, "/metrics", "wrong")).status).toBe(401);
+
+    server.close();
+    db.close();
+  });
+
+  it("renders prometheus text gauges for the db counters", async () => {
+    const { db, server, url } = await startWithMetrics();
+    receiveMessage(db, { from: "n0", subject: "s1", body: "b" });
+    receiveMessage(db, { from: "n0", subject: "s2", body: "b" });
+    db.conn.run(
+      "INSERT INTO deliveries (id, message_id, to_box, status, created_at) VALUES ('d1', 'x', 'a', 'unread', 1)",
+    );
+
+    const response = await get(url, "/metrics", "tok-peer1");
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toContain("text/plain");
+    expect(response.headers.get("content-type")).toContain("version=1.0.0");
+    const text = await response.text();
+    expect(text).toContain("opencode_mesh_messages_total 2");
+    expect(text).toContain("opencode_mesh_deliveries_unread 1");
+    // Prometheus text format: one metric per line, TYPE declarations present.
+    expect(text).toMatch(/^# TYPE opencode_mesh_messages_total gauge$/m);
+    db.close();
+    server.close();
+  });
+
+  it("renders the capa gauges and omits the gpu metric when absent", async () => {
+    const { db, server, url } = await startWithMetrics(async () => ({
+      cpu: { cores: 8, loadAvg: 0.25 },
+      ram: { totalMb: 32000, usedMb: 12000 },
+      workersInFlight: 3,
+      sessionsRunning: 2,
+    }));
+
+    const text = await (await get(url, "/metrics", "tok-peer1")).text();
+    expect(text).toContain("opencode_mesh_cpu_load_avg 0.25");
+    expect(text).toContain("opencode_mesh_ram_used_mb 12000");
+    expect(text).toContain("opencode_mesh_ram_total_mb 32000");
+    expect(text).toContain("opencode_mesh_workers_in_flight 3");
+    expect(text).toContain("opencode_mesh_sessions_running 2");
+    expect(text).not.toContain("opencode_mesh_gpu_vram_used_mb");
+
+    server.close();
+    db.close();
+  });
+
+  it("renders the gpu metric when the capa snapshot carries one", async () => {
+    const { db, server, url } = await startWithMetrics(async () => ({
+      cpu: { cores: 8, loadAvg: 0 },
+      ram: { totalMb: 32000, usedMb: 0 },
+      gpu: { model: "RTX", vramTotalMb: 10240, vramUsedMb: 2345 },
+      workersInFlight: 0,
+      sessionsRunning: 0,
+    }));
+
+    const text = await (await get(url, "/metrics", "tok-peer1")).text();
+    expect(text).toContain("opencode_mesh_gpu_vram_used_mb 2345");
+
+    server.close();
+    db.close();
+  });
+
+  it("keeps every rendered value a finite number", async () => {
+    const { db, server, url } = await startWithMetrics(async () => ({
+      cpu: { cores: 8, loadAvg: 0.5 },
+      ram: { totalMb: 32000, usedMb: 16000 },
+      workersInFlight: 1,
+      sessionsRunning: 1,
+    }));
+
+    const text = await (await get(url, "/metrics", "tok-peer1")).text();
+    for (const line of text.split("\n")) {
+      if (line.startsWith("#") || line.trim() === "") continue;
+      const value = Number(line.slice(line.lastIndexOf(" ") + 1));
+      expect(Number.isFinite(value)).toBe(true);
+    }
+
+    server.close();
+    db.close();
+  });
+
+  it("exposes the same capa snapshot on /status", async () => {
+    const { db, server, url } = await startWithMetrics(async () => ({
+      cpu: { cores: 4, loadAvg: 0 },
+      ram: { totalMb: 16000, usedMb: 4000 },
+      workersInFlight: 0,
+      sessionsRunning: 0,
+    }));
+
+    const body = (await (await get(url, "/status", "tok-peer1")).json()) as {
+      node_id: string;
+      capa?: HostCapa;
+    };
+    expect(body.node_id).toBe("peer1");
+    expect(body.capa?.ram.totalMb).toBe(16000);
 
     server.close();
     db.close();

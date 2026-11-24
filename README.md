@@ -41,7 +41,8 @@ flowchart LR
 - **Spawn headless workers in one call.** `mesh_spawn(task, name)` starts an isolated OpenCode worktree per worker; `mesh_workers`, `mesh_worker_logs`, `mesh_worker_stop` and `mesh_worker_remove` track and reap them. A pool of N workers costs N worktrees, not N mesh nodes.
 - **Deny by default.** Every endpoint requires a per-peer bearer token except the rate-limited pairing bootstrap; pairing codes and offers expire after 30 minutes; every mail carries an Ed25519 proof, so a leaked offer or code alone cannot install or rotate a live credential.
 - **File claims between sessions.** `mesh_lock` gives exclusive claims on paths, enforced between sessions on the same machine (not part of the wire protocol), so two agents never edit the same file.
-- **Deliberately simple wire protocol.** mDNS for discovery, bearer tokens for auth, four HTTP routes (`/mail`, `/status`, `/pools`, `/pair-code`), plain HTTP over loopback and trusted networks.
+- **Deliberately simple wire protocol.** mDNS for discovery, bearer tokens for auth, five HTTP routes (`/mail`, `/status`, `/metrics`, `/pools`, `/pair-code`), plain HTTP over loopback and trusted networks.
+- **Host capabilities + Prometheus metrics.** `mesh_status` carries a `capa` snapshot (cpu cores + load, RAM, GPU VRAM when `nvidia-smi` answers, workers in flight, sessions mid-turn) and `GET /metrics` renders the same 60 s-cached gauges plus mail counters in Prometheus text format, ready for a VictoriaMetrics scrape.
 
 ## Fleet in 10 minutes
 
@@ -253,7 +254,18 @@ The plugin ships a TUI part (auto-loaded by OpenCode): a toast on load, a `/mesh
 ### Security model
 
 - The HTTP mesh server binds to `127.0.0.1` by default. Set `"bind": "lan"` in the plugin options to listen on all interfaces for a LAN pool.
-- Every endpoint requires a per-peer bearer token except the pairing bootstrap; nothing else is open by default.
+- Every endpoint requires a per-peer bearer token except the pairing bootstrap; nothing else is open by default. `/metrics` uses the same bearer token — Prometheus sends the `Authorization` header natively:
+
+  ```yaml
+  scrape_configs:
+    - job_name: opencode-mesh
+      metrics_path: /metrics
+      scheme: https
+      authorization:
+        credentials: <peer token>
+      static_configs:
+        - targets: ["127.0.0.1:4399"]
+  ```
 - Pairing codes and offers expire after 30 minutes. The 6-digit code is a capability naming a pending offer, not a secret; `POST /pair-code` is the only unauthenticated route and is rate-limited (5 attempts per 5 minutes per source). On the mail path a pending token alone grants nothing: the claimed node must already be known to this host. Pairing is one `mesh_pair` call per side, so a leaked offer or code alone cannot install a permanent peer.
 - Peer addresses always carry the advertised port; a portless address is refused instead of being completed with the local port.
 - mDNS TXT records carry node id + fingerprint only, never secrets.

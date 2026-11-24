@@ -11,8 +11,9 @@ import {
 } from "../src/lib/mail.js";
 import { pairWithToken } from "../src/lib/peers.js";
 import { buildToolSpecs, type MeshContext, type ToolSpec } from "../src/tools.js";
+import type { HostCapa } from "../src/lib/capa.js";
 
-function setup() {
+function setup(capa?: () => Promise<HostCapa>) {
   const db = openMeshDb(":memory:");
   const mesh: MeshContext = {
     db,
@@ -23,6 +24,7 @@ function setup() {
     bindKey: "test-project:/work/project",
     worktreeClient: null as never,
     spawnFn: null as never,
+    ...(capa !== undefined ? { capa } : {}),
   };
   const specs = new Map<string, ToolSpec>(buildToolSpecs(mesh).map((s) => [s.name, s]));
   const call = (
@@ -32,6 +34,26 @@ function setup() {
   ): Promise<string> => specs.get(name)!.execute(args, { sessionID });
   return { db, call };
 }
+
+describe("mesh_status capa", () => {
+  it("carries the host capabilities when the provider answers", async () => {
+    const { call } = setup(async () => ({
+      cpu: { cores: 4, loadAvg: 0.5 },
+      ram: { totalMb: 16000, usedMb: 8000 },
+      workersInFlight: 1,
+      sessionsRunning: 2,
+    }));
+    const status = JSON.parse(await call("mesh_status")) as { capa?: HostCapa };
+    expect(status.capa?.cpu.cores).toBe(4);
+    expect(status.capa?.workersInFlight).toBe(1);
+  });
+
+  it("omits the capa field when no provider is wired", async () => {
+    const { call } = setup();
+    const status = JSON.parse(await call("mesh_status")) as { capa?: unknown };
+    expect("capa" in status).toBe(false);
+  });
+});
 
 describe("mesh_register", () => {
   it("registers a mailbox for the session", async () => {

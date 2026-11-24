@@ -16,6 +16,7 @@ import { startMeshServer } from "./lib/serve.js";
 import { nodeTlsMaterial } from "./lib/tls.js";
 import { startMemorySyncPusher } from "./lib/memory-sync.js";
 import { buildToolSpecs } from "./tools.js";
+import { createHostCapa } from "./lib/capa.js";
 
 export { defaultDataDir, parseOptions } from "./options.js";
 export type { PluginOptions } from "./options.js";
@@ -56,6 +57,11 @@ export const MeshPlugin: Plugin = async (input, rawOptions?: PluginOptions) => {
   // in-memory map is gone: mark dead pids before anything else uses the table.
   reconcileWorkers(db);
 
+  // Host capabilities: ONE 60 s cache shared by mesh_status, /status and
+  // /metrics (a scrape never doubles the probes). No v1 running-set signal:
+  // the execution event stream is a v2 host feature, sessionsRunning stays 0.
+  const hostCapa = createHostCapa({ db });
+
   // TLS material is derived from the node identity: the cert presents the
   // very key peers already pin, so TLS adds zero new trust.
   const { server, port, address, insecureServer } = await startMeshServer({
@@ -64,6 +70,7 @@ export const MeshPlugin: Plugin = async (input, rawOptions?: PluginOptions) => {
     ...(options.bind !== undefined ? { bind: options.bind } : {}),
     self: { node_id: identity.node_id, pk: identity.public_key, hostname: identity.hostname },
     tlsMaterial: nodeTlsMaterial(dataDir),
+    capa: hostCapa.get,
     ...(options.tls === false ? { tls: false } : {}),
     ...(options.insecureHttp === true ? { insecureHttp: true } : {}),
     dataDir,
@@ -122,6 +129,7 @@ export const MeshPlugin: Plugin = async (input, rawOptions?: PluginOptions) => {
         worktreeClient,
         spawnFn,
         addressing: addressingOptions(options),
+        capa: hostCapa.get,
       }).map((spec) => [
         spec.name,
         tool({
