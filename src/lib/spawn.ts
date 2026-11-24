@@ -138,6 +138,9 @@ export type RunWorkerInput = {
   /** Enrolled spawn (0.23.0): the child is born a fleet agent. Absent = the
    * legacy headless worker, unchanged. */
   enroll?: EnrollIdentity;
+  /** Distant spawn (0.24.0): the requesting peer's node id, stamped on the
+   * registry row for the per-peer quota. Absent = local spawn. */
+  spawned_by?: string;
   spawnFn: SpawnFn;
 };
 
@@ -163,6 +166,7 @@ export function runWorker(db: MeshDb, dataDir: string, input: RunWorkerInput): W
     branch: input.branch,
     pid: null,
     ...(input.enroll !== undefined ? { mailbox: input.enroll.name } : {}),
+    ...(input.spawned_by !== undefined ? { spawned_by: input.spawned_by } : {}),
   });
 
   let proc: SpawnedProcess;

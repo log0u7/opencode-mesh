@@ -5,6 +5,29 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.24.0] - 2026-11-24
+
+### Added
+
+- **Signed distant spawn**: `mesh_spawn(node=<paired peer>)` births an enrolled
+  fleet agent ON that peer. The request travels on the peer's new `POST /spawn`
+  endpoint, authenticated by the pairing token AND an Ed25519 signature (the
+  parent's node key) over a canonical payload, verified against the PINNED key
+  of the requester (no TOFU: an unpinned peer row is refused). Replay defense:
+  the request timestamp must sit inside a 5 minute window and its nonce is
+  single-use.
+- **Deny-by-default reception**: `acceptSpawn` (default `false`) gates the
+  endpoint; `spawnQuotaPeer` (default `2`) caps the enrolled workers ONE
+  requesting peer may keep running. Refusals are explicit ("spawn refused:
+  acceptSpawn disabled", "spawn refused: spawn quota reached (N)").
+- **Peer-side lifecycle**: the receiving node executes its own enrolled-spawn
+  path (worktree, enrolled child, self-enroll header), stamps the registry row
+  with the requesting peer, and acks the parent by DM: `spawned <name> on
+  <hostname> (worker <id>)`. The worker lives on the peer's registry; the
+  parent does not manage it remotely (v1): the spawned agent posts its own
+  `status:` to the pools like any member, and reaping is the peer's job
+  (`mesh_worker_stop` there).
+
 ## [0.23.3] - 2026-11-24
 
 ### Changed

@@ -51,6 +51,13 @@ export type PluginOptions = {
    * 0.23.0); mesh_spawn refuses beyond it. Default 4. Plain headless workers
    * do not count. */
   spawnMax?: number;
+  /** Distant spawn (0.24.0): accept signed mesh_spawn(node=…) requests from
+   * paired peers on POST /spawn. Default FALSE (deny-by-default): a peer only
+   * births agents here after the operator opted in. */
+  acceptSpawn?: boolean;
+  /** Max enrolled workers ONE requesting peer may keep running here
+   * (0.24.0). Default 2. */
+  spawnQuotaPeer?: number;
   worktreeClient?: WorktreeClient;
   spawnFn?: SpawnFn;
 };
@@ -204,6 +211,22 @@ export function parseOptions(raw: PluginOptions | undefined): PluginOptions {
       throw new Error("opencode-mesh: options.spawnMax must be a positive integer");
     }
     options.spawnMax = raw.spawnMax;
+  }
+  if (raw.acceptSpawn !== undefined) {
+    if (typeof raw.acceptSpawn !== "boolean") {
+      throw new Error("opencode-mesh: options.acceptSpawn must be a boolean");
+    }
+    options.acceptSpawn = raw.acceptSpawn;
+  }
+  if (raw.spawnQuotaPeer !== undefined) {
+    if (
+      typeof raw.spawnQuotaPeer !== "number" ||
+      !Number.isInteger(raw.spawnQuotaPeer) ||
+      raw.spawnQuotaPeer < 1
+    ) {
+      throw new Error("opencode-mesh: options.spawnQuotaPeer must be a positive integer");
+    }
+    options.spawnQuotaPeer = raw.spawnQuotaPeer;
   }
   // Opaque collaborators are passed through untouched: the plugin cannot
   // validate a client or spawn function beyond its nominal type.

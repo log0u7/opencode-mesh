@@ -3,9 +3,21 @@ import { createServer } from "node:http";
 import { createServer as createHttpsServer } from "node:https";
 
 import type { MeshDb } from "./db.js";
-import { authenticateToken } from "./peers.js";
+import { authenticateToken, findPeerById } from "./peers.js";
 import type { HostCapa } from "./capa.js";
 import type { TlsMaterial } from "./tls.js";
+import type { SpawnFn } from "./spawn.js";
+import type { WorktreeClient } from "./worktree.js";
+import {
+  DEFAULT_SPAWN_QUOTA_PEER,
+  ackSpawned,
+  createSpawnReplayStore,
+  parseSpawnRequest,
+  runDistantSpawn,
+  verifySpawnRequest,
+  type SpawnReplayStore,
+} from "./distant-spawn.js";
+import { countRunningSpawnedByPeer } from "./workers.js";
 import {
   deliverMessage,
   listMailboxes,
@@ -60,6 +72,20 @@ export type MeshServerOptions = {
   /** Where /memory-sync stores peers' pushed JSONL (the inbox tree). Absent =
    * the endpoint answers 503: the plugin always passes its dataDir. */
   dataDir?: string;
+  /** Distant spawn (0.24.0): accept signed mesh_spawn(node=…) requests from
+   * paired peers. acceptSpawn defaults to FALSE (deny-by-default): the
+   * endpoint answers 403 with an explicit refusal until the operator opts in.
+   * quotaPeer caps the enrolled workers ONE requesting peer may keep running
+   * here (default 2). The peer executes its own enrolled-spawn path and acks
+   * the parent by DM. */
+  distantSpawn?: {
+    acceptSpawn: boolean;
+    quotaPeer?: number;
+    /** This node's private key: the ack DM carries a standard pairing proof. */
+    privateKey: string;
+    worktreeClient: WorktreeClient;
+    spawnFn: SpawnFn;
+  };
   /** Shared host-capability provider (createHostCapa): /status and /metrics
    * read the SAME 60 s cache, so a scrape never doubles the probes. Absent =
    * /metrics renders only the db counters. */
@@ -89,8 +115,11 @@ export async function startMeshServer(options: MeshServerOptions): Promise<MeshS
       "startMeshServer: TLS is on by default; pass tlsMaterial (nodeTlsMaterial(dataDir)) or tls: false",
     );
   }
+  // One replay store per server: nonces claimed on this node never leak
+  // across servers in the same process (tests, multi-instance hosts).
+  const spawnReplay = createSpawnReplayStore();
   const handler = (req: IncomingMessage, res: ServerResponse): void => {
-    handle(options, req, res).catch((error: unknown) => {
+    handle(options, req, res, spawnReplay).catch((error: unknown) => {
       // Any uncaught throw in a route answers 500 JSON: an unhandled
       // rejection would crash the host process (opencode itself).
       const message = error instanceof Error ? error.message : String(error);
@@ -191,6 +220,7 @@ async function handle(
   options: MeshServerOptions,
   req: IncomingMessage,
   res: ServerResponse,
+  spawnReplay: SpawnReplayStore,
 ): Promise<void> {
   const { db, fanout } = options;
   const url = new URL(req.url ?? "/", "http://localhost");
@@ -322,6 +352,83 @@ async function handle(
       ok: true,
       unread: unreadCount(db) + unreadDeliveries(db),
       delivered,
+    });
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/spawn") {
+    // Distant spawn (0.24.0): a paired peer births an enrolled fleet agent
+    // HERE. Authentication is two-layer: the pairing token (bearer, with the
+    // standard proof so a pending token can bind), then an Ed25519 signature
+    // over the canonical body payload, verified against the PINNED key of the
+    // requesting peer (no TOFU). Replay defense: the request ts must sit
+    // inside a 5 min window and its nonce must be unseen.
+    const body = await readBody(req);
+    if ("error" in body) {
+      json(res, body.error === "too_large" ? 413 : 400, {
+        error: body.error === "too_large" ? "body too large" : "malformed request body",
+      });
+      return;
+    }
+    const parsed = parseSpawnRequest(body.body);
+    if (!parsed) {
+      json(res, 400, { error: "invalid spawn request" });
+      return;
+    }
+    const peer = authenticate(db, req, parsed.from, parsed.proof);
+    if (!peer || parsed.from !== peer.node_id) {
+      json(res, 401, { error: "unauthorized" });
+      return;
+    }
+    const distant = options.distantSpawn;
+    // Deny-by-default: the operator opts in with acceptSpawn.
+    if (!distant || distant.acceptSpawn !== true) {
+      json(res, 403, { error: "spawn refused: acceptSpawn disabled" });
+      return;
+    }
+    if (options.dataDir === undefined) {
+      json(res, 503, { error: "spawn storage not configured" });
+      return;
+    }
+    const peerRow = findPeerById(db, parsed.from);
+    const verifyError = verifySpawnRequest(peerRow, parsed, Date.now());
+    if (verifyError !== null) {
+      json(res, 403, { error: verifyError });
+      return;
+    }
+    if (!spawnReplay.claim(parsed.from, parsed.nonce, Date.now())) {
+      json(res, 403, { error: "spawn refused: replayed nonce" });
+      return;
+    }
+    const quota = distant.quotaPeer ?? DEFAULT_SPAWN_QUOTA_PEER;
+    if (countRunningSpawnedByPeer(db, parsed.from) >= quota) {
+      json(res, 403, { error: `spawn refused: spawn quota reached (${quota})` });
+      return;
+    }
+    const dsDeps = {
+      db,
+      dataDir: options.dataDir,
+      identity: {
+        node_id: options.self.node_id,
+        hostname: options.self.hostname,
+        public_key: options.self.pk,
+        private_key: distant.privateKey,
+      },
+      worktreeClient: distant.worktreeClient,
+      spawnFn: distant.spawnFn,
+    };
+    const result = await runDistantSpawn(dsDeps, parsed);
+    if (!result.ok) {
+      json(res, 500, { error: result.error });
+      return;
+    }
+    // Ack DM to the parent's mailbox (best effort, never blocks the verdict).
+    void ackSpawned(dsDeps, parsed, result.worker.id).catch(() => {});
+    json(res, 200, {
+      ok: true,
+      worker_id: result.worker.id,
+      hostname: options.self.hostname,
+      name: parsed.spec.name,
     });
     return;
   }

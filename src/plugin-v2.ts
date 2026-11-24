@@ -118,6 +118,12 @@ export const MeshV2 = Plugin.define({
     // /metrics (a scrape never doubles the probes).
     const hostCapa = createHostCapa({ db, sessionsRunning: () => running.size });
 
+    // Worktree client + spawn fn: shared by the local spawn tool and the
+    // distant-spawn receiver (the peer executes its own enrolled-spawn path).
+    const worktreeClient: WorktreeClient =
+      options.worktreeClient ?? v2WorktreeDomainClient(ctx.worktree, ctx.location.project.id);
+    const spawnFn: SpawnFn = options.spawnFn ?? nodeSpawn;
+
     // TLS material is derived from the node identity: the cert presents the
     // very key peers already pin, so TLS adds zero new trust.
     const tlsMaterial = nodeTlsMaterial(dataDir);
@@ -132,6 +138,13 @@ export const MeshV2 = Plugin.define({
       ...(options.tls === false ? { tls: false } : {}),
       ...(options.insecureHttp === true ? { insecureHttp: true } : {}),
       dataDir,
+      distantSpawn: {
+        acceptSpawn: options.acceptSpawn === true,
+        ...(options.spawnQuotaPeer !== undefined ? { quotaPeer: options.spawnQuotaPeer } : {}),
+        privateKey: identity.private_key,
+        worktreeClient,
+        spawnFn,
+      },
     });
     // Outbound memory sync: push the shareable outbox to paired peers on a cadence.
     // Reception (the /memory-sync endpoint) is always on; this loop is the gated half.
@@ -147,9 +160,6 @@ export const MeshV2 = Plugin.define({
     // Prefer an injected client (tests, hosts that pass one), then adapt the
     // 2.x in-process worktree domain to the REST-shaped WorktreeClient. The
     // domain resolves payloads directly, without the v1 `{ data }` envelope.
-    const worktreeClient: WorktreeClient =
-      options.worktreeClient ?? v2WorktreeDomainClient(ctx.worktree, ctx.location.project.id);
-    const spawnFn: SpawnFn = options.spawnFn ?? nodeSpawn;
     // Instance binding key: the box stamped at mesh_register follows this
     // instance across restarts (TUI bind re-binds it to the live session).
     const bindKey = `${ctx.location.project.id}:${ctx.location.directory}`;

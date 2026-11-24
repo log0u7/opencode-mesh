@@ -19,6 +19,9 @@ export type Worker = {
   /** Set for an enrolled spawn (0.23.0): the worker was born a fleet agent
    * with this mailbox name. NULL for a plain headless worker. */
   mailbox: string | null;
+  /** Set for a DISTANT spawn (0.24.0): the node id of the paired peer that
+   * requested it (per-peer quota). NULL for a local spawn. */
+  spawned_by: string | null;
 };
 
 const TERMINAL_STATUSES = new Set<WorkerStatus>(["completed", "failed", "stopped"]);
@@ -34,15 +37,25 @@ export function insertWorker(
     branch: string;
     pid: number | null;
     mailbox?: string | null;
+    spawned_by?: string | null;
   },
 ): Worker {
   const id = input.id ?? randomUUID();
   const now = Date.now();
 
   db.conn.run(
-    `INSERT INTO workers (id, task, worktree_path, branch, pid, session_id, status, exit_code, started_at, finished_at, mailbox)
-     VALUES (?, ?, ?, ?, ?, NULL, 'running', NULL, ?, NULL, ?)`,
-    [id, input.task, input.worktree_path, input.branch, input.pid, now, input.mailbox ?? null],
+    `INSERT INTO workers (id, task, worktree_path, branch, pid, session_id, status, exit_code, started_at, finished_at, mailbox, spawned_by)
+     VALUES (?, ?, ?, ?, ?, NULL, 'running', NULL, ?, NULL, ?, ?)`,
+    [
+      id,
+      input.task,
+      input.worktree_path,
+      input.branch,
+      input.pid,
+      now,
+      input.mailbox ?? null,
+      input.spawned_by ?? null,
+    ],
   );
 
   return {
@@ -57,6 +70,7 @@ export function insertWorker(
     started_at: now,
     finished_at: null,
     mailbox: input.mailbox ?? null,
+    spawned_by: input.spawned_by ?? null,
   };
 }
 
@@ -131,6 +145,17 @@ export function countRunningEnrolled(db: MeshDb): number {
   );
 }
 
+// spawnQuotaPeer (0.24.0): enrolled workers spawned BY one requesting peer,
+// still running. Local spawns (spawned_by NULL) never count against a peer.
+export function countRunningSpawnedByPeer(db: MeshDb, nodeId: string): number {
+  return (
+    db.conn.get<{ n: number }>(
+      "SELECT COUNT(*) AS n FROM workers WHERE spawned_by = ? AND status = 'running'",
+      [nodeId],
+    )?.n ?? 0
+  );
+}
+
 // Reap an enrolled worker's pool memberships after a deliberate stop/remove.
 // The mailbox row itself stays: the name re-binds on the next mesh_register of
 // the same name (last binder wins). Brutal child death is NOT reaped here (the
@@ -196,6 +221,7 @@ function rowToWorker(row: WorkerRow): Worker {
     started_at: row.started_at,
     finished_at: row.finished_at,
     mailbox: row.mailbox,
+    spawned_by: row.spawned_by,
   };
 }
 

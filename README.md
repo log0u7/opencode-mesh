@@ -16,7 +16,7 @@ One OpenCode instance is one brain. When a task outgrows a single session, or yo
 
 - **Same machine:** sessions coordinate through a local registry - messages (`mesh_send` / `mesh_inbox`) and exclusive file claims (`mesh_lock`).
 - **Across the room:** nodes advertise over mDNS and pair with explicit operator approval (per-peer bearer tokens, deny by default). VPN overlay IPs are picked up automatically (Tailscale/Headscale, NetBird, ZeroTier) or declared statically for any tunnel (WireGuard, IPsec, SSL VPN).
-- **Headless workers:** `mesh_spawn` starts an isolated OpenCode worktree per worker, tracks its lifecycle, captures its logs, and cleans up on dispose. With a `name`, the spawn is an enrolled fleet agent: it keeps the mesh tools and joins the fleet at its first turn (0.23.0).
+- **Headless workers:** `mesh_spawn` starts an isolated OpenCode worktree per worker, tracks its lifecycle, captures its logs, and cleans up on dispose. With a `name`, the spawn is an enrolled fleet agent: it keeps the mesh tools and joins the fleet at its first turn (0.23.0). With `node=<paired peer>`, that agent is born on the peer (signed request, deny-by-default `acceptSpawn`, per-peer quota, ack DM — 0.24.0).
 
 ```mermaid
 flowchart LR
@@ -97,7 +97,7 @@ On 2.x hosts the key is `plugins` and each entry is an object:
 
 Node identity and mailbox live under `~/.local/share/opencode-mesh/` (honors `XDG_DATA_HOME`), created with restrictive permissions.
 
-Workers spawned with `mesh_spawn` run with `OPENCODE_MESH_CHILD=1`: they skip the mesh server, mDNS and all mesh tools, so a pool of N workers costs N worktrees, not N mesh nodes. Spawned WITH a `name`, a worker is instead an enrolled fleet agent (`OPENCODE_MESH_CHILD=enrolled`): it keeps the mesh tools, self-enrolls from its prompt header at its first turn and joins its pools; `spawnMax` (default 4) caps the running enrolled workers.
+Workers spawned with `mesh_spawn` run with `OPENCODE_MESH_CHILD=1`: they skip the mesh server, mDNS and all mesh tools, so a pool of N workers costs N worktrees, not N mesh nodes. Spawned WITH a `name`, a worker is instead an enrolled fleet agent (`OPENCODE_MESH_CHILD=enrolled`): it keeps the mesh tools, self-enrolls from its prompt header at its first turn and joins its pools; `spawnMax` (default 4) caps the running enrolled workers. Spawned with `node=<paired peer>` (0.24.0), the enrolled agent is born ON THAT PEER: the request is signed with this node's key and the peer — after the operator enabled `acceptSpawn` there — runs its own enrolled-spawn path, stamps the worker with the requesting peer (`spawnQuotaPeer`, default 2, per peer) and DMs back `spawned <name> on <hostname> (worker <id>)`. A distant worker lives on the peer's registry: the parent does not manage it remotely (v1) — the agent posts its own `status:` to the pools like any member, and reaping is the peer's job (`mesh_worker_stop` there).
 
 Note (npm 12): the package ships no lifecycle install scripts and needs no `allowScripts` / allowlist on install (its runtime dependency `bonjour-service` has none either).
 
@@ -242,6 +242,11 @@ mesh_spawn(task="implement the parser", name="parser")     # -> worker_id, workt
 mesh_spawn(task="review the diff", name="reviewer", role="reviewer", pools=["team:x"])
                                                            # -> enrolled fleet agent: keeps the
                                                            #    mesh tools, self-enrolls at first turn
+mesh_spawn(task="triage the queue", name="triage", pools=["team:x"], node="ricinus-communis")
+                                                           # -> distant spawn (0.24.0): the enrolled agent is
+                                                           #    born on that paired peer (signed request; the
+                                                           #    peer must run acceptSpawn=true); it DMs back
+                                                           #    "spawned <name> on <hostname> (worker <id>)"
 mesh_workers()                                             # lifecycle states, session ids
 mesh_worker_logs(worker_id="...", tail=50)                 # captured output
 mesh_worker_stop(worker_id="...")                          # SIGTERM a running worker
