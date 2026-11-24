@@ -55,6 +55,14 @@ describe("parseOptions", () => {
     expect(options).toEqual({ port: 4399 });
   });
 
+  it("silently ignores the retired spawnWorkspace option (0.25.1)", () => {
+    // A 0.25.0 config may still carry spawnWorkspace: the workspace concept
+    // is gone, the residual option must not fail setup nor impose a
+    // directory.
+    const options = parseOptions({ spawnWorkspace: "~/projets/fleet", port: 4399 } as never);
+    expect(options).toEqual({ port: 4399 });
+  });
+
   it("rejects a port outside [0, 65535] or not an integer", () => {
     for (const port of [-1, 65536, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
       expect(() => parseOptions({ port }), `port: ${port}`).toThrow(/port/);
