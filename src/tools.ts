@@ -41,14 +41,20 @@ import {
   type WorktreeClient,
   type WorktreeInfo,
 } from "./lib/worktree.js";
-import { deleteWorker, getWorker, listWorkers } from "./lib/workers.js";
+import {
+  deleteWorker,
+  getWorker,
+  listWorkers,
+  countRunningEnrolled,
+  reapEnrolledPools,
+} from "./lib/workers.js";
 
 // One definition of the mesh tools, consumed by both host adapters (plugin.ts
 // for OpenCode 1.x, plugin-v2.ts for 2.x). Descriptions, argument shapes and
 // behavior live here so the two entry points cannot drift apart.
 export type ToolField = {
   name: string;
-  type: "string" | "number" | "boolean";
+  type: "string" | "number" | "boolean" | "array";
   required: boolean;
   description: string;
 };
@@ -82,6 +88,8 @@ export type MeshContext = {
   /** Shared host-capability provider (createHostCapa): mesh_status reads the
    * same 60 s cache as /status and /metrics. Absent = no capa field. */
   capa?: () => Promise<HostCapa>;
+  /** Maximum concurrently running enrolled workers (default 4). */
+  spawnMax?: number;
 };
 
 function str(name: string, description: string, required = true): ToolField {
@@ -94,6 +102,10 @@ function num(name: string, description: string): ToolField {
 
 function bool(name: string, description: string): ToolField {
   return { name, type: "boolean", required: false, description };
+}
+
+function strArr(name: string, description: string, required = false): ToolField {
+  return { name, type: "array", required, description };
 }
 
 // The host normally always provides a session id; normalizing keeps tools
@@ -139,6 +151,7 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
     spawnFn,
     addressing,
     capa: capa_,
+    spawnMax,
   } = mesh;
   return [
     {
@@ -677,15 +690,46 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
     {
       name: "mesh_spawn",
       description:
-        "Run a task as a headless background worker in an isolated opencode worktree (--auto by default). Returns worker id, worktree, branch.",
+        "Run a task as a headless background worker in an isolated opencode worktree (--auto by default). Returns worker id, worktree, branch. With name: births an ENROLLED fleet agent instead — the child keeps the mesh tools, self-enrolls (mesh_register/mesh_join) at its first turn and joins the pools. Name collisions hand the mailbox over: last binder wins. Refuses past the enrolled spawn quota (spawnMax, default 4 running).",
       fields: [
         str("task", "Task for the worker"),
-        str("name", "Worktree/branch name (random)", false),
+        str(
+          "name",
+          "Enrolled spawn: the child's mailbox name (letters, digits, . _ -; max 64); also names the worktree/branch",
+          false,
+        ),
+        str("role", "Enrolled spawn: fleet role (default worker)", false),
+        strArr(
+          "pools",
+          "Enrolled spawn: pool ids to join; the first becomes the primary group",
+          false,
+        ),
         str("model", "Worker provider/model", false),
         str("agent", "Agent for the worker", false),
         bool("auto", "Grant all permissions (default true)"),
       ],
       execute: async (args) => {
+        const name = typeof args.name === "string" && args.name.length > 0 ? args.name : undefined;
+        if (name !== undefined && !/^[A-Za-z0-9._-]{1,64}$/.test(name)) {
+          return "error: mailbox name must be 1-64 chars of letters, digits, . _ -";
+        }
+        const pools = Array.isArray(args.pools)
+          ? args.pools.filter((p): p is string => typeof p === "string" && p.length > 0)
+          : [];
+        const enroll =
+          name !== undefined
+            ? {
+                name,
+                role: typeof args.role === "string" && args.role.length > 0 ? args.role : "worker",
+                pools,
+              }
+            : undefined;
+        if (enroll !== undefined) {
+          const max = spawnMax ?? 4;
+          if (countRunningEnrolled(db) >= max) {
+            return `error: spawn limit ${max} reached, reap one first`;
+          }
+        }
         let info: WorktreeInfo | undefined;
         try {
           info = await createWorkerWorktree(worktreeClient, {
@@ -701,6 +745,7 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
             ...(typeof args.model === "string" ? { model: args.model } : {}),
             ...(typeof args.agent === "string" ? { agent: args.agent } : {}),
             ...(typeof args.auto === "boolean" ? { auto: args.auto } : {}),
+            ...(enroll !== undefined ? { enroll } : {}),
             spawnFn,
           });
           if (worker.status === "failed") {
@@ -723,6 +768,7 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
               worktree: info.directory,
               branch: worker.branch,
               pid: worker.pid,
+              ...(enroll !== undefined ? { mailbox: enroll.name } : {}),
             },
             null,
             2,
@@ -833,6 +879,9 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
         if (!rowDeleted) {
           return `error: worktree removed but worker row ${worker_id} was already gone`;
         }
+        // A deliberate removal of an enrolled spawn leaves its pools (0.23.0);
+        // the mailbox row itself survives for the next binder of the same name.
+        reapEnrolledPools(db, worker);
         removeWorkerLog(dataDir, worker.id);
         return `removed ${worker.id} (worktree, registry row and log deleted)`;
       },

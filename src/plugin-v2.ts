@@ -33,11 +33,17 @@ import { defaultDataDir, parseOptions, addressingOptions, type PluginOptions } f
 
 const DEFAULT_PORT = 4399;
 
-// A worker spawned by mesh_spawn inherits this marker: it must not boot its own
-// mesh server, advertise over mDNS or register mesh tools. A pool of N workers
-// then costs N worktrees, not N mesh nodes.
-function isChildProcess(): boolean {
-  return process.env.OPENCODE_MESH_CHILD === "1";
+// A worker spawned by mesh_spawn inherits this marker: a headless child ("1")
+// must not boot its own mesh server, advertise over mDNS or register mesh
+// tools — a pool of N workers then costs N worktrees, not N mesh nodes. An
+// enrolled child ("enrolled", 0.23.0) is a fleet agent: no server and no mDNS
+// either (the host's server on 4399 serves every session of the host), but it
+// keeps the mesh tools and self-enrolls from its prompt header.
+function childMode(): "headless" | "enrolled" | null {
+  const value = process.env.OPENCODE_MESH_CHILD;
+  if (value === "1") return "headless";
+  if (value === "enrolled") return "enrolled";
+  return null;
 }
 
 // The v2 adapter: OpenCode 2.x hosts call setup() (Plugin.define). Tool specs
@@ -46,8 +52,49 @@ function isChildProcess(): boolean {
 export const MeshV2 = Plugin.define({
   id: "@log0u7/opencode-mesh",
   async setup(ctx) {
-    if (isChildProcess()) {
+    const child = childMode();
+    if (child === "headless") {
       return async () => {};
+    }
+    if (child === "enrolled") {
+      // Enrolled child: tools only, over the SAME database the host server
+      // serves — the mesh tools act locally, no server of its own is needed.
+      // No wake loop, rpc, sidebar or guidance: a one-shot worker needs none,
+      // and its prompt header carries its own instructions.
+      const options = parseOptions(ctx.options as PluginOptions);
+      const dataDir = options.dataDir ?? defaultDataDir();
+      const db: MeshDb = openMeshDb(`${dataDir}/mesh.db`);
+      const identity: NodeIdentity = loadOrCreateIdentity(dataDir);
+      const worktreeClient: WorktreeClient =
+        options.worktreeClient ?? v2WorktreeDomainClient(ctx.worktree, ctx.location.project.id);
+      const bindKey = `${ctx.location.project.id}:${ctx.location.directory}`;
+      await ctx.tool.transform((editor) => {
+        for (const spec of buildToolSpecs({
+          db,
+          identity,
+          dataDir,
+          serverAddress: "127.0.0.1",
+          port: options.port ?? DEFAULT_PORT,
+          bindKey,
+          fanout: createFanout({ db, identity }),
+          worktreeClient,
+          spawnFn: options.spawnFn ?? nodeSpawn,
+          addressing: addressingOptions(options),
+          ...(options.spawnMax !== undefined ? { spawnMax: options.spawnMax } : {}),
+        })) {
+          editor.add({
+            name: spec.name,
+            description: spec.description,
+            input: jsonSchema(spec),
+            async execute(args, context) {
+              return { content: await spec.execute(args as Record<string, unknown>, context) };
+            },
+          });
+        }
+      });
+      return async () => {
+        db.close();
+      };
     }
     const options = parseOptions(ctx.options as PluginOptions);
     const dataDir = options.dataDir ?? defaultDataDir();
@@ -164,6 +211,7 @@ export const MeshV2 = Plugin.define({
         spawnFn,
         addressing: addressingOptions(options),
         capa: hostCapa.get,
+        ...(options.spawnMax !== undefined ? { spawnMax: options.spawnMax } : {}),
       })) {
         editor.add({
           name: spec.name,
@@ -356,13 +404,19 @@ export const MeshV2 = Plugin.define({
 
 function jsonSchema(spec: ToolSpec): {
   type: "object";
-  properties: Record<string, { type: string; description: string }>;
+  properties: Record<string, { type: string; description: string; items?: { type: string } }>;
   required?: string[];
   additionalProperties: false;
 } {
-  const properties: Record<string, { type: string; description: string }> = {};
+  const properties: Record<
+    string,
+    { type: string; description: string; items?: { type: string } }
+  > = {};
   for (const field of spec.fields) {
-    properties[field.name] = { type: field.type, description: field.description };
+    properties[field.name] =
+      field.type === "array"
+        ? { type: "array", items: { type: "string" }, description: field.description }
+        : { type: field.type, description: field.description };
   }
   const required = spec.fields.filter((f) => f.required).map((f) => f.name);
   return {

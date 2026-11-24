@@ -35,19 +35,71 @@ export const defaultWorktreeFactory: WorktreeFactory = (baseUrl, directory, fetc
 
 const DEFAULT_PORT = 4399;
 
-// A worker spawned by mesh_spawn inherits this marker: it must not boot its own
-// mesh server, advertise over mDNS or register mesh tools. A pool of N workers
-// then costs N worktrees, not N mesh nodes.
-function isChildProcess(): boolean {
-  return process.env.OPENCODE_MESH_CHILD === "1";
+// A worker spawned by mesh_spawn inherits this marker: a headless child ("1")
+// must not boot its own mesh server, advertise over mDNS or register mesh
+// tools — a pool of N workers then costs N worktrees, not N mesh nodes. An
+// enrolled child ("enrolled", 0.23.0) is a fleet agent: no server and no mDNS
+// either (the host's server on 4399 serves every session of the host), but it
+// keeps the mesh tools and self-enrolls from its prompt header.
+function childMode(): "headless" | "enrolled" | null {
+  const value = process.env.OPENCODE_MESH_CHILD;
+  if (value === "1") return "headless";
+  if (value === "enrolled") return "enrolled";
+  return null;
 }
 
 // The v1 adapter: OpenCode 1.x hosts call server(). Tool specs come from
 // tools.ts; this file only maps them onto the v1 hook surface (zod args,
 // string results).
 export const MeshPlugin: Plugin = async (input, rawOptions?: PluginOptions) => {
-  if (isChildProcess()) {
+  const child = childMode();
+  if (child === "headless") {
     return { dispose: async () => {} };
+  }
+  if (child === "enrolled") {
+    // Enrolled child: tools only, over the SAME database the host server
+    // serves — the mesh tools act locally, no server of its own is needed.
+    const options = parseOptions(rawOptions);
+    const dataDir = options.dataDir ?? defaultDataDir();
+    const db: MeshDb = openMeshDb(`${dataDir}/mesh.db`);
+    const identity: NodeIdentity = loadOrCreateIdentity(dataDir);
+    const worktreeClient: WorktreeClient =
+      options.worktreeClient ??
+      defaultWorktreeFactory(
+        input.serverUrl.toString(),
+        input.directory,
+        extractClientFetch(input.client),
+      );
+    const hooks: Hooks = {
+      tool: Object.fromEntries(
+        buildToolSpecs({
+          db,
+          identity,
+          dataDir,
+          serverAddress: "127.0.0.1",
+          port: options.port ?? DEFAULT_PORT,
+          bindKey: `v1:${dataDir}`,
+          fanout: createFanout({ db, identity }),
+          worktreeClient,
+          spawnFn: options.spawnFn ?? nodeSpawn,
+          addressing: addressingOptions(options),
+          ...(options.spawnMax !== undefined ? { spawnMax: options.spawnMax } : {}),
+        }).map((spec) => [
+          spec.name,
+          tool({
+            description: spec.description,
+            args: zodShape(spec),
+            execute: (args, context) => spec.execute(args as Record<string, unknown>, context),
+          }),
+        ]),
+      ),
+    };
+    return {
+      ...hooks,
+      dispose: async () => {
+        db.close();
+      },
+    };
   }
   const options = parseOptions(rawOptions);
   const dataDir = options.dataDir ?? defaultDataDir();
@@ -130,6 +182,7 @@ export const MeshPlugin: Plugin = async (input, rawOptions?: PluginOptions) => {
         spawnFn,
         addressing: addressingOptions(options),
         capa: hostCapa.get,
+        ...(options.spawnMax !== undefined ? { spawnMax: options.spawnMax } : {}),
       }).map((spec) => [
         spec.name,
         tool({
@@ -170,7 +223,9 @@ function zodShape(
           ? tool.schema.number()
           : field.type === "boolean"
             ? tool.schema.boolean()
-            : tool.schema.string();
+            : field.type === "array"
+              ? tool.schema.array(tool.schema.string())
+              : tool.schema.string();
       const described = base.describe(field.description);
       return [field.name, field.required ? described : described.optional()];
     }),

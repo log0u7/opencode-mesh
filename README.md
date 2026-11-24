@@ -16,7 +16,7 @@ One OpenCode instance is one brain. When a task outgrows a single session, or yo
 
 - **Same machine:** sessions coordinate through a local registry - messages (`mesh_send` / `mesh_inbox`) and exclusive file claims (`mesh_lock`).
 - **Across the room:** nodes advertise over mDNS and pair with explicit operator approval (per-peer bearer tokens, deny by default). VPN overlay IPs are picked up automatically (Tailscale/Headscale, NetBird, ZeroTier) or declared statically for any tunnel (WireGuard, IPsec, SSL VPN).
-- **Headless workers:** `mesh_spawn` starts an isolated OpenCode worktree per worker, tracks its lifecycle, captures its logs, and cleans up on dispose.
+- **Headless workers:** `mesh_spawn` starts an isolated OpenCode worktree per worker, tracks its lifecycle, captures its logs, and cleans up on dispose. With a `name`, the spawn is an enrolled fleet agent: it keeps the mesh tools and joins the fleet at its first turn (0.23.0).
 
 ```mermaid
 flowchart LR
@@ -38,7 +38,7 @@ flowchart LR
 - **Wake idle agents.** A host-side loop watches mailboxes (5 s poll, 60 s per-mailbox cooldown) and injects a prompt into idle sessions, so an agent reacts to incoming work without a human relaying the message.
 - **Multi-host federation.** Pair hosts with a 6-digit code; `team:*` broadcasts fan out to paired peers with anti-loop `via[]` and `origin_id` dedup, and each host keeps master of its own boxes and wake.
 - **Anchored shared memory.** The fleet ledger lives in [opencode-memory](https://www.npmjs.com/package/@log0u7/opencode-memory) 0.11+: epics and tasks anchored to the code they touch self-stale when the code moves, and `supersedes` (0.12+) keeps one truth per decision instead of stacking duplicates.
-- **Spawn headless workers in one call.** `mesh_spawn(task, name)` starts an isolated OpenCode worktree per worker; `mesh_workers`, `mesh_worker_logs`, `mesh_worker_stop` and `mesh_worker_remove` track and reap them. A pool of N workers costs N worktrees, not N mesh nodes.
+- **Spawn headless workers in one call.** `mesh_spawn(task, name)` starts an isolated OpenCode worktree per worker; `mesh_workers`, `mesh_worker_logs`, `mesh_worker_stop` and `mesh_worker_remove` track and reap them. A pool of N workers costs N worktrees, not N mesh nodes. With `name`, `role` and `pools`, the spawn is born a fleet agent (enrolled spawn, 0.23.0).
 - **Deny by default.** Every endpoint requires a per-peer bearer token except the rate-limited pairing bootstrap; pairing codes and offers expire after 30 minutes; every mail carries an Ed25519 proof, so a leaked offer or code alone cannot install or rotate a live credential.
 - **File claims between sessions.** `mesh_lock` gives exclusive claims on paths, enforced between sessions on the same machine (not part of the wire protocol), so two agents never edit the same file.
 - **Deliberately simple wire protocol.** mDNS for discovery, bearer tokens for auth, five HTTP routes (`/mail`, `/status`, `/metrics`, `/pools`, `/pair-code`), plain HTTP over loopback and trusted networks.
@@ -97,7 +97,7 @@ On 2.x hosts the key is `plugins` and each entry is an object:
 
 Node identity and mailbox live under `~/.local/share/opencode-mesh/` (honors `XDG_DATA_HOME`), created with restrictive permissions.
 
-Workers spawned with `mesh_spawn` run with `OPENCODE_MESH_CHILD=1`: they skip the mesh server, mDNS and all mesh tools, so a pool of N workers costs N worktrees, not N mesh nodes.
+Workers spawned with `mesh_spawn` run with `OPENCODE_MESH_CHILD=1`: they skip the mesh server, mDNS and all mesh tools, so a pool of N workers costs N worktrees, not N mesh nodes. Spawned WITH a `name`, a worker is instead an enrolled fleet agent (`OPENCODE_MESH_CHILD=enrolled`): it keeps the mesh tools, self-enrolls from its prompt header at its first turn and joins its pools; `spawnMax` (default 4) caps the running enrolled workers.
 
 Note (npm 12): the package ships no lifecycle install scripts and needs no `allowScripts` / allowlist on install (its runtime dependency `bonjour-service` has none either).
 
@@ -239,6 +239,9 @@ flowchart TB
 
 ```
 mesh_spawn(task="implement the parser", name="parser")     # -> worker_id, worktree, branch
+mesh_spawn(task="review the diff", name="reviewer", role="reviewer", pools=["team:x"])
+                                                           # -> enrolled fleet agent: keeps the
+                                                           #    mesh tools, self-enrolls at first turn
 mesh_workers()                                             # lifecycle states, session ids
 mesh_worker_logs(worker_id="...", tail=50)                 # captured output
 mesh_worker_stop(worker_id="...")                          # SIGTERM a running worker

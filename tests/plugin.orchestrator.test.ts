@@ -6,7 +6,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { MeshPlugin } from "../src/plugin.js";
 import { liveWorkerIds } from "../src/lib/spawn.js";
+import { openMeshDb } from "../src/lib/db.js";
+import { joinPool, mailboxByName, registerMailbox } from "../src/lib/mail.js";
 import type { ToolContext } from "@opencode-ai/plugin";
+
+// A second connection onto the same mesh database the plugin instance uses
+// (WAL mode): simulating the enrolled child's own registration writes.
+function dbOf(d: string) {
+  return openMeshDb(`${d}/mesh.db`);
+}
 
 let dir: string;
 
@@ -345,5 +353,142 @@ describe("orchestrator tools", () => {
 
     await hooks.dispose?.();
     expect(liveWorkerIds()).toEqual([]);
+  });
+});
+
+describe("enrolled spawn (0.23.0)", () => {
+  // Long-running fake that also captures what the child was given.
+  function captureSpawn() {
+    const calls: Array<{ argv: string[]; env: Record<string, string> | undefined }> = [];
+    const spawnFn = (argv: string[], env?: Record<string, string>) => {
+      calls.push({ argv, env });
+      const proc = {
+        pid: 4242,
+        stdout: { on: () => {} },
+        stderr: { on: () => {} },
+        on: () => {},
+        kill: () => {},
+      };
+      return proc as never;
+    };
+    return { spawnFn, calls };
+  }
+
+  it("mesh_spawn with name births an enrolled fleet agent", async () => {
+    const spawned = captureSpawn();
+    const { tools, hooks } = await loadTools({
+      worktreeClient: fakeWorktreeClient(),
+      spawnFn: spawned.spawnFn,
+    });
+
+    const result = JSON.parse(
+      String(
+        await tools.mesh_spawn?.execute(
+          { task: "fix the bug", name: "fleet-1", role: "reviewer", pools: ["team:x"] },
+          ctx("s1"),
+        ),
+      ),
+    ) as { worker_id: string; mailbox: string };
+
+    expect(result.mailbox).toBe("fleet-1");
+    expect(spawned.calls[0]?.env?.OPENCODE_MESH_CHILD).toBe("enrolled");
+    expect(spawned.calls[0]?.argv.at(-1)).toContain(
+      "mesh_register(name=fleet-1, role=reviewer, primary=team:x)",
+    );
+    expect(spawned.calls[0]?.argv.at(-1)).toContain("\n\nfix the bug");
+
+    await hooks.dispose?.();
+  });
+
+  it("mesh_spawn without name stays a plain headless worker (back-compat)", async () => {
+    const spawned = captureSpawn();
+    const { tools, hooks } = await loadTools({
+      worktreeClient: fakeWorktreeClient(),
+      spawnFn: spawned.spawnFn,
+    });
+
+    const result = JSON.parse(
+      String(await tools.mesh_spawn?.execute({ task: "t" }, ctx("s1"))),
+    ) as { worker_id: string; mailbox?: string };
+
+    expect(result.mailbox).toBeUndefined();
+    expect(spawned.calls[0]?.env?.OPENCODE_MESH_CHILD).toBe("1");
+    expect(spawned.calls[0]?.argv.at(-1)).toBe("t");
+
+    await hooks.dispose?.();
+  });
+
+  it("mesh_spawn enforces spawnMax and frees the slot on reap", async () => {
+    const hangingSpawn = (_argv: string[]) => {
+      const proc = {
+        pid: 4242,
+        stdout: { on: () => {} },
+        stderr: { on: () => {} },
+        on: () => {},
+        kill: () => {},
+      };
+      return proc as never;
+    };
+    const { tools, hooks } = await loadTools({
+      spawnMax: 1,
+      worktreeClient: fakeWorktreeClient(),
+      spawnFn: hangingSpawn,
+    });
+
+    const first = JSON.parse(
+      String(await tools.mesh_spawn?.execute({ task: "t", name: "fleet-1" }, ctx("s1"))),
+    ) as { worker_id: string };
+    const refused = String(
+      await tools.mesh_spawn?.execute({ task: "t", name: "fleet-2" }, ctx("s1")),
+    );
+    expect(refused).toBe("error: spawn limit 1 reached, reap one first");
+
+    // Reaping the running enrolled worker frees the slot.
+    const removed = String(
+      await tools.mesh_worker_remove?.execute(
+        { worker_id: first.worker_id, force: true },
+        ctx("s1"),
+      ),
+    );
+    expect(removed).toContain("removed");
+
+    const again = String(
+      await tools.mesh_spawn?.execute({ task: "t", name: "fleet-2" }, ctx("s1")),
+    );
+    expect(again).toContain("fleet-2");
+
+    await hooks.dispose?.();
+  });
+
+  it("mesh_worker_remove of an enrolled worker leaves its pools and the mailbox", async () => {
+    const { tools, hooks } = await loadTools({
+      worktreeClient: fakeWorktreeClient(),
+      // Reports a session then exits 0: a completed enrolled worker.
+      spawnFn: okSpawn([{ type: "step_start", sessionID: "ses-9" }]),
+    });
+
+    const result = JSON.parse(
+      String(
+        await tools.mesh_spawn?.execute(
+          { task: "t", name: "fleet-1", pools: ["team:x", "team:y"] },
+          ctx("s1"),
+        ),
+      ),
+    ) as { worker_id: string };
+
+    // The child enrolled during its run: it registered its mailbox and joined
+    // its pools (simulated here through the same shared database).
+    registerMailbox(dbOf(dir), { name: "fleet-1", session_id: "ses-9", now: Date.now() });
+    joinPool(dbOf(dir), "fleet-1", "team:x");
+    joinPool(dbOf(dir), "fleet-1", "team:y");
+
+    const removed = String(
+      await tools.mesh_worker_remove?.execute({ worker_id: result.worker_id }, ctx("s1")),
+    );
+    expect(removed).toContain("removed");
+    expect(mailboxByName(dbOf(dir), "fleet-1")?.pools).toEqual([]);
+    expect(mailboxByName(dbOf(dir), "fleet-1")).not.toBeNull();
+
+    await hooks.dispose?.();
   });
 });

@@ -16,6 +16,7 @@ import type { MeshDb } from "./db.js";
 import {
   getWorker,
   insertWorker,
+  reapEnrolledPools,
   setWorkerPid,
   setWorkerSession,
   setWorkerStatus,
@@ -40,6 +41,45 @@ export type KillFn = (id: string, signal: string) => void;
 // A child must not boot its own mesh node: a pool of N workers would otherwise
 // cost N servers, N mDNS advertisers and N databases.
 export const CHILD_ENV = { OPENCODE_MESH_CHILD: "1" };
+
+// An enrolled spawn (0.23.0) is a fleet agent: it skips the server and mDNS
+// (the host's server on 4399 already serves every session of this host) but
+// keeps the mesh tools, and self-enrolls from its prompt header at its first
+// turn.
+export const CHILD_ENV_ENROLLED = { OPENCODE_MESH_CHILD: "enrolled" };
+
+export type EnrollIdentity = {
+  /** The child's mailbox name. */
+  name: string;
+  /** Fleet role (default "worker"). */
+  role: string;
+  /** Pools to join; pools[0] becomes the primary group. */
+  pools: string[];
+};
+
+// The self-enrollment instructions prepended to the enrolled child's task: no
+// new protocol, the child just calls the existing tools on its first turn.
+export function enrollHeader(enroll: EnrollIdentity): string {
+  const [primary, ...rest] = enroll.pools;
+  const register =
+    primary !== undefined
+      ? `mesh_register(name=${enroll.name}, role=${enroll.role}, primary=${primary})`
+      : `mesh_register(name=${enroll.name}, role=${enroll.role})`;
+  const joins = rest.map((pool) => `mesh_join(${pool})`).join(" then ");
+  const lines = [
+    "You are an enrolled fleet agent: first join the mesh, then run the task below.",
+    `1. Enroll: ${register}${joins.length > 0 ? ` then ${joins}` : ""}.`,
+  ];
+  if (primary !== undefined) {
+    // mesh_register refuses a primary that no mailbox carries yet: a spawn
+    // that founds a fresh pool falls back to join-creates-membership.
+    lines.push(
+      `   If mesh_register errors "unknown pool", call it again without the primary argument, then mesh_join(${primary}).`,
+    );
+  }
+  lines.push("2. Then treat the following task.");
+  return lines.join("\n");
+}
 
 // Real adapter used by the plugin: node child_process wrapped to the minimal
 // SpawnedProcess surface (works under Bun's node compat at runtime).
@@ -95,6 +135,9 @@ export type RunWorkerInput = {
   model?: string;
   agent?: string;
   auto?: boolean;
+  /** Enrolled spawn (0.23.0): the child is born a fleet agent. Absent = the
+   * legacy headless worker, unchanged. */
+  enroll?: EnrollIdentity;
   spawnFn: SpawnFn;
 };
 
@@ -119,11 +162,12 @@ export function runWorker(db: MeshDb, dataDir: string, input: RunWorkerInput): W
     worktree_path: input.worktree_path,
     branch: input.branch,
     pid: null,
+    ...(input.enroll !== undefined ? { mailbox: input.enroll.name } : {}),
   });
 
   let proc: SpawnedProcess;
   try {
-    proc = input.spawnFn(buildArgv(input), CHILD_ENV);
+    proc = input.spawnFn(buildArgv(input), input.enroll ? CHILD_ENV_ENROLLED : CHILD_ENV);
   } catch {
     finalize(db, worker.id, "failed", null);
     return { ...worker, status: "failed", finished_at: Date.now() };
@@ -221,6 +265,12 @@ export function stopWorker(db: MeshDb, id: string, options: StopOptions = {}): b
   // time to reap the process (or a test fake ignores the signal).
   LIVE_PROCESSES.delete(id);
   setWorkerStatus(db, id, "stopped", { exit_code: null });
+  // A deliberate stop of an enrolled spawn leaves its pools (0.23.0): the
+  // mailbox row itself survives for the next binder of the same name.
+  const row = getWorker(db, id);
+  if (row !== null) {
+    reapEnrolledPools(db, row);
+  }
 
   const graceMs = options.graceMs ?? DEFAULT_KILL_GRACE_MS;
   if (options.killFn === undefined && proc.pid > 0 && graceMs > 0) {
@@ -286,7 +336,9 @@ function buildArgv(input: RunWorkerInput): string[] {
   if (input.auto !== false) {
     argv.push("--auto");
   }
-  argv.push(input.task);
+  // An enrolled child self-enrolls from its prompt header before the task; the
+  // registry row keeps the raw task, the header lives in the prompt only.
+  argv.push(input.enroll ? `${enrollHeader(input.enroll)}\n\n${input.task}` : input.task);
   return argv;
 }
 

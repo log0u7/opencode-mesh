@@ -10,7 +10,7 @@ export type MeshDb = {
 
 // Bump when a schema change needs a migration step; the version anchors future
 // migrations that cannot be expressed as idempotent `CREATE ... IF NOT EXISTS`.
-const SCHEMA_VERSION = 10;
+const SCHEMA_VERSION = 11;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS peers (
@@ -80,7 +80,8 @@ CREATE TABLE IF NOT EXISTS workers (
   status TEXT NOT NULL DEFAULT 'running',
   exit_code INTEGER,
   started_at INTEGER NOT NULL,
-  finished_at INTEGER
+  finished_at INTEGER,
+  mailbox TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_messages_status_created ON messages(status, created_at);
 CREATE INDEX IF NOT EXISTS idx_pending_tokens_created ON pending_tokens(created_at);
@@ -168,6 +169,15 @@ function migrate(conn: SqliteConn): void {
     .map((row) => row.name);
   if (!mailboxColumnsLive.includes("primary_pool")) {
     conn.exec("ALTER TABLE mailboxes ADD COLUMN primary_pool TEXT");
+  }
+  // v11: workers.mailbox — marks an enrolled spawn (0.23.0): the worker was
+  // born a fleet agent with a mailbox name, so the reaper can leave its pools.
+  // Pure addition, guarded ALTER like peers.public_key.
+  const workerColumns = conn
+    .all<{ name: string }>("PRAGMA table_info(workers)")
+    .map((row) => row.name);
+  if (!workerColumns.includes("mailbox")) {
+    conn.exec("ALTER TABLE workers ADD COLUMN mailbox TEXT");
   }
   conn.exec(INDEXES_V3);
   conn.exec("CREATE INDEX IF NOT EXISTS idx_messages_origin ON messages(origin_id);");

@@ -47,6 +47,10 @@ export type PluginOptions = {
    * terminals that draw ambiguous-width glyphs double-cell and glue the next
    * character. */
   icons?: boolean;
+  /** Maximum concurrently running enrolled workers (spawned with a name,
+   * 0.23.0); mesh_spawn refuses beyond it. Default 4. Plain headless workers
+   * do not count. */
+  spawnMax?: number;
   worktreeClient?: WorktreeClient;
   spawnFn?: SpawnFn;
 };
@@ -194,6 +198,12 @@ export function parseOptions(raw: PluginOptions | undefined): PluginOptions {
       throw new Error("opencode-mesh: options.icons must be a boolean");
     }
     options.icons = raw.icons;
+  }
+  if (raw.spawnMax !== undefined) {
+    if (typeof raw.spawnMax !== "number" || !Number.isInteger(raw.spawnMax) || raw.spawnMax < 1) {
+      throw new Error("opencode-mesh: options.spawnMax must be a positive integer");
+    }
+    options.spawnMax = raw.spawnMax;
   }
   // Opaque collaborators are passed through untouched: the plugin cannot
   // validate a client or spawn function beyond its nominal type.

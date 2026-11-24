@@ -97,6 +97,29 @@ describe("smoke: plugin module", () => {
       }
     }
   });
+
+  it("an enrolled child keeps the mesh tools and boots no server of its own", async () => {
+    const previous = process.env.OPENCODE_MESH_CHILD;
+    process.env.OPENCODE_MESH_CHILD = "enrolled";
+    try {
+      const hooks = await MeshPlugin(fakeInput(), {
+        dataDir: dir,
+        port: 0,
+        advertise: false,
+      });
+      // Fleet agent (0.23.0): the tool surface stays, no server is started.
+      expect(Object.keys(hooks).sort()).toEqual(["dispose", "tool"]);
+      expect(Object.keys(hooks.tool ?? {})).toContain("mesh_register");
+      expect(Object.keys(hooks.tool ?? {})).toContain("mesh_join");
+      await hooks.dispose?.();
+    } finally {
+      if (previous === undefined) {
+        delete process.env.OPENCODE_MESH_CHILD;
+      } else {
+        process.env.OPENCODE_MESH_CHILD = previous;
+      }
+    }
+  });
 });
 
 function fakeInput() {

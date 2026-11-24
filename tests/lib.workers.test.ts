@@ -2,13 +2,16 @@ import { describe, expect, it } from "vitest";
 
 import { openMeshDb } from "../src/lib/db.js";
 import {
+  countRunningEnrolled,
   getWorker,
   listWorkers,
+  reapEnrolledPools,
   setWorkerPid,
   setWorkerSession,
   setWorkerStatus,
   insertWorker,
 } from "../src/lib/workers.js";
+import { joinPool, mailboxByName, registerMailbox } from "../src/lib/mail.js";
 
 function spawn(db: ReturnType<typeof openMeshDb>, overrides: Record<string, unknown> = {}) {
   return insertWorker(db, {
@@ -145,6 +148,83 @@ describe("workers store", () => {
     setWorkerStatus(db, "w1", "stopped", { exit_code: null });
     expect(getWorker(db, "w1")?.status).toBe("stopped");
     expect(() => setWorkerStatus(db, "w1", "completed", { exit_code: 0 })).toThrow(/terminal/);
+    db.close();
+  });
+});
+
+describe("enrolled workers (0.23.0)", () => {
+  it("persists the mailbox on the row", () => {
+    const db = openMeshDb(":memory:");
+    const worker = spawn(db, { mailbox: "fleet-1" });
+    const plain = insertWorker(db, {
+      task: "t",
+      worktree_path: "/wt",
+      branch: "b",
+      pid: 1,
+    });
+
+    expect(worker.mailbox).toBe("fleet-1");
+    expect(getWorker(db, worker.id)?.mailbox).toBe("fleet-1");
+    expect(plain.mailbox).toBeNull();
+    db.close();
+  });
+
+  it("counts only running enrolled workers for the spawnMax quota", () => {
+    const db = openMeshDb(":memory:");
+    insertWorker(db, {
+      task: "t",
+      worktree_path: "/wt",
+      branch: "b",
+      pid: 1,
+      mailbox: "fleet-1",
+    });
+    insertWorker(db, { task: "t", worktree_path: "/wt", branch: "b", pid: 2 });
+    const stopped = insertWorker(db, {
+      task: "t",
+      worktree_path: "/wt",
+      branch: "b",
+      pid: 3,
+      mailbox: "fleet-2",
+    });
+    setWorkerStatus(db, stopped.id, "stopped");
+
+    // Plain headless workers and terminal enrolled rows do not count.
+    expect(countRunningEnrolled(db)).toBe(1);
+    db.close();
+  });
+
+  it("reapEnrolledPools leaves the pools and keeps the mailbox", () => {
+    const db = openMeshDb(":memory:");
+    registerMailbox(db, { name: "fleet-1", session_id: "ses-1", now: Date.now() });
+    joinPool(db, "fleet-1", "team:x");
+    joinPool(db, "fleet-1", "team:y");
+    const worker = insertWorker(db, {
+      task: "t",
+      worktree_path: "/wt",
+      branch: "b",
+      pid: 1,
+      mailbox: "fleet-1",
+    });
+    setWorkerSession(db, worker.id, "ses-1");
+
+    expect(reapEnrolledPools(db, getWorker(db, worker.id)!)).toEqual(["team:x", "team:y"]);
+    expect(mailboxByName(db, "fleet-1")?.pools).toEqual([]);
+    expect(mailboxByName(db, "fleet-1")).not.toBeNull();
+    db.close();
+  });
+
+  it("reapEnrolledPools is a no-op for a plain worker or an unknown mailbox", () => {
+    const db = openMeshDb(":memory:");
+    const plain = insertWorker(db, { task: "t", worktree_path: "/wt", branch: "b", pid: 1 });
+
+    expect(reapEnrolledPools(db, getWorker(db, plain.id)!)).toEqual([]);
+    expect(
+      reapEnrolledPools(db, {
+        ...plain,
+        mailbox: "ghost",
+        session_id: null,
+      }),
+    ).toEqual([]);
     db.close();
   });
 });

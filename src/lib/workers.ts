@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import type { MeshDb } from "./db.js";
+import { leavePool, mailboxByName } from "./mail.js";
 
 export type WorkerStatus = "running" | "completed" | "failed" | "stopped";
 
@@ -15,6 +16,9 @@ export type Worker = {
   exit_code: number | null;
   started_at: number;
   finished_at: number | null;
+  /** Set for an enrolled spawn (0.23.0): the worker was born a fleet agent
+   * with this mailbox name. NULL for a plain headless worker. */
+  mailbox: string | null;
 };
 
 const TERMINAL_STATUSES = new Set<WorkerStatus>(["completed", "failed", "stopped"]);
@@ -23,15 +27,22 @@ type WorkerRow = Omit<Worker, "status"> & { status: string };
 
 export function insertWorker(
   db: MeshDb,
-  input: { id?: string; task: string; worktree_path: string; branch: string; pid: number | null },
+  input: {
+    id?: string;
+    task: string;
+    worktree_path: string;
+    branch: string;
+    pid: number | null;
+    mailbox?: string | null;
+  },
 ): Worker {
   const id = input.id ?? randomUUID();
   const now = Date.now();
 
   db.conn.run(
-    `INSERT INTO workers (id, task, worktree_path, branch, pid, session_id, status, exit_code, started_at, finished_at)
-     VALUES (?, ?, ?, ?, ?, NULL, 'running', NULL, ?, NULL)`,
-    [id, input.task, input.worktree_path, input.branch, input.pid, now],
+    `INSERT INTO workers (id, task, worktree_path, branch, pid, session_id, status, exit_code, started_at, finished_at, mailbox)
+     VALUES (?, ?, ?, ?, ?, NULL, 'running', NULL, ?, NULL, ?)`,
+    [id, input.task, input.worktree_path, input.branch, input.pid, now, input.mailbox ?? null],
   );
 
   return {
@@ -45,6 +56,7 @@ export function insertWorker(
     exit_code: null,
     started_at: now,
     finished_at: null,
+    mailbox: input.mailbox ?? null,
   };
 }
 
@@ -109,6 +121,39 @@ export function deleteWorker(db: MeshDb, id: string): boolean {
   return (db.conn.get<{ changes: number }>("SELECT changes() AS changes")?.changes ?? 0) > 0;
 }
 
+// spawnMax quota (0.23.0): only enrolled workers count — a plain headless
+// worker pool stays unlimited.
+export function countRunningEnrolled(db: MeshDb): number {
+  return (
+    db.conn.get<{ n: number }>(
+      "SELECT COUNT(*) AS n FROM workers WHERE mailbox IS NOT NULL AND status = 'running'",
+    )?.n ?? 0
+  );
+}
+
+// Reap an enrolled worker's pool memberships after a deliberate stop/remove.
+// The mailbox row itself stays: the name re-binds on the next mesh_register of
+// the same name (last binder wins). Brutal child death is NOT reaped here (the
+// exit path cannot distinguish signal from crash): a future mailbox GC handles
+// those leftovers. Guard against a handoff: if the mailbox was re-registered by
+// another session in the meantime, its pools belong to the new binder.
+export function reapEnrolledPools(db: MeshDb, worker: Worker): string[] {
+  if (worker.mailbox === null) {
+    return [];
+  }
+  const box = mailboxByName(db, worker.mailbox);
+  if (!box) {
+    return [];
+  }
+  if (worker.session_id !== null && box.session_id !== worker.session_id) {
+    return [];
+  }
+  for (const pool of box.pools) {
+    leavePool(db, box.name, pool);
+  }
+  return box.pools;
+}
+
 // After a host restart the in-memory process map is gone, so 'running' rows can
 // never be stopped again. Rows whose pid no longer exists are marked stopped.
 export function reconcileWorkers(db: MeshDb): number {
@@ -150,6 +195,7 @@ function rowToWorker(row: WorkerRow): Worker {
     exit_code: row.exit_code,
     started_at: row.started_at,
     finished_at: row.finished_at,
+    mailbox: row.mailbox,
   };
 }
 

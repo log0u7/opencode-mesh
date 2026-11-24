@@ -220,6 +220,39 @@ describe("opencode-mesh v2 setup", () => {
     await expect(pluginModule.setup(ctx)).rejects.toThrow(/port/);
   });
 
+  describe("child processes", () => {
+    const previous = process.env.OPENCODE_MESH_CHILD;
+
+    afterEach(() => {
+      if (previous === undefined) {
+        delete process.env.OPENCODE_MESH_CHILD;
+      } else {
+        process.env.OPENCODE_MESH_CHILD = previous;
+      }
+    });
+
+    it("registers no tools as a headless child", async () => {
+      process.env.OPENCODE_MESH_CHILD = "1";
+      const { ctx, added } = fakeCtx(tmpDataDir());
+      const cleanup = await pluginModule.setup(ctx);
+
+      expect(added).toEqual([]);
+      await cleanup?.();
+    });
+
+    it("registers the mesh tools as an enrolled child, with no server of its own", async () => {
+      process.env.OPENCODE_MESH_CHILD = "enrolled";
+      const { ctx, added } = fakeCtx(tmpDataDir());
+      const cleanup = await pluginModule.setup(ctx);
+
+      // Fleet agent: same tool surface as a host session, but the setup never
+      // touched ctx.session, ctx.rpc or ctx.event (no wake loop, no rpc, no
+      // guidance — a one-shot worker needs none).
+      expect(added.map((t) => t.name).sort()).toEqual(TOOL_NAMES);
+      await cleanup?.();
+    });
+  });
+
   it("mesh_spawn spawns through the injected options.worktreeClient", async () => {
     const create = vi.fn(async () => ({ data: { name: "wt", directory: "/tmp/wt" } }));
     const { ctx, added } = fakeCtx(tmpDataDir(), {
