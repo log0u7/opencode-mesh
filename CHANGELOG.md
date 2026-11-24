@@ -5,6 +5,25 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.24.7] - 2026-11-24
+
+### Fixed
+
+- Distant spawn failed with `Worktree.SourceDirectoryNotFoundError` (seen
+  live at the first real `mesh_spawn(node=…)`): the peer's spawn path did not
+  resolve a source directory of its own — the host's worktree create requires
+  the project's source directory to be a registered row of its worktree
+  table, and a headless `opencode serve` peer never runs the worktree
+  discovery that registers it (only the desktop app does, when it browses
+  workspaces). `createWorkerWorktree` now runs one discovery refresh and
+  retries when it sees the tagged error, and a peer with no valid source at
+  all answers the explicit refusal "spawn refused: no source directory on
+  peer — open the peer's opencode in its project once (worktree discovery
+  registers the source)" instead of the bare crash. The new
+  `spawnWorktreeBase` option sets the destination base of the worktree of
+  each child born from a distant spawn (default: the host's own opencode
+  worktree base).
+
 ## [0.24.6] - 2026-11-24
 
 ### Fixed

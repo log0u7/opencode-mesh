@@ -3,7 +3,12 @@ import { basename } from "node:path";
 
 import { pairingProof, signPayload, verifyPayload, type NodeIdentity } from "./identity.js";
 import type { MeshDb } from "./db.js";
-import { createWorkerWorktree, removeWorkerWorktree, type WorktreeClient } from "./worktree.js";
+import {
+  createWorkerWorktree,
+  isSourceDirectoryError,
+  removeWorkerWorktree,
+  type WorktreeClient,
+} from "./worktree.js";
 import { runWorker, type SpawnFn } from "./spawn.js";
 import type { Worker } from "./workers.js";
 import { findPeerById, resolvePeerTarget } from "./peers.js";
@@ -235,6 +240,9 @@ export type DistantSpawnDeps = {
   identity: Pick<NodeIdentity, "node_id" | "hostname" | "public_key" | "private_key">;
   worktreeClient: WorktreeClient;
   spawnFn: SpawnFn;
+  /** Destination base for the child's worktree (0.24.7): where spawned
+   * agents are born on this peer. Default: the host's own worktree base. */
+  spawnWorktreeBase?: string;
 };
 
 export type DistantSpawnResult = { ok: true; worker: Worker } | { ok: false; error: string };
@@ -255,7 +263,10 @@ export async function runDistantSpawn(
   const enroll = { name: body.spec.name, role: body.spec.role, pools: body.spec.pools };
   let directory: string | undefined;
   try {
-    const info = await createWorkerWorktree(deps.worktreeClient, { name: enroll.name });
+    const info = await createWorkerWorktree(deps.worktreeClient, {
+      name: enroll.name,
+      ...(deps.spawnWorktreeBase !== undefined ? { directory: deps.spawnWorktreeBase } : {}),
+    });
     directory = info.directory;
     const worker = runWorker(deps.db, deps.dataDir, {
       task: body.spec.task,
@@ -284,6 +295,16 @@ export async function runDistantSpawn(
   } catch (error) {
     if (directory !== undefined) {
       await removeWorkerWorktree(deps.worktreeClient, { directory }).catch(() => false);
+    }
+    if (isSourceDirectoryError(error)) {
+      // No usable source on the peer even after discovery: an explicit
+      // refusal the parent can act on, never the bare tagged error (the
+      // 0.24.7 live bug). "spawn refused" routes the HTTP answer to 403.
+      return {
+        ok: false,
+        error:
+          "spawn refused: no source directory on peer — open the peer's opencode in its project once (worktree discovery registers the source)",
+      };
     }
     return { ok: false, error: `spawn failed: ${spawnCause(error)}` };
   }

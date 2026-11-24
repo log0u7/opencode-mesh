@@ -44,6 +44,7 @@ On OpenCode 2.x hosts the key is `plugins` and each entry is an object with
 | `spawnMax` | `number` | `4` | Maximum concurrently running enrolled workers (`mesh_spawn` with a `name`, 0.23.0); `mesh_spawn` refuses past it ("spawn limit N reached, reap one first"). Plain headless workers do not count. |
 | `acceptSpawn` | `boolean` | `false` | Distant spawn (0.24.0): accept signed `mesh_spawn(node=…)` requests from paired peers. Deny-by-default — a peer only births enrolled agents here after the operator opted in. |
 | `spawnQuotaPeer` | `number` | `2` | Max enrolled workers ONE requesting peer may keep running here (0.24.0); refusals read "spawn refused: spawn quota reached (N)". Local spawns never count against a peer. |
+| `spawnWorktreeBase` | `string` | host default | Distant spawn (0.24.7): destination base for the worktree of each child born from a `mesh_spawn(node=…)` request accepted here — where spawned agents are born. Default: opencode's own worktree base. |
 
 Multi-host pools (0.10.0) add no options: `"bind": "lan"` on every node,
 `mesh_pair()` on one host and `mesh_pair(code="...", address="host:port")` on

@@ -65,6 +65,17 @@ describe("parseOptions", () => {
     expect(() => parseOptions({ port: "4399" as unknown as number })).toThrow(/port/);
   });
 
+  it("accepts spawnWorktreeBase as a non-empty string (0.24.7)", () => {
+    expect(parseOptions({ spawnWorktreeBase: "/srv/spawns" })).toMatchObject({
+      spawnWorktreeBase: "/srv/spawns",
+    });
+    expect(parseOptions({})).not.toHaveProperty("spawnWorktreeBase");
+    expect(() => parseOptions({ spawnWorktreeBase: "" })).toThrow(/spawnWorktreeBase/);
+    expect(() => parseOptions({ spawnWorktreeBase: 42 as unknown as string })).toThrow(
+      /spawnWorktreeBase/,
+    );
+  });
+
   it("rejects a bind outside the enum", () => {
     expect(() => parseOptions({ bind: "wan" as unknown as "lan" })).toThrow(/bind/);
   });

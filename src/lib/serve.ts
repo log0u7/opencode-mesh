@@ -82,6 +82,8 @@ export type MeshServerOptions = {
   distantSpawn?: {
     acceptSpawn: boolean;
     quotaPeer?: number;
+    /** Destination base for the worktrees of spawned children (0.24.7). */
+    spawnWorktreeBase?: string;
     /** This node's private key: the ack DM carries a standard pairing proof. */
     privateKey: string;
     worktreeClient: WorktreeClient;
@@ -433,6 +435,9 @@ async function handle(
         },
         worktreeClient: distant.worktreeClient,
         spawnFn: distant.spawnFn,
+        ...(distant.spawnWorktreeBase !== undefined
+          ? { spawnWorktreeBase: distant.spawnWorktreeBase }
+          : {}),
       };
       const result = await runDistantSpawn(dsDeps, parsed);
       if (!result.ok) {

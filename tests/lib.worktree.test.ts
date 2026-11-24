@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   createWorkerWorktree,
+  isSourceDirectoryError,
   removeWorkerWorktree,
   extractClientFetch,
   v2WorktreeDomainClient,
@@ -165,5 +166,129 @@ describe("defaultWorktreeFactory fetch pass-through", () => {
     // without throwing and that the fetch override is accepted (no network).
     const client = factory("http://127.0.0.1:1", "/tmp", customFetch) as WorktreeClient;
     expect(typeof client.worktree.create).toBe("function");
+  });
+});
+
+// The 0.24.7 live bug: a headless host (`opencode serve`) never runs worktree
+// discovery, its worktree table holds no row for the project's source, and
+// create dies with the bare tagged error Worktree.SourceDirectoryNotFoundError
+// (empty message). createWorkerWorktree now refreshes once and retries, then
+// ships an explicit failure when the source is still missing.
+describe("source directory discovery (0.24.7)", () => {
+  // The Effect tagged-error shape: _tag set, message EMPTY.
+  function taggedSourceError(): Error {
+    const error = new Error("");
+    (error as unknown as { _tag: string })._tag = "Worktree.SourceDirectoryNotFoundError";
+    error.name = "Worktree.SourceDirectoryNotFoundError";
+    return error;
+  }
+
+  it("runs one discovery refresh and retries when create dies with the tagged source error", async () => {
+    let discovered = false;
+    const domain = {
+      create: vi.fn(async () => {
+        if (!discovered) throw taggedSourceError();
+        return { directory: "/wt/task" };
+      }),
+      remove: vi.fn(async () => {}),
+      refresh: vi.fn(async () => {
+        discovered = true;
+        return undefined;
+      }),
+    };
+    const client = v2WorktreeDomainClient(domain, "proj-1");
+
+    const info = await createWorkerWorktree(client, { name: "task" });
+
+    expect(domain.refresh).toHaveBeenCalledWith({ projectID: "proj-1" });
+    expect(domain.create).toHaveBeenCalledTimes(2);
+    expect(info.directory).toBe("/wt/task");
+  });
+
+  it("keeps a clean failure path on a client without any refresh (1.x REST shape)", async () => {
+    const client = {
+      worktree: {
+        create: vi.fn(async () => {
+          throw taggedSourceError();
+        }),
+        remove: vi.fn(async () => ({ data: true })),
+      },
+    } as unknown as WorktreeClient;
+
+    await expect(createWorkerWorktree(client, {})).rejects.toThrow(
+      "no source directory registered on this host",
+    );
+    // No discovery endpoint on this generation: the retry ran, then the
+    // explicit failure replaced the bare tagged error.
+    expect(client.worktree.create).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps the explicit failure name for downstream refusal mapping", async () => {
+    const client = {
+      worktree: {
+        create: vi.fn(async () => {
+          throw taggedSourceError();
+        }),
+        remove: vi.fn(async () => ({ data: true })),
+      },
+    } as unknown as WorktreeClient;
+
+    await expect(createWorkerWorktree(client, {})).rejects.toMatchObject({
+      name: "Worktree.SourceDirectoryNotFoundError",
+    });
+  });
+
+  it("does not refresh or retry for unrelated errors", async () => {
+    const domain = {
+      create: vi.fn(async () => {
+        throw new Error("git exploded");
+      }),
+      remove: vi.fn(async () => {}),
+      refresh: vi.fn(async () => {}),
+    };
+    const client = v2WorktreeDomainClient(domain, "proj-1");
+
+    await expect(createWorkerWorktree(client, {})).rejects.toThrow("git exploded");
+    expect(domain.refresh).not.toHaveBeenCalled();
+    expect(domain.create).toHaveBeenCalledTimes(1);
+  });
+
+  it("passes a destination directory override through the v2 adapter", async () => {
+    const domain = {
+      create: vi.fn(async () => ({ directory: "/srv/spawns/task" })),
+      remove: vi.fn(async () => {}),
+    };
+    const client = v2WorktreeDomainClient(domain, "proj-1");
+
+    await createWorkerWorktree(client, { name: "task", directory: "/srv/spawns" });
+
+    expect(domain.create).toHaveBeenCalledWith({
+      projectID: "proj-1",
+      name: "task",
+      directory: "/srv/spawns",
+    });
+  });
+
+  it("detects the source error on all three surfaces (tag, name, message)", async () => {
+    const tagged = taggedSourceError();
+    expect(isSourceDirectoryError(tagged)).toBe(true);
+
+    const byName = new Error("");
+    byName.name = "Worktree.SourceDirectoryNotFoundError";
+    expect(isSourceDirectoryError(byName)).toBe(true);
+
+    // The 1.x REST path serializes the tag into the message.
+    const byMessage = new Error("worktree API error: Worktree.SourceDirectoryNotFoundError");
+    expect(isSourceDirectoryError(byMessage)).toBe(true);
+
+    // The human-readable server message carries no tag: not detected, no retry.
+    const humanMessage = new Error(
+      "worktree API error: Cannot create a worktree from /x: it is not a checkout of this project",
+    );
+    expect(isSourceDirectoryError(humanMessage)).toBe(false);
+
+    expect(isSourceDirectoryError(new Error("git exploded"))).toBe(false);
+    expect(isSourceDirectoryError("not an error")).toBe(false);
+    expect(isSourceDirectoryError(undefined)).toBe(false);
   });
 });

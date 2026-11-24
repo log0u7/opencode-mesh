@@ -58,6 +58,10 @@ export type PluginOptions = {
   /** Max enrolled workers ONE requesting peer may keep running here
    * (0.24.0). Default 2. */
   spawnQuotaPeer?: number;
+  /** Distant spawn (0.24.7): destination base for the worktrees created by
+   * mesh_spawn(node=…) requests accepted on this peer — where spawned agents
+   * are born. Default: the host's own opencode worktree base. */
+  spawnWorktreeBase?: string;
   worktreeClient?: WorktreeClient;
   spawnFn?: SpawnFn;
 };
@@ -227,6 +231,12 @@ export function parseOptions(raw: PluginOptions | undefined): PluginOptions {
       throw new Error("opencode-mesh: options.spawnQuotaPeer must be a positive integer");
     }
     options.spawnQuotaPeer = raw.spawnQuotaPeer;
+  }
+  if (raw.spawnWorktreeBase !== undefined) {
+    if (typeof raw.spawnWorktreeBase !== "string" || raw.spawnWorktreeBase.length === 0) {
+      throw new Error("opencode-mesh: options.spawnWorktreeBase must be a non-empty string");
+    }
+    options.spawnWorktreeBase = raw.spawnWorktreeBase;
   }
   // Opaque collaborators are passed through untouched: the plugin cannot
   // validate a client or spawn function beyond its nominal type.
