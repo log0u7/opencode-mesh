@@ -8,19 +8,19 @@
 
 opencode-mesh turns your machines into a fleet of (almost) autonomous agents: named mailboxes, team pools, automatic wake for idle sessions, an anchored shared memory, and a playbook of roles.
 
-Sessions coordinate on one machine, and pools federate across a LAN or a Tailscale tailnet: agents self-enroll at their first turn, wake on incoming work, and report `status:` to their team so an orchestrator can consolidate the state of the fleet. Security stays deny-by-default: pairing requires explicit operator approval with per-peer bearer tokens, and every mail carries an Ed25519 proof.
+Sessions coordinate on one machine, and pools federate across a LAN or a VPN overlay (Tailscale, NetBird, ZeroTier — or static addresses for any tunnel): agents self-enroll at their first turn, wake on incoming work, and report `status:` to their team so an orchestrator can consolidate the state of the fleet. Security stays deny-by-default: pairing requires explicit operator approval with per-peer bearer tokens, and every mail carries an Ed25519 proof.
 
 ## Why
 
 One OpenCode instance is one brain. When a task outgrows a single session, or you want to parallelise across machines, sessions need to talk to each other, claim files without stepping on each other, and workers you can spawn and reap. opencode-mesh adds that layer:
 
 - **Same machine:** sessions coordinate through a local registry - messages (`mesh_send` / `mesh_inbox`) and exclusive file claims (`mesh_lock`).
-- **Across the room:** nodes advertise over mDNS and pair with explicit operator approval (per-peer bearer tokens, deny by default). Tailscale IPs are picked up automatically for cross-subnet pools.
+- **Across the room:** nodes advertise over mDNS and pair with explicit operator approval (per-peer bearer tokens, deny by default). VPN overlay IPs are picked up automatically (Tailscale/Headscale, NetBird, ZeroTier) or declared statically for any tunnel (WireGuard, IPsec, SSL VPN).
 - **Headless workers:** `mesh_spawn` starts an isolated OpenCode worktree per worker, tracks its lifecycle, captures its logs, and cleans up on dispose.
 
 ```mermaid
 flowchart LR
-    subgraph lan["LAN or Tailscale tailnet"]
+    subgraph lan["LAN or VPN overlay"]
         N1["Node A - OpenCode + mesh"]
         N2["Node B - OpenCode + mesh"]
         N3["Node C - OpenCode + mesh"]
@@ -68,7 +68,7 @@ Restart OpenCode. The package is installed automatically at startup into opencod
 
 ```json
 {
-  "plugin": ["@log0u7/opencode-mesh@0.5.1"]
+  "plugin": ["@log0u7/opencode-mesh@0.18.1"]
 }
 ```
 
@@ -105,13 +105,13 @@ Note (npm 12): the package ships no lifecycle install scripts and needs no `allo
 Same machine: start two OpenCode instances in the same repository.
 
 ```
-mesh_register(name="purser", role="manager")   # claim a named mailbox for this session
-mesh_send(to="quartermaster", subject="r8 go", body="...")   # targeted mail (this machine)
-mesh_send(to="team:quartermaster", subject="status", body="...")   # pool broadcast (quiet)
-mesh_send(to="team:quartermaster", subject="r8 go", body="...", wake=true)   # deliberate broadcast: wakes every member
+mesh_register(name="builder", role="worker")   # claim a named mailbox for this session
+mesh_send(to="reviewer", subject="build done", body="...")   # targeted mail (this machine)
+mesh_send(to="team:build", subject="status", body="...")   # pool broadcast (quiet)
+mesh_send(to="team:build", subject="build done", body="...", wake=true)   # deliberate broadcast: wakes every member
 mesh_inbox()                       # only YOUR mailbox (plus legacy global mail), ack
 mesh_wait(id="...", timeout=120)   # block until a reply_to lands, then return it
-mesh_join(pool="team:quartermaster") / mesh_leave(pool="...") / mesh_pools()
+mesh_join(pool="team:build") / mesh_leave(pool="...") / mesh_pools()
 mesh_lock(path="src/api.ts", ttl=300)   # claim a file before editing (this machine only)
 mesh_unlock(path="src/api.ts")
 ```
