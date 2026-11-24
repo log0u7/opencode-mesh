@@ -2,38 +2,24 @@
 
 import { Plugin } from "@opencode/plugin/tui";
 import type { JSX } from "@opentui/solid";
-import { For, Show, createSignal } from "solid-js";
+import { For, createSignal } from "solid-js";
 
 type Context = Plugin.Context;
 type Theme = Context["theme"];
 
-import { MeshRpc, formatMeshSidebar, type MeshSnapshot } from "./rpc.js";
+import {
+  MeshRpc,
+  formatMeshSidebarCollapsed,
+  formatMeshSidebarExpanded,
+  type MeshSnapshot,
+  type SidebarSegment,
+  type SidebarTone,
+} from "./rpc.js";
 import { createSidebarState, type SidebarRpc } from "./sidebar-state.js";
 
 const REFRESH_MS = 15_000;
 /** quota-style event refresh: debounced immediate refresh after activity. */
 const EVENT_DEBOUNCE_MS = 150;
-
-function themedBody(theme: Theme, lines: () => string[] | null, unread: number): JSX.Element {
-  return (
-    <Show when={lines()} keyed>
-      {(current) => (
-        <box gap={0}>
-          <For each={current}>
-            {(line, index) => (
-              <text
-                fg={index() === 0 && unread > 0 ? theme.text.base : theme.text.muted}
-                wrapMode="none"
-              >
-                {line}
-              </text>
-            )}
-          </For>
-        </box>
-      )}
-    </Show>
-  );
-}
 
 function dialogBody(theme: Theme, snapshot: MeshSnapshot): JSX.Element {
   const self = snapshot.hostname.length > 0 ? snapshot.hostname : snapshot.node_id;
@@ -52,6 +38,58 @@ function dialogBody(theme: Theme, snapshot: MeshSnapshot): JSX.Element {
   );
 }
 
+/** The theme's attention color for the alert glyph: warning or error when the
+ * theme exposes one, plain text otherwise. */
+function alertFg(theme: Theme): string {
+  const palette = theme as {
+    warning?: { base?: string };
+    error?: { base?: string };
+    text: { base: string };
+  };
+  return palette.warning?.base ?? palette.error?.base ?? theme.text.base;
+}
+
+/** Quota tone tiers to theme colors: entity and qualifier render in text,
+ * values in muted, the alert glyph in the attention color. */
+function toneFg(theme: Theme, tone: SidebarTone): string {
+  if (tone === "value") {
+    return theme.text.muted;
+  }
+  if (tone === "alert") {
+    return alertFg(theme);
+  }
+  return theme.text.base;
+}
+
+/** One row of tone-colored segments; entity tones render bold. wrapMode="none"
+ * everywhere: long lines clip instead of wrapping. */
+function segmentRow(theme: Theme, line: SidebarSegment[], onClick?: () => void): JSX.Element {
+  return (
+    <box flexDirection="row" gap={0}>
+      {line.map((seg) => (
+        <text
+          fg={toneFg(theme, seg.tone)}
+          wrapMode="none"
+          {...(onClick ? { onMouseDown: onClick } : {})}
+        >
+          {seg.tone === "entity" ? <b>{seg.text}</b> : seg.text}
+        </text>
+      ))}
+    </box>
+  );
+}
+
+/** The expanded v4 body: clickable bold header row, then one segment row per
+ * formatter line so each tone tier gets its own color. */
+function sidebarBody(theme: Theme, lines: SidebarSegment[][], onToggle: () => void): JSX.Element {
+  return (
+    <box gap={0}>
+      {segmentRow(theme, lines[0] ?? [], onToggle)}
+      <For each={lines.slice(1)}>{(line) => segmentRow(theme, line)}</For>
+    </box>
+  );
+}
+
 export default Plugin.define({
   id: "@log0u7/opencode-mesh.tui",
   setup(context: Context) {
@@ -66,11 +104,10 @@ export default Plugin.define({
     const meshRpc = context.client.rpc(MeshRpc) as unknown as SidebarRpc;
     const [store, mutate] = createSidebarState(context.storage, meshRpc);
     const [snapshot, setSnapshot] = createSignal<MeshSnapshot | null>(null);
-    const [lines, setLines] = createSignal<string[] | null>(null);
 
     // Live sidebar: poll the server-side snapshot over RPC. On a v1 host (no
-    // RPC) or while the server is unreachable, the slot stays hidden. The
-    // sessionID arrives with the slot input (see register below).
+    // RPC) or while the server is unreachable, the slot falls back to the bare
+    // toggle line. The sessionID arrives with the slot input (see register).
     const mesh = context.client.rpc(MeshRpc);
     // Snapshots per session: switching tabs must show THAT session's state
     // instantly (a single "latest" cache made the panel stale on tab switch).
@@ -83,12 +120,9 @@ export default Plugin.define({
         snapBySession.set(sid, snap);
         if (currentSession === sid) {
           setSnapshot(snap);
-          // The body renders only when expanded: keep the expanded shape ready
-          // so toggling shows it without waiting for the next refresh.
-          setLines(formatMeshSidebar(snap, false));
         }
       } catch {
-        if (currentSession === sid) setLines(null);
+        if (currentSession === sid) setSnapshot(null);
       }
     };
     const timer = setInterval(() => void refresh(currentSession), REFRESH_MS);
@@ -111,6 +145,14 @@ export default Plugin.define({
       }
     })();
 
+    const toggleCollapsed = () => {
+      // Formatting is pure: flipping the store re-renders the sidebar from the
+      // snapshot already in hand, no refetch needed.
+      void mutate((draft) => {
+        draft.collapsed = !draft.collapsed;
+      });
+    };
+
     const unregister = context.ui.slot({
       append: "sidebar.content",
       render: (input) => {
@@ -122,36 +164,26 @@ export default Plugin.define({
           void refresh(currentSession);
           schedule();
         }
-        const unread = (snapshot()?.hats ?? []).reduce((s, h) => s + h.unread, 0);
         const snap = snapshot();
-        // Collapsed: two lines — toggle + unread marker, then the counts
-        // (formatMeshSidebar returns both). No snapshot: the bare toggle line.
-        const collapsedLines = snap ? formatMeshSidebar(snap, true) : null;
-        return (
-          <box gap={0}>
+        // No snapshot (v1 host, unreachable server): the bare toggle line.
+        if (!snap) {
+          return (
             <box flexDirection="row">
-              <text
-                fg={theme.text.base}
-                onMouseDown={() => {
-                  void mutate((draft) => {
-                    draft.collapsed = !draft.collapsed;
-                  }).then(() => void refresh(currentSession));
-                }}
-              >
+              <text fg={theme.text.base} wrapMode="none" onMouseDown={toggleCollapsed}>
                 <b>{store.collapsed ? "▶ Mesh" : "▼ Mesh"}</b>
               </text>
-              <Show when={store.collapsed && unread > 0}>
-                <text fg={theme.text.base}>{` ● ${unread} unread`}</text>
-              </Show>
             </box>
-            <Show when={store.collapsed ? collapsedLines : null} keyed>
-              {(collapsed) => <text fg={theme.text.muted}>{collapsed[1]}</text>}
-            </Show>
-            <Show when={!store.collapsed}>
-              <box gap={0}>{themedBody(theme, lines, unread)}</box>
-            </Show>
-          </box>
-        );
+          );
+        }
+        // Formatting is pure: both shapes derive from the snapshot in hand.
+        if (store.collapsed) {
+          return (
+            <box flexDirection="row">
+              {segmentRow(theme, formatMeshSidebarCollapsed(snap), toggleCollapsed)}
+            </box>
+          );
+        }
+        return sidebarBody(theme, formatMeshSidebarExpanded(snap), toggleCollapsed);
       },
     });
 
@@ -185,10 +217,7 @@ export default Plugin.define({
           title: "Toggle mesh sidebar",
           group: "Mesh",
           run: async () => {
-            await mutate((draft) => {
-              draft.collapsed = !draft.collapsed;
-            });
-            void refresh(currentSession);
+            toggleCollapsed();
           },
         },
       ],
