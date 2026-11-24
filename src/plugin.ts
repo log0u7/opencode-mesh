@@ -114,6 +114,17 @@ export const MeshPlugin: Plugin = async (input, rawOptions?: PluginOptions) => {
   // the execution event stream is a v2 host feature, sessionsRunning stays 0.
   const hostCapa = createHostCapa({ db });
 
+  // Worktree client + spawn fn: shared by the local spawn tool and the
+  // distant-spawn receiver (the peer executes its own enrolled-spawn path).
+  const worktreeClient: WorktreeClient =
+    options.worktreeClient ??
+    defaultWorktreeFactory(
+      input.serverUrl.toString(),
+      input.directory,
+      extractClientFetch(input.client),
+    );
+  const spawnFn = options.spawnFn ?? nodeSpawn;
+
   // TLS material is derived from the node identity: the cert presents the
   // very key peers already pin, so TLS adds zero new trust.
   const { server, port, address, insecureServer } = await startMeshServer({
@@ -126,6 +137,13 @@ export const MeshPlugin: Plugin = async (input, rawOptions?: PluginOptions) => {
     ...(options.tls === false ? { tls: false } : {}),
     ...(options.insecureHttp === true ? { insecureHttp: true } : {}),
     dataDir,
+    distantSpawn: {
+      acceptSpawn: options.acceptSpawn === true,
+      ...(options.spawnQuotaPeer !== undefined ? { quotaPeer: options.spawnQuotaPeer } : {}),
+      privateKey: identity.private_key,
+      worktreeClient,
+      spawnFn,
+    },
   });
   // Outbound memory sync: push the shareable outbox to paired peers on a cadence.
   // Reception (the /memory-sync endpoint) is always on; this loop is the gated half.
@@ -138,14 +156,6 @@ export const MeshPlugin: Plugin = async (input, rawOptions?: PluginOptions) => {
           identity,
           intervalMs: (options.memorySyncInterval ?? 15) * 60_000,
         });
-  const worktreeClient: WorktreeClient =
-    options.worktreeClient ??
-    defaultWorktreeFactory(
-      input.serverUrl.toString(),
-      input.directory,
-      extractClientFetch(input.client),
-    );
-  const spawnFn = options.spawnFn ?? nodeSpawn;
 
   let advertiseHandle: AdvertiseHandle | null = null;
   let browseHandle: { close(): void } | null = null;

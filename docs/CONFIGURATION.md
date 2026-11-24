@@ -42,6 +42,8 @@ On OpenCode 2.x hosts the key is `plugins` and each entry is an object with
 | `addresses` | `string[]` | `[]` | Static overlay IPs of tunnels without a CLI (WireGuard, IPsec, any SSL VPN this instance manages), advertised in `mesh_status` `tailnet_addresses` alongside provider-discovered IPs. |
 | `icons` | `boolean` | `true` | Render the sidebar glyphs (≡ ⌂ ⇄). `false` swaps them for lowercase dim text labels (`pools`, `fleet`, `peers`): the fallback for terminals that draw ambiguous-width glyphs double-cell and glue the next character. |
 | `spawnMax` | `number` | `4` | Maximum concurrently running enrolled workers (`mesh_spawn` with a `name`, 0.23.0); `mesh_spawn` refuses past it ("spawn limit N reached, reap one first"). Plain headless workers do not count. |
+| `acceptSpawn` | `boolean` | `false` | Distant spawn (0.24.0): accept signed `mesh_spawn(node=…)` requests from paired peers. Deny-by-default — a peer only births enrolled agents here after the operator opted in. |
+| `spawnQuotaPeer` | `number` | `2` | Max enrolled workers ONE requesting peer may keep running here (0.24.0); refusals read "spawn refused: spawn quota reached (N)". Local spawns never count against a peer. |
 
 Multi-host pools (0.10.0) add no options: `"bind": "lan"` on every node,
 `mesh_pair()` on one host and `mesh_pair(code="...", address="host:port")` on

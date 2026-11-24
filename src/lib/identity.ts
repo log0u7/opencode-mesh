@@ -140,13 +140,33 @@ export function pairingProofPayload(nodeId: string, token: string): string {
   return `opencode-mesh-pair:${nodeId}:${token}`;
 }
 
-export function signPairingProof(privateKey: string, payload: string): string {
+// Generic Ed25519 sign/verify over a canonical payload string (the pairing
+// proof and the distant-spawn signature share the primitives and the key
+// formats: PKCS8 DER base64 private key, SPKI DER base64 public key).
+export function signPayload(privateKey: string, payload: string): string {
   const key = createPrivateKey({
     key: Buffer.from(privateKey, "base64"),
     format: "der",
     type: "pkcs8",
   });
   return Buffer.from(sign(null, Buffer.from(payload, "utf8"), key)).toString("base64");
+}
+
+export function verifyPayload(publicKey: string, payload: string, signature: string): boolean {
+  try {
+    const key = createPublicKey({
+      key: Buffer.from(publicKey, "base64"),
+      format: "der",
+      type: "spki",
+    });
+    return verify(null, Buffer.from(payload, "utf8"), key, Buffer.from(signature, "base64"));
+  } catch {
+    return false;
+  }
+}
+
+export function signPairingProof(privateKey: string, payload: string): string {
+  return signPayload(privateKey, payload);
 }
 
 // The wire form of a pairing proof: `<base64 spki>.<base64 signature>`.
@@ -161,16 +181,7 @@ export function pairingProof(
 }
 
 export function verifyPairingProof(publicKey: string, payload: string, proof: string): boolean {
-  try {
-    const key = createPublicKey({
-      key: Buffer.from(publicKey, "base64"),
-      format: "der",
-      type: "spki",
-    });
-    return verify(null, Buffer.from(payload, "utf8"), key, Buffer.from(proof, "base64"));
-  } catch {
-    return false;
-  }
+  return verifyPayload(publicKey, payload, proof);
 }
 
 function writeIdentity(file: string, identity: PersistedIdentity): void {

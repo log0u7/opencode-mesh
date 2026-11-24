@@ -239,6 +239,88 @@ export async function postPairCode(target: {
   }
 }
 
+// Push a signed distant-spawn request to a peer's /spawn endpoint. The body is
+// fully built and signed by the caller (lib/distant-spawn.ts): this function is
+// transport only — TLS with SPKI pinning, the pairing bearer token, and a
+// parsed verdict. 403 carries the peer's explicit refusal message
+// ("spawn refused: …"), which the tool surfaces verbatim.
+export type SpawnPostResult =
+  | { kind: "ok"; worker_id: string; hostname?: string; name?: string }
+  | { kind: "refused"; status: number; error: string }
+  | { kind: "unreachable"; error: string };
+
+export async function postSpawn(target: {
+  url: string;
+  token: string;
+  /** The pre-serialized SpawnRequestBody (JSON, already signed). */
+  body: string;
+  tls?: boolean;
+  pk?: string;
+}): Promise<SpawnPostResult> {
+  const headers = {
+    "content-type": "application/json",
+    authorization: `Bearer ${target.token}`,
+  };
+  let response: WireResponse;
+  try {
+    response = isTls(target)
+      ? await tlsRequest({
+          url: `${target.url}/spawn`,
+          ...(target.pk !== undefined ? { pk: target.pk } : {}),
+          method: "POST",
+          headers,
+          body: target.body,
+          timeoutMs: 10_000,
+        })
+      : await plainRequest(`${target.url}/spawn`, {
+          method: "POST",
+          headers,
+          body: target.body,
+          timeoutMs: 10_000,
+        });
+  } catch (cause) {
+    const message = cause instanceof Error ? cause.message : "";
+    if (message.includes("peer certificate key mismatch")) {
+      return { kind: "unreachable", error: "pin-mismatch" };
+    }
+    if (message.includes("wrong version number")) {
+      return { kind: "unreachable", error: "plaintext-peer" };
+    }
+    return { kind: "unreachable", error: "peer unreachable" };
+  }
+  if (response.status === 200) {
+    try {
+      const parsed = JSON.parse(response.body) as {
+        ok?: unknown;
+        worker_id?: unknown;
+        hostname?: unknown;
+        name?: unknown;
+      };
+      if (typeof parsed.worker_id !== "string") {
+        return { kind: "refused", status: response.status, error: "peer sent no worker id" };
+      }
+      return {
+        kind: "ok",
+        worker_id: parsed.worker_id,
+        ...(typeof parsed.hostname === "string" ? { hostname: parsed.hostname } : {}),
+        ...(typeof parsed.name === "string" ? { name: parsed.name } : {}),
+      };
+    } catch {
+      return { kind: "refused", status: response.status, error: "unparseable peer response" };
+    }
+  }
+  let error = `peer answered ${response.status}`;
+  try {
+    const parsed = JSON.parse(response.body) as { error?: unknown };
+    if (typeof parsed.error === "string" && parsed.error.length > 0) {
+      error = parsed.error;
+    }
+  } catch {
+    // Keep the fallback message.
+  }
+  return { kind: "refused", status: response.status, error };
+}
+
 type WireResponse = { status: number; body: string; peerPk: string | null };
 
 // Response bodies are bounded (0.18.0): a compromised or hostile peer must

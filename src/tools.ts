@@ -1,6 +1,7 @@
 import { basename } from "node:path";
 import { randomUUID } from "node:crypto";
-import { postPairCode, sendMail } from "./lib/client.js";
+import { postPairCode, postSpawn, sendMail } from "./lib/client.js";
+import { buildSpawnRequest, validateSpawnSpec } from "./lib/distant-spawn.js";
 import type { MeshDb } from "./lib/db.js";
 import type { Fanout } from "./lib/fanout.js";
 import { buildOfferBlob, parseOfferBlob } from "./lib/offer-blob.js";
@@ -33,7 +34,14 @@ import {
   pairWithToken,
   resolvePeerTarget,
 } from "./lib/peers.js";
-import { readLogTail, removeWorkerLog, runWorker, stopWorker, type SpawnFn } from "./lib/spawn.js";
+import {
+  readLogTail,
+  removeWorkerLog,
+  runWorker,
+  stopWorker,
+  type EnrollIdentity,
+  type SpawnFn,
+} from "./lib/spawn.js";
 import type { HostCapa } from "./lib/capa.js";
 import {
   createWorkerWorktree,
@@ -690,7 +698,7 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
     {
       name: "mesh_spawn",
       description:
-        "Run a task as a headless background worker in an isolated opencode worktree (--auto by default). Returns worker id, worktree, branch. With name: births an ENROLLED fleet agent instead — the child keeps the mesh tools, self-enrolls (mesh_register/mesh_join) at its first turn and joins the pools. Name collisions hand the mailbox over: last binder wins. Refuses past the enrolled spawn quota (spawnMax, default 4 running).",
+        "Run a task as a headless background worker in an isolated opencode worktree (--auto by default). Returns worker id, worktree, branch. With name: births an ENROLLED fleet agent instead — the child keeps the mesh tools, self-enrolls (mesh_register/mesh_join) at its first turn and joins the pools. Name collisions hand the mailbox over: last binder wins. Refuses past the enrolled spawn quota (spawnMax, default 4 running). With node=<paired peer>: the enrolled agent is born ON THAT PEER instead — the request is signed with this node's key, the peer runs its own enrolled-spawn path and DMs back an ack; the worker lives on the peer's registry (reap it there), local spawnMax does not apply.",
       fields: [
         str("task", "Task for the worker"),
         str(
@@ -704,11 +712,12 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
           "Enrolled spawn: pool ids to join; the first becomes the primary group",
           false,
         ),
-        str("model", "Worker provider/model", false),
-        str("agent", "Agent for the worker", false),
-        bool("auto", "Grant all permissions (default true)"),
+        str("node", "Paired peer (node id or hostname): spawn the enrolled agent THERE", false),
+        str("model", "Worker provider/model (local spawn only)", false),
+        str("agent", "Agent for the worker (local spawn only)", false),
+        bool("auto", "Grant all permissions (default true; local spawn only)"),
       ],
-      execute: async (args) => {
+      execute: async (args, context) => {
         const name = typeof args.name === "string" && args.name.length > 0 ? args.name : undefined;
         if (name !== undefined && !/^[A-Za-z0-9._-]{1,64}$/.test(name)) {
           return "error: mailbox name must be 1-64 chars of letters, digits, . _ -";
@@ -724,6 +733,15 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
                 pools,
               }
             : undefined;
+        const node = typeof args.node === "string" && args.node.length > 0 ? args.node : undefined;
+        if (node !== undefined) {
+          return await distantSpawn(mesh, {
+            task: String(args.task),
+            node,
+            ...(enroll !== undefined ? { enroll } : {}),
+            sessionID: sessionID(context),
+          });
+        }
         if (enroll !== undefined) {
           const max = spawnMax ?? 4;
           if (countRunningEnrolled(db) >= max) {
@@ -887,4 +905,75 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
       },
     },
   ];
+}
+
+// Distant spawn (0.24.0): send the signed spawn request to a paired peer and
+// surface its verdict. The peer runs its own enrolled-spawn path; the worker
+// lives on the peer's registry and the ack comes back as a DM.
+async function distantSpawn(
+  mesh: MeshContext,
+  input: { task: string; node: string; enroll?: EnrollIdentity; sessionID: string },
+): Promise<string> {
+  const { db, identity } = mesh;
+  if (input.enroll === undefined) {
+    return "error: distant spawn requires name= (the child enrolls on the peer)";
+  }
+  const specError = validateSpawnSpec(input.enroll);
+  if (specError !== null) {
+    return `error: ${specError}`;
+  }
+  const target = findSendablePeer(db, input.node);
+  if (target === null) {
+    return `error: no paired peer matching ${input.node}; run mesh_status`;
+  }
+  const conn = resolvePeerTarget(db, input.node);
+  if (conn === null) {
+    return `error: peer ${target.node_id} has no known address with a port; have it run mesh_pair to share its address, or wait for discovery`;
+  }
+  // No silent TOFU on a token-authenticated channel (the mesh_send rule): a
+  // TLS peer without a pinned key would accept ANY certificate, so the signed
+  // request could be stolen by a MITM. Refuse; TOFU stays pairing-only.
+  if (conn.tls && conn.pk === null) {
+    return `error: peer ${target.node_id} is TLS but has no pinned key — re-pair with mesh_pair`;
+  }
+  const fromBox = resolveBox(db, input.sessionID);
+  const body = buildSpawnRequest(identity, {
+    spec: {
+      task: input.task,
+      name: input.enroll.name,
+      role: input.enroll.role,
+      pools: input.enroll.pools,
+    },
+    ...(fromBox !== null ? { from_box: fromBox } : {}),
+  });
+  const result = await postSpawn({
+    url: conn.url,
+    ...(conn.tls ? { tls: true } : {}),
+    ...(conn.pk !== null ? { pk: conn.pk } : {}),
+    token: target.token ?? "",
+    body,
+  });
+  if (result.kind === "unreachable") {
+    const hint =
+      result.error === "pin-mismatch"
+        ? " — the peer's identity changed: re-pair with mesh_pair to refresh the pin"
+        : result.error === "plaintext-peer"
+          ? " — the peer answered in plaintext: version skew, it needs opencode-mesh >= 0.24 (distant spawn)"
+          : "";
+    return `error: spawn on ${input.node} failed: ${result.error}${hint}`;
+  }
+  if (result.kind === "refused") {
+    return `error: ${result.error}`;
+  }
+  return JSON.stringify(
+    {
+      node: result.hostname ?? input.node,
+      node_id: target.node_id,
+      worker_id: result.worker_id,
+      mailbox: input.enroll.name,
+      ack: "the peer DMs `spawned <name> on <hostname> (worker <id>)` to your mailbox; the worker lives on the peer's registry — reap it there (mesh_worker_stop on the peer)",
+    },
+    null,
+    2,
+  );
 }

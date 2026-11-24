@@ -1,7 +1,7 @@
 # Protocol
 
 How mesh nodes talk. The mesh is deliberately simple: mDNS for discovery,
-bearer tokens for auth, four HTTP routes.
+bearer tokens for auth, a handful of HTTP routes.
 
 ## Discovery (mDNS)
 
@@ -106,6 +106,7 @@ the node must already be known.
 | `GET` | `/status` | peer token | none | `200 {"node_id": "...", "unread": N}` |
 | `GET` | `/pools` | peer token | none | `200 {"pools": {"<pool>": ["<mailbox>", ...]}}` |
 | `POST` | `/pair-code` | none (bootstrap) | `{"code": "482913", "offer": "MESH1-..."}` | `200 {"ok": true, "counter_offer": "MESH1-..."}` |
+| `POST` | `/spawn` | peer token + Ed25519 | `{"spec": {"task": "...", "name": "...", "role": "worker", "pools": ["team:x"]}, "from": "<node id>", "from_box"?: "<parent mailbox>", "nonce": "<uuid>", "ts": <epoch ms>, "sig": "<base64 ed25519>", "proof"?: "<pk>.<sig>"}` | `200 {"ok": true, "worker_id": "...", "hostname": "...", "name": "..."}` |
 
 The optional mail fields (`to`, `from_box`, `reply_to`, `via`, `origin_id`)
 carry mailbox routing across nodes. A receiving node that recognizes the
@@ -130,12 +131,36 @@ is the capability. It consumes the pending offer matching `code`, binds the
 caller from its `MESH1-` offer blob, and returns a counter-offer blob the
 caller binds to complete the pairing.
 
+`POST /spawn` is the distant spawn (0.24.0): a paired peer births an ENROLLED
+fleet agent on this node. The request is authenticated twice: the pairing
+token (with the standard `proof` so a pending token binds like on `/mail`),
+then an Ed25519 signature (`sig`, base64) over the canonical payload
+`opencode-mesh-spawn:<from>:<nonce>:<ts>:<JSON spec>` — the receiver rebuilds
+it from its own parse and verifies it against the key it PINNED for `from`
+(a peer row without a pinned key is refused: no TOFU on a token-authenticated
+channel). Replay defense is two-fold: `ts` must sit inside a 5 minute window
+and the `(from, nonce)` pair must be unseen. Reception is deny-by-default: the
+operator opts in with `acceptSpawn` (default `false`), and `spawnQuotaPeer`
+(default 2) caps how many enrolled workers ONE requesting peer may keep
+running here. On acceptance the node executes its own local enrolled-spawn
+path (worktree, enrolled child, self-enroll header), stamps the registry row
+with the requesting peer, answers `200 {"ok", "worker_id", "hostname",
+"name"}`, and DMs the parent's mailbox (`from_box`)
+`spawned <name> on <hostname> (worker <id>)`. The worker then lives on the
+receiving node's registry: the parent does not manage it remotely (v1) — the
+spawned agent posts its own `status:` to the pools like any member, and
+reaping is the receiving side's job (`mesh_worker_stop` there).
+
 Status codes:
 
 - `400`: malformed mail body (the receiver could not parse `{from, subject,
   body}` as strings) or a body read failure (socket error, abort mid-body).
 - `401`: missing/unknown token, or the mail `from` does not match the token's
   node id.
+- `403`: `/spawn` refused with an explicit message: `acceptSpawn disabled`
+  (the default), the requesting peer has no pinned key, a stale request
+  (outside the 5 min window), an invalid signature, a replayed nonce, or the
+  per-peer spawn quota reached.
 - `404`: unknown route, or an unknown/expired pairing code on `/pair-code`.
   `/lock`, `/locks`, `/unlock`, `/announce` are
   deliberately absent: locks are local-only and never part of the wire protocol

@@ -10,7 +10,7 @@ export type MeshDb = {
 
 // Bump when a schema change needs a migration step; the version anchors future
 // migrations that cannot be expressed as idempotent `CREATE ... IF NOT EXISTS`.
-const SCHEMA_VERSION = 11;
+const SCHEMA_VERSION = 12;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS peers (
@@ -81,7 +81,8 @@ CREATE TABLE IF NOT EXISTS workers (
   exit_code INTEGER,
   started_at INTEGER NOT NULL,
   finished_at INTEGER,
-  mailbox TEXT
+  mailbox TEXT,
+  spawned_by TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_messages_status_created ON messages(status, created_at);
 CREATE INDEX IF NOT EXISTS idx_pending_tokens_created ON pending_tokens(created_at);
@@ -178,6 +179,11 @@ function migrate(conn: SqliteConn): void {
     .map((row) => row.name);
   if (!workerColumns.includes("mailbox")) {
     conn.exec("ALTER TABLE workers ADD COLUMN mailbox TEXT");
+  }
+  // v12: workers.spawned_by — marks a distant spawn (0.24.0): the node id of
+  // the paired peer that requested the worker, for the per-peer quota.
+  if (!workerColumns.includes("spawned_by")) {
+    conn.exec("ALTER TABLE workers ADD COLUMN spawned_by TEXT");
   }
   conn.exec(INDEXES_V3);
   conn.exec("CREATE INDEX IF NOT EXISTS idx_messages_origin ON messages(origin_id);");
