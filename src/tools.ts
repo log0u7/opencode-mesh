@@ -1043,7 +1043,13 @@ async function distantSpawn(
   const body = buildSpawnRequest(identity, {
     spec,
     ...(fromBox !== null ? { from_box: fromBox } : {}),
-    ...(mesh.projectID !== undefined ? { projectID: mesh.projectID } : {}),
+    // The projectID rides along ONLY on a project opt-in (0.27.0): the
+    // default (session) payload is the spec alone, verifiable by a legacy
+    // receiver; the worktree retarget (0.24.8) still authenticates on its
+    // path since worktree requires project.
+    ...(input.project !== undefined && mesh.projectID !== undefined
+      ? { projectID: mesh.projectID }
+      : {}),
   });
   const result = await postSpawn({
     url: conn.url,
