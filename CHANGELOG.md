@@ -5,6 +5,16 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.23.1] - 2026-11-24
+
+### Fixed
+
+- **Sidebar pools glyph swapped for a narrow one**: the `☰` glyph (U+2624,
+  East-Asian Ambiguous) is drawn double-cell by the terminal, which glued the
+  next character on the panel (seen live by the PO). It is now `≡`
+  (U+2261, Neutral narrow, guaranteed single-cell); the double trailing space
+  of 0.22.1 is kept.
+
 ## [0.23.0] - 2026-11-24
 
 ### Added
