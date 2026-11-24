@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { openMeshDb } from "../src/lib/db.js";
-import { deliverMessage, joinPool, registerMailbox } from "../src/lib/mail.js";
+import { deliverMessage, joinPool, registerMailbox, unreadBoxCount } from "../src/lib/mail.js";
 import {
   startWakeLoop,
   DEFAULT_WAKE_INTERVAL_MS,
@@ -584,6 +584,77 @@ describe("token economy (0.16.0)", () => {
     handle.stop();
 
     expect(prompts[0]?.text).toBe(`mesh: 1 unread — "${"x".repeat(59)}…"`);
+    db.close();
+  });
+});
+
+describe("phantom unread counter (0.24.6): the displayed count is the database's", () => {
+  it("recomputes the count at every flash: acked mail never shows again (0, not 1)", async () => {
+    const { db, prompt, prompts } = setup(["s1"]);
+    registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
+    const handle = startWakeLoop({
+      db,
+      prompt,
+      sessionKnown: () => true,
+      intervalMs: 10,
+      cooldownMs: 0,
+    });
+    // The repro: one delivery → the flash shows 1.
+    deliverMessage(db, { from: "n", to_box: "a", subject: "virtio", body: "b", created_at: 1000 });
+    await new Promise((r) => setTimeout(r, 40));
+    expect(prompts.length).toBeGreaterThanOrEqual(1);
+    expect(prompts[0]?.text).toContain("mesh: 1 unread");
+    expect(unreadBoxCount(db, "a")).toBe(1);
+    const beforeAck = prompts.length;
+    // The ack (what mesh_inbox does) → the count re-asked is 0, NOT 1.
+    db.conn.run("UPDATE deliveries SET status = 'read' WHERE to_box = 'a'");
+    expect(unreadBoxCount(db, "a")).toBe(0);
+    // The count never lives in memory between hooks: silence after the drain.
+    await new Promise((r) => setTimeout(r, 60));
+    handle.stop();
+    expect(prompts.length).toBe(beforeAck);
+    db.close();
+  });
+
+  it("quotes the fresh count, not the one retained from an earlier flash", async () => {
+    const { db, prompt, prompts } = setup(["s1"]);
+    registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
+    for (let i = 0; i < 3; i += 1) {
+      deliverMessage(db, {
+        from: "n",
+        to_box: "a",
+        subject: `m${i}`,
+        body: "b",
+        created_at: 1000 + i,
+      });
+    }
+    const handle = startWakeLoop({
+      db,
+      prompt,
+      sessionKnown: () => true,
+      intervalMs: 10,
+      cooldownMs: 0,
+    });
+    await new Promise((r) => setTimeout(r, 40));
+    expect(prompts[0]?.text).toContain("mesh: 3 unread");
+    const beforeAck = prompts.length;
+    const threes = prompts.filter((p) => p.text.includes("mesh: 3 unread")).length;
+    expect(threes).toBeGreaterThanOrEqual(1);
+    // The agent acks 2 of the 3 (partial drain) → the next flash quotes the
+    // database's 1, never the retained 3.
+    db.conn.run(
+      "UPDATE deliveries SET status = 'read' WHERE id IN (SELECT id FROM deliveries WHERE to_box = 'a' ORDER BY created_at ASC LIMIT 2)",
+    );
+    await new Promise((r) => setTimeout(r, 60));
+    handle.stop();
+    expect(unreadBoxCount(db, "a")).toBe(1);
+    expect(prompts.filter((p) => p.text.includes("mesh: 3 unread")).length).toBe(threes);
+    const afterAck = prompts.slice(beforeAck);
+    expect(afterAck.length).toBeGreaterThanOrEqual(1);
+    for (const p of afterAck) {
+      expect(p.text).toContain("mesh: 1 unread");
+      expect(p.text).not.toContain("mesh: 3 unread");
+    }
     db.close();
   });
 });

@@ -5,6 +5,19 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.24.6] - 2026-11-24
+
+### Fixed
+
+- The notify counter read a stale source: the wake flash baked the unread
+  count into the queued prompt at emission, and the prompt fires later —
+  the displayed number belonged to a past delivery (seen live: 1-5 phantom
+  unreads per turn with an empty inbox, mesh_journal silent, and zero
+  pending in the DB, always the same already-read thread). The count is now
+  recomputed from the DB at every display (`unreadBoxCount`, one cheap
+  COUNT per flash): drained since the stat read → nothing is displayed at
+  all; the count shown is the database's, always.
+
 ## [0.24.5] - 2026-11-24
 
 ### Fixed
