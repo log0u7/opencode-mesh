@@ -9,7 +9,7 @@ import {
 } from "node:fs";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { homedir, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -17,14 +17,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { openMeshDb } from "../src/lib/db.js";
 import { getWorker, insertWorker, reconcileWorkers } from "../src/lib/workers.js";
 import {
-  DEFAULT_SPAWN_WORKSPACE,
   enrollHeader,
   readLogTail,
   removeWorkerLog,
-  resolveSpawnWorkspace,
   runWorker,
   stopWorker,
-  WORKSPACE_BRANCH,
   type SpawnedProcess,
 } from "../src/lib/spawn.js";
 import { joinPool, mailboxByName, registerMailbox } from "../src/lib/mail.js";
@@ -139,6 +136,60 @@ describe("runWorker argv", () => {
     expect(fake.argv).toContain("build");
     expect(fake.argv.at(-1)).toBe("summarize the README");
     expect(fake.argv).not.toContain("--model");
+    db.close();
+  });
+
+  it("session mode: omits --dir so the child keeps the host's natural context", async () => {
+    const db = openMeshDb(":memory:");
+    const fake = fakeSpawn((proc) => proc.emitExit(0));
+
+    const worker = await runWorker(db, dir, {
+      task: "t",
+      spawn_mode: "session",
+      spawnFn: fake.spawnFn,
+    });
+
+    // No cwd override: the child runs where the host's opencode context puts it.
+    expect(fake.argv).not.toContain("--dir");
+    expect(fake.argv.slice(1, 3)).toEqual(["run", "--format"]);
+    // The row records the mode; the NOT NULL registry columns carry an empty
+    // label because no worktree exists.
+    expect(worker.spawn_mode).toBe("session");
+    expect(worker.worktree_path).toBe("");
+    expect(worker.branch).toBe("");
+    db.close();
+  });
+
+  it("project mode: passes the directory as --dir and records the mode", async () => {
+    const db = openMeshDb(":memory:");
+    const fake = fakeSpawn((proc) => proc.emitExit(0));
+
+    const worker = await runWorker(db, dir, {
+      task: "t",
+      worktree_path: "/srv/my-project",
+      spawn_mode: "project",
+      spawnFn: fake.spawnFn,
+    });
+
+    expect(fake.argv.slice(1, 5)).toEqual(["run", "--dir", "/srv/my-project", "--format"]);
+    expect(worker.spawn_mode).toBe("project");
+    expect(worker.worktree_path).toBe("/srv/my-project");
+    db.close();
+  });
+
+  it("defaults the spawn mode from the input shape (0.24.x callers keep worktree)", async () => {
+    const db = openMeshDb(":memory:");
+    const withPath = fakeSpawn((proc) => proc.emitExit(0));
+    const withoutPath = fakeSpawn((proc) => proc.emitExit(0));
+    const worktree = await runWorker(db, dir, {
+      task: "t",
+      worktree_path: "/wt",
+      branch: "b",
+      spawnFn: withPath.spawnFn,
+    });
+    const session = await runWorker(db, dir, { task: "t", spawnFn: withoutPath.spawnFn });
+    expect(worktree.spawn_mode).toBe("worktree");
+    expect(session.spawn_mode).toBe("session");
     db.close();
   });
 
@@ -659,62 +710,6 @@ describe("enrolled spawn (0.23.0)", () => {
 
     // Last binder wins: the box now belongs to ses-2, its pools are not ours.
     expect(mailboxByName(db, "fleet-1")?.pools).toEqual(["team:x"]);
-    db.close();
-  });
-});
-
-describe("resolveSpawnWorkspace (0.25.0)", () => {
-  it("defaults to the fleet workspace and expands ~", () => {
-    expect(DEFAULT_SPAWN_WORKSPACE).toBe("~/projets/fleet");
-    // `~` alone resolves to the home directory (it always exists): the test
-    // never writes into $HOME.
-    expect(resolveSpawnWorkspace("~")).toBe(homedir());
-  });
-
-  it("returns an existing directory as-is", () => {
-    expect(resolveSpawnWorkspace(dir)).toBe(dir);
-  });
-
-  it("refuses a missing workspace with the explicit remedy", () => {
-    const missing = join(dir, "no-such-fleet");
-    expect(() => resolveSpawnWorkspace(missing)).toThrowError(
-      `spawn workspace ${missing} does not exist — create it or set spawnWorkspace`,
-    );
-    // A missing default (~-expanded) reports the resolved path too.
-    expect(() => resolveSpawnWorkspace("~/no-such-fleet")).toThrowError(
-      `spawn workspace ${join(homedir(), "/no-such-fleet")} does not exist — create it or set spawnWorkspace`,
-    );
-  });
-
-  it("refuses a path that exists but is not a directory", () => {
-    const file = join(dir, "a-file");
-    writeFileSync(file, "x");
-    expect(() => resolveSpawnWorkspace(file)).toThrowError(
-      `spawn workspace ${file} is not a directory — create it or set spawnWorkspace`,
-    );
-  });
-});
-
-describe("workspace colleague spawn (0.25.0)", () => {
-  it("runs the enrolled child in the workspace with no project machinery", async () => {
-    const db = openMeshDb(":memory:");
-    const fake = fakeSpawn((proc) => proc.emitExit(0));
-
-    const worker = await runWorker(db, dir, {
-      task: "greet the fleet",
-      worktree_path: dir,
-      branch: WORKSPACE_BRANCH,
-      enroll: { name: "colleague", role: "worker", pools: ["team:x"] },
-      spawnFn: fake.spawnFn,
-    });
-
-    // cwd = the workspace directory, NOT a created worktree.
-    expect(fake.argv.slice(1, 4)).toEqual(["run", "--dir", dir]);
-    expect(fake.env).toEqual([{ OPENCODE_MESH_CHILD: "enrolled" }]);
-    expect(fake.argv.at(-1)).toContain(
-      "mesh_register(name=colleague, role=worker, primary=team:x)",
-    );
-    expect(getWorker(db, worker.id)?.branch).toBe(WORKSPACE_BRANCH);
     db.close();
   });
 });

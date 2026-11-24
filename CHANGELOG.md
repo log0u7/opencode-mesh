@@ -5,33 +5,46 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.25.0] - 2026-11-24
+## [0.26.0] - 2026-11-25
 
-### Changed
+### Added
 
-- The enrolled spawn births a workspace COLLEAGUE by default: an opencode
-  session in the fleet workspace (`spawnWorkspace` option, default
-  `~/projets/fleet`, per host), with no project dependency. The child keeps
-  the enrolled behavior (mesh tools, self-enroll header, logs, session
-  capture, exit tracking, `spawnMax` quota), but no worktree is created and
-  no project machinery runs — the structural
-  `Worktree.SourceDirectoryNotFoundError` is dead by construction. A missing
-  workspace directory refuses the spawn with the remedy: "spawn workspace
-  <path> does not exist — create it or set spawnWorkspace".
-- The project worktree machinery (the 0.23.0/0.24.x path, including the
-  0.24.7 refresh-and-retry and the 0.24.8 retarget) is now OPT-IN: pass
-  `project=<repo path>` to birth the child in a project worktree, for code
-  tasks in a repo. The plain headless worker (no `name`) is unchanged and
-  keeps its worktree.
-- Distant spawn (`node=<paired peer>`) follows the same split: without
-  `project=` the signed payload is the spec alone (the exact legacy
-  signature — old parents verify on new peers) and the peer births the
-  colleague in ITS OWN fleet workspace; with `project=` the parent's
-  projectID is signed along (0.24.8 semantics) and the peer keeps the
-  worktree machinery. A workspace colleague's registry row carries the
-  `workspace` branch sentinel: `mesh_worker_remove` deletes the row and reaps
-  the pools but never hands the shared workspace directory to the worktree
-  API. New option: `spawnWorkspace` (default `~/projets/fleet`).
+- Three spawn modes for mesh_spawn — where the child runs is now a choice,
+  and the default stops being the worktree:
+  - **session** (default): the child runs in the host's natural context — the
+    cwd of the peer's serve — with no directory imposed and zero
+    dependencies. Nothing touches the worktree table or discovery.
+  - **project** (`project=<dir>`): the child runs in that existing directory
+    — a real project, git or not (a non-git project is still a project; the
+    core opencode conflates the two, the mesh does not inherit that). The
+    directory is checked on the target host: locally with a direct existence
+    check, remotely inside the signed request, where the peer answers an
+    explicit refusal "spawn refused: project directory <dir> does not exist
+    on peer".
+  - **worktree** (`worktree: true` + `project=<dir>`): the git isolation,
+    opt-in by choice — the unchanged 0.24.x machinery (worktree create, the
+    0.24.7 discovery refresh retry, the 0.24.8 signed projectID retarget,
+    which lives on this path only). `worktree: true` without `project=` is
+    refused ("worktree requires project").
+- The spawn mode is recorded on the worker row (workers.spawn_mode, schema
+  v14; every pre-0.25.0 row is a worktree spawn) so mesh_worker_remove only
+  ever removes what the mesh created — a project or session spawn keeps its
+  directory, and the worktree API is never called for it.
+- Local back-compat: a nameless headless spawn keeps the legacy worktree
+  behavior; an enrolled spawn (name=) defaults to session mode. The spawn
+  mode travels in the signed distant-spawn spec (project/worktree ride inside
+  the signature, the receiver rebuilds them canonically) and the 0.24.5
+  one-log-line-per-spawn and 0.24.7 SourceDirectoryNotFoundError paths stay
+  dead on the default and project modes (no worktree machinery runs there).
+
+### Removed
+
+- The 0.25.0 fleet-workspace spawn design (`spawnWorkspace` option, the
+  `~/projets/fleet` workspace colleague default, `resolveSpawnWorkspace`,
+  `WORKSPACE_BRANCH`): superseded by the three spawn modes above — a spawned
+  child is now born in the host's natural context by default (session mode),
+  not in a shared workspace directory. The 0.25.0 release shipped that
+  design; this one replaces it one day later, per the validated redesign.
 
 ## [0.24.8] - 2026-11-24
 

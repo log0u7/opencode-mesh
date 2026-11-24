@@ -81,9 +81,6 @@ export const MeshV2 = Plugin.define({
           spawnFn: options.spawnFn ?? nodeSpawn,
           addressing: addressingOptions(options),
           projectID: ctx.location.project.id,
-          ...(options.spawnWorkspace !== undefined
-            ? { spawnWorkspace: options.spawnWorkspace }
-            : {}),
           ...(options.spawnMax !== undefined ? { spawnMax: options.spawnMax } : {}),
         })) {
           editor.add({
@@ -148,7 +145,6 @@ export const MeshV2 = Plugin.define({
         ...(options.spawnWorktreeBase !== undefined
           ? { spawnWorktreeBase: options.spawnWorktreeBase }
           : {}),
-        ...(options.spawnWorkspace !== undefined ? { spawnWorkspace: options.spawnWorkspace } : {}),
         privateKey: identity.private_key,
         worktreeClient,
         spawnFn,
@@ -231,7 +227,6 @@ export const MeshV2 = Plugin.define({
         addressing: addressingOptions(options),
         capa: hostCapa.get,
         projectID: ctx.location.project.id,
-        ...(options.spawnWorkspace !== undefined ? { spawnWorkspace: options.spawnWorkspace } : {}),
         ...(options.spawnMax !== undefined ? { spawnMax: options.spawnMax } : {}),
       })) {
         editor.add({
