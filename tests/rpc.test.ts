@@ -102,7 +102,7 @@ describe("formatMeshSidebarExpanded (v4)", () => {
         { text: "3 unread", tone: "qualifier" },
       ],
       [
-        { text: "  ☰  ", tone: "qualifier" },
+        { text: "  ≡  ", tone: "qualifier" },
         { text: "team:purser", tone: "entity" },
         { text: " (1)", tone: "value" },
       ],
@@ -124,7 +124,7 @@ describe("formatMeshSidebarExpanded (v4)", () => {
     ]);
   });
 
-  it("lists ONLY the pools the asking session belongs to (purser is in one pool: one ☰ row, never other sessions' pools)", () => {
+  it("lists ONLY the pools the asking session belongs to (purser is in one pool: one ≡ row, never other sessions' pools)", () => {
     const s = snapshot();
     s.hats = [{ name: "purser", role: "lead", unread: 0 }];
     s.pools = {
@@ -137,9 +137,9 @@ describe("formatMeshSidebarExpanded (v4)", () => {
       "other:f": ["6admin"],
     };
     const lines = formatMeshSidebarExpanded(s);
-    const poolLines = lines.filter((l) => renderLine(l).startsWith("  ☰  "));
+    const poolLines = lines.filter((l) => renderLine(l).startsWith("  ≡  "));
     expect(poolLines).toHaveLength(1);
-    expect(renderLine(poolLines[0])).toBe("  ☰  team:purser (1)");
+    expect(renderLine(poolLines[0])).toBe("  ≡  team:purser (1)");
     expect(lines.some((l) => renderLine(l).includes("other:"))).toBe(false);
   });
 
@@ -157,8 +157,8 @@ describe("formatMeshSidebarExpanded (v4)", () => {
     expect(renderLine(lines[1])).toBe("  also orchestrator");
     expect(lines.some((l) => renderLine(l).includes("unread"))).toBe(false);
     expect(lines.some((l) => renderLine(l).includes("lock"))).toBe(false);
-    expect(renderLine(lines[2])).toBe("  ☰  team:aa (2)");
-    expect(renderLine(lines[3])).toBe("  ☰  team:zz (1)");
+    expect(renderLine(lines[2])).toBe("  ≡  team:aa (2)");
+    expect(renderLine(lines[3])).toBe("  ≡  team:zz (1)");
     expect(renderLine(lines[4])).toBe("  ⌂  4 agents · 3 pools · 2 hosts");
     expect(renderLine(lines[5])).toBe("  ⇄  desktop");
     expect(lines.some((l) => renderLine(l).includes("team:foreman"))).toBe(false);
@@ -172,8 +172,8 @@ describe("formatMeshSidebarExpanded (v4)", () => {
     s.pools["team:infra"] = ["6admin", "k8s-oci", "orchestrator"];
     const lines = formatMeshSidebarExpanded(s);
     // my pools: team:purser (purser's unread 2), team:infra (orchestrator's 1)
-    expect(renderLine(lines[3])).toBe("  ☰  team:purser (1)");
-    expect(renderLine(lines[4])).toBe("  ☰  team:infra (3)");
+    expect(renderLine(lines[3])).toBe("  ≡  team:purser (1)");
+    expect(renderLine(lines[4])).toBe("  ≡  team:infra (3)");
     expect(lines).toHaveLength(7); // header + also + unread + 2 pools + counters + peer
     expect(lines.some((l) => renderLine(l).includes("team:foreman"))).toBe(false);
   });
@@ -210,12 +210,12 @@ describe("formatMeshSidebarExpanded (v4)", () => {
       p8: ["purser"],
     };
     const lines = formatMeshSidebarExpanded(s);
-    const poolLines = lines.filter((l) => renderLine(l).startsWith("  ☰  "));
+    const poolLines = lines.filter((l) => renderLine(l).startsWith("  ≡  "));
     expect(poolLines).toHaveLength(6); // rows only; the overflow line has no double space
-    expect(renderLine(poolLines[5])).toBe("  ☰  p7 (1)");
-    const overflow = lines.find((l) => renderLine(l).startsWith("  ☰ …"));
+    expect(renderLine(poolLines[5])).toBe("  ≡  p7 (1)");
+    const overflow = lines.find((l) => renderLine(l).startsWith("  ≡ …"));
     expect(overflow).toEqual([
-      { text: "  ☰ …  ", tone: "qualifier" },
+      { text: "  ≡ …  ", tone: "qualifier" },
       { text: "+1 more", tone: "value" },
     ]);
     expect(lines.some((l) => renderLine(l).includes("p6"))).toBe(false);
@@ -230,7 +230,7 @@ describe("formatMeshSidebarExpanded (v4)", () => {
   it("swaps the glyphs for lowercase dim labels when icons=false", () => {
     const lines = formatMeshSidebarExpanded(snapshot(), { icons: false });
     const rendered = lines.map(renderLine).join("\n");
-    expect(rendered).not.toContain("☰");
+    expect(rendered).not.toContain("≡");
     expect(rendered).not.toContain("⌂");
     expect(rendered).not.toContain("⇄");
     expect(renderLine(lines[3])).toBe("  pools team:purser (1)");

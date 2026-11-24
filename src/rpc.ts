@@ -109,7 +109,7 @@ export function peerLabel(peer: { node_id: string; hostname: string; address?: s
  * least one of the session's hats is one of its members), sorted by the
  * session's unread in them (desc, then alpha) and capped at six rows; peers
  * come last, one per line, same cap. `icons: false` swaps the ambiguous-width
- * glyphs (☰ ⌂ ⇄) for lowercase dim labels (pools, fleet, peers): the fallback
+ * glyphs (≡ ⌂ ⇄) for lowercase dim labels (pools, fleet, peers): the fallback
  * for terminals that draw those glyphs double-cell and glue the next
  * character. Glyph segments carry TWO trailing spaces: the first absorbs the
  * extra cell when the terminal draws the glyph wide, the second stays as the
@@ -120,10 +120,10 @@ export function formatMeshSidebarExpanded(
 ): SidebarSegment[][] {
   const icons = opts?.icons !== false;
   const poolMark: SidebarSegment = icons
-    ? { text: "  ☰  ", tone: "qualifier" }
+    ? { text: "  ≡  ", tone: "qualifier" }
     : { text: "  pools ", tone: "value" };
   const poolOverflowMark: SidebarSegment = icons
-    ? { text: "  ☰ …  ", tone: "qualifier" }
+    ? { text: "  ≡ …  ", tone: "qualifier" }
     : { text: "  pools ", tone: "value" };
   const fleetMark: SidebarSegment = icons
     ? { text: "  ⌂  ", tone: "qualifier" }
