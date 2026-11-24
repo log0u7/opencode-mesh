@@ -60,7 +60,7 @@
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
     "smoke:dist": "pnpm run build && node scripts/smoke-dist.mjs",
-    "verify": "pnpm run check && pnpm run typecheck && pnpm run test && pnpm run smoke:dist",
+    "verify": "pnpm run check && pnpm run typecheck && pnpm run typecheck:tests && pnpm run test && pnpm run smoke:dist",
     "prepare": "lefthook install"
   },
   "packageManager": "pnpm@11.0.0",
