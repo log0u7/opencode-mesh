@@ -74,12 +74,39 @@ async function startNode(
     acceptSpawn?: boolean;
     quotaPeer?: number;
     omitDistantSpawn?: boolean;
+    worktreeClient?: WorktreeClient;
+    breakReplay?: boolean;
   } = {},
 ): Promise<Node> {
   const identity = loadOrCreateIdentity(join(dir, name));
-  const db = openMeshDb(":memory:");
+  let db = openMeshDb(":memory:");
+  if (options.breakReplay) {
+    // The nonce store holds the first db write of the wrapped enrolled-spawn
+    // path: a failing write there exercises the handler's 500-with-cause
+    // catch (the empty-message Error doubles as the no-cause case).
+    const conn = db.conn;
+    const brokenConn = new Proxy(conn, {
+      get(target, prop, receiver) {
+        const value = Reflect.get(target, prop, receiver);
+        if (typeof value !== "function") {
+          return value;
+        }
+        return (...args: unknown[]) => {
+          if (String(args[0]).includes("spawn_nonces")) {
+            throw new Error("");
+          }
+          return Reflect.apply(value, target, args);
+        };
+      },
+    });
+    db = new Proxy(db, {
+      get(target, key) {
+        return key === "conn" ? brokenConn : Reflect.get(target, key);
+      },
+    }) as MeshDb;
+  }
   const spawnFn = fakeSpawnFn();
-  const worktreeClient = fakeWorktreeClient();
+  const worktreeClient = options.worktreeClient ?? fakeWorktreeClient();
   const { server, port } = await startMeshServer({
     db,
     port: 0,
@@ -276,6 +303,130 @@ describe("distant spawn e2e: two TLS nodes (0.24.0)", () => {
     expect(listWorkers(b.db)).toHaveLength(0);
     a.server.server.close();
     b.server.server.close();
+  });
+
+  it("answers 500 with the REAL cause when the enrolled path fails (0.24.5)", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const a = await startNode("a-f1");
+    const b = await startNode("b-f1", {
+      worktreeClient: {
+        worktree: {
+          // The live 0.24.5 failure shape: an Error with an EMPTY message
+          // used to surface as a bare "spawn failed: " to the parent.
+          create: async () => {
+            const bomb: unknown = new Error("");
+            throw bomb;
+          },
+          remove: async () => ({ data: true }),
+        },
+      },
+    });
+    pairBoth(a, b, "tF1");
+    const call = tools(a.identity, a.db, fakeWorktreeClient());
+    const out = await call("mesh_spawn", {
+      task: SPEC.task,
+      name: SPEC.name,
+      node: "host-b",
+    });
+    expect(out).toBe("error: spawn failed: Error (no message)");
+    expect(listWorkers(b.db)).toHaveLength(0);
+    // Exactly ONE server log line for the POST, carrying the real cause.
+    const lines = errorSpy.mock.calls
+      .map((c) => c[0])
+      .filter((v): v is string => typeof v === "string" && v.startsWith("[mesh] spawn"));
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain(`name=${SPEC.name}`);
+    expect(lines[0]).toContain("failed: Error (no message)");
+    a.server.server.close();
+    b.server.server.close();
+    errorSpy.mockRestore();
+  });
+
+  it("falls back to an explicit worktree cause when the API error body is empty (0.24.5)", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const a = await startNode("a-f2");
+    const b = await startNode("b-f2", {
+      worktreeClient: {
+        worktree: {
+          // An error envelope whose message fields are EMPTY strings: the
+          // unwrap used to keep "" (?? treats it as present) and the parent
+          // got "spawn failed: worktree API error: ".
+          create: async () => ({ error: { data: { message: "" } } }),
+          remove: async () => ({ data: true }),
+        },
+      },
+    });
+    pairBoth(a, b, "tF2");
+    const call = tools(a.identity, a.db, fakeWorktreeClient());
+    const out = await call("mesh_spawn", { task: SPEC.task, name: SPEC.name, node: "host-b" });
+    expect(out).toBe("error: spawn failed: worktree API error: worktree create failed");
+    expect(listWorkers(b.db)).toHaveLength(0);
+    a.server.server.close();
+    b.server.server.close();
+    errorSpy.mockRestore();
+  });
+
+  it("keeps a diagnosable cause for a non-Error rejection (0.24.5)", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const a = await startNode("a-f3");
+    const b = await startNode("b-f3", {
+      worktreeClient: {
+        worktree: {
+          create: async () => {
+            const bomb: unknown = "";
+            throw bomb;
+          },
+          remove: async () => ({ data: true }),
+        },
+      },
+    });
+    pairBoth(a, b, "tF3");
+    const call = tools(a.identity, a.db, fakeWorktreeClient());
+    const out = await call("mesh_spawn", { task: SPEC.task, name: SPEC.name, node: "host-b" });
+    expect(out).toBe("error: spawn failed: unknown error (no message)");
+    expect(listWorkers(b.db)).toHaveLength(0);
+    a.server.server.close();
+    b.server.server.close();
+    errorSpy.mockRestore();
+  });
+
+  it("answers 500 with a real cause when the post-nonce path throws (0.24.5)", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const a = await startNode("a-f4");
+    // The nonce store holds the first write of the wrapped path: its failure
+    // exercises the handler-level catch (500 + cause + log), not only the
+    // runDistantSpawn one.
+    const b = await startNode("b-f4", { breakReplay: true });
+    pairBoth(a, b, "tF4");
+    const call = tools(a.identity, a.db, fakeWorktreeClient());
+    const out = await call("mesh_spawn", { task: SPEC.task, name: SPEC.name, node: "host-b" });
+    expect(out).toBe("error: spawn failed: Error (no message)");
+    expect(listWorkers(b.db)).toHaveLength(0);
+    const lines = errorSpy.mock.calls
+      .map((c) => c[0])
+      .filter((v): v is string => typeof v === "string" && v.startsWith("[mesh] spawn"));
+    expect(lines).toHaveLength(1);
+    a.server.server.close();
+    b.server.server.close();
+    errorSpy.mockRestore();
+  });
+
+  it("logs exactly one server line per successful POST /spawn (0.24.5)", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const a = await startNode("a-log");
+    const b = await startNode("b-log");
+    pairBoth(a, b, "tLog");
+    const call = tools(a.identity, a.db, fakeWorktreeClient());
+    await call("mesh_spawn", { task: SPEC.task, name: SPEC.name, node: "host-b" });
+    const lines = errorSpy.mock.calls
+      .map((c) => c[0])
+      .filter((v): v is string => typeof v === "string" && v.startsWith("[mesh] spawn"));
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain(`name=${SPEC.name}`);
+    expect(lines[0]).toContain("ok: worker ");
+    a.server.server.close();
+    b.server.server.close();
+    errorSpy.mockRestore();
   });
 
   it("refuses a forged signature on the wire with 403", async () => {

@@ -10,7 +10,7 @@ import {
   rmSync,
   statSync,
 } from "node:fs";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 
 import type { MeshDb } from "./db.js";
 import {
@@ -330,8 +330,21 @@ export function liveWorkerIds(): string[] {
   return [...LIVE_PROCESSES.keys()];
 }
 
+// Bare JS runtimes (dev from source, tests) resolve `opencode` from PATH;
+// anywhere else the plugin IS opencode, so execPath is the exact binary. A
+// service-launched peer can have a PATH without `opencode`: the child then
+// dies as a bare "failed" row with no cause (0.24.5) — resolve explicitly.
+const BARE_RUNTIMES = new Set(["node", "bun", "deno", "tsx"]);
+
+function openCodeArgv0(): string {
+  const name = basename(process.execPath)
+    .toLowerCase()
+    .replace(/\.(exe|cmd|bat)$/, "");
+  return BARE_RUNTIMES.has(name) ? "opencode" : process.execPath;
+}
+
 function buildArgv(input: RunWorkerInput): string[] {
-  const argv = ["opencode", "run", "--dir", input.worktree_path, "--format", "json"];
+  const argv = [openCodeArgv0(), "run", "--dir", input.worktree_path, "--format", "json"];
   if (input.model !== undefined) {
     argv.push("--model", input.model);
   }

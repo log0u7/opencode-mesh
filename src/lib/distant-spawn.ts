@@ -209,6 +209,25 @@ export function validateSpawnSpec(spec: Pick<SpawnSpec, "name" | "role" | "pools
   return null;
 }
 
+// A failure cause that is NEVER empty: an Error with an empty message (a bare
+// `new Error()`, an aborted fetch in some runtimes) used to leave the parent
+// with the bare "spawn failed: " seen live (0.24.5) and the peer without a
+// diagnosable trace.
+export function spawnCause(error: unknown): string {
+  const empty = "unknown error (no message)";
+  if (error instanceof Error) {
+    if (error.message.length > 0) {
+      return error.message;
+    }
+    return error.name.length > 0 ? `${error.name} (no message)` : empty;
+  }
+  if (typeof error === "string") {
+    return error.length > 0 ? error : empty;
+  }
+  const text = String(error).trim();
+  return text.length > 0 ? text : empty;
+}
+
 export type DistantSpawnDeps = {
   db: MeshDb;
   dataDir: string;
@@ -266,8 +285,7 @@ export async function runDistantSpawn(
     if (directory !== undefined) {
       await removeWorkerWorktree(deps.worktreeClient, { directory }).catch(() => false);
     }
-    const message = error instanceof Error ? error.message : String(error);
-    return { ok: false, error: `spawn failed: ${message}` };
+    return { ok: false, error: `spawn failed: ${spawnCause(error)}` };
   }
 }
 

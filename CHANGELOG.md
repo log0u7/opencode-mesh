@@ -5,6 +5,27 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.24.5] - 2026-11-24
+
+### Fixed
+
+- The distant spawn handler failed silently between nonce validation and
+  worker creation (seen live: nonce consumed, workers table empty, no log, an
+  empty error to the parent). The handler now wraps the whole enrolled-spawn
+  path: a failure answers 500 with the explicit cause — the real error
+  message, never an empty string (an empty-message error normalizes to
+  `<name> (no message)`) — and every POST /spawn logs exactly one server
+  line with the outcome (ok / refused / failed + cause).
+- The client surfaces the peer's error message: the parent's verdict carries
+  the peer body's `error` field, and an empty or unreadable body degrades to
+  `spawn failed: <status code>` instead of a bare message.
+- The worker child resolves to the running opencode binary
+  (`process.execPath`) instead of a PATH lookup: a peer launched as a
+  service can have a PATH without `opencode`, and the child then died as a
+  bare failed row. Bare JS runtimes (dev, tests) keep the PATH fallback.
+- The worktree API error envelope no longer treats an empty message string
+  as a message: the explicit fallback applies instead.
+
 ## [0.24.4] - 2026-11-24
 
 ### Changed

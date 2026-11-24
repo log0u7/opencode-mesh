@@ -70,7 +70,12 @@ export function extractClientFetch(pluginClient: unknown): typeof fetch | undefi
 function unwrap<T>(envelope: unknown, fallback: string): T {
   const parsed = (envelope ?? {}) as ApiEnvelope;
   if (parsed.error) {
-    const detail = parsed.error.data?.message ?? parsed.error.message ?? fallback;
+    // An empty message string is no message: fall through to the next source,
+    // then the fallback, or the cause ships empty (the 0.24.5 lesson).
+    const detail =
+      [parsed.error.data?.message, parsed.error.message].find(
+        (v): v is string => typeof v === "string" && v.length > 0,
+      ) ?? fallback;
     throw new Error(`worktree API error: ${detail}`);
   }
   if (parsed.data === undefined) {
