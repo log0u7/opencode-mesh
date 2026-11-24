@@ -12,7 +12,7 @@ import {
   type WorktreeClient,
   type WorktreeDomain,
 } from "./worktree.js";
-import { runWorker, resolveSpawnWorkspace, WORKSPACE_BRANCH, type SpawnFn } from "./spawn.js";
+import { runWorker, WORKSPACE_BRANCH, type SpawnFn } from "./spawn.js";
 import type { Worker } from "./workers.js";
 import { findPeerById, resolvePeerTarget } from "./peers.js";
 import { sendMail } from "./client.js";
@@ -272,17 +272,15 @@ export type DistantSpawnDeps = {
    * signed request retarget the create to the parent's project. Absent on
    * 1.x REST hosts, whose client cannot address another project. */
   worktreeDomain?: WorktreeDomain;
-  /** The fleet workspace of THIS host (0.25.0): where a request without a
-   * projectID births its colleague. Default: ~/projets/fleet. */
-  spawnWorkspace?: string;
 };
 
 export type DistantSpawnResult = { ok: true; worker: Worker } | { ok: false; error: string };
 
 // The peer executes ITS OWN local enrolled-spawn path (runWorker: the enrolled
 // child env, the self-enroll header, logs, session capture, exit tracking) in
-// the fleet workspace (0.25.0 default) or, on a project opt-in (projectID
-// signed), in a worktree named after the mailbox — the 0.23.0/0.24.x machinery
+// ITS NATURAL CONTEXT (0.25.1 default: no directory rides the wire, the child
+// inherits the peer's serve cwd) or, on a project opt-in (projectID signed),
+// in a worktree named after the mailbox — the 0.23.0/0.24.x machinery
 // untouched. The worker row is stamped with the requesting peer so the
 // per-peer quota can count it. A worktree failure cleans the worktree like
 // mesh_spawn does.
@@ -295,12 +293,13 @@ export async function runDistantSpawn(
     return { ok: false, error: specError };
   }
   const enroll = { name: body.spec.name, role: body.spec.role, pools: body.spec.pools };
-  // The 0.25.0 default: a request that names no project births a workspace
-  // COLLEAGUE on this peer — an opencode session in the fleet workspace, no
-  // project dependency, no worktree machinery, the SourceDirectoryNotFoundError
-  // dead by construction. The peer resolves its OWN spawnWorkspace.
+  // The 0.25.1 default: a request that names no project births a COLLEAGUE
+  // on this peer — an opencode session in the peer's NATURAL context (no
+  // directory rides the wire or the request), no project dependency, no
+  // worktree machinery, the SourceDirectoryNotFoundError dead by
+  // construction.
   if (body.projectID === undefined) {
-    return runWorkspaceSpawn(deps, body, enroll);
+    return runColleagueSpawn(deps, body, enroll);
   }
   let directory: string | undefined;
   // Project retarget (0.24.8): a signed request may name the parent's project
@@ -372,24 +371,20 @@ export async function runDistantSpawn(
   }
 }
 
-// The workspace colleague (0.25.0): the peer's own fleet workspace, the same
-// enrolled-spawn runWorker otherwise (env, header, logs, session capture,
-// exit tracking), stamped with the requesting peer for the per-peer quota.
-// No worktree is created, so a failed spawn only deletes the row.
-async function runWorkspaceSpawn(
+// The colleague (0.25.1): the peer's own NATURAL context — the signed
+// request carries no directory, so the peer's enrolled-spawn runWorker
+// launches opencode WITHOUT --dir and the child inherits the cwd the peer's
+// host process already had. Same enrolled behavior otherwise (env, header,
+// logs, session capture, exit tracking), stamped with the requesting peer
+// for the per-peer quota. No worktree is created, so a failed spawn only
+// deletes the row.
+async function runColleagueSpawn(
   deps: DistantSpawnDeps,
   body: SpawnRequestBody,
   enroll: { name: string; role: string; pools: string[] },
 ): Promise<DistantSpawnResult> {
-  let workspace: string;
-  try {
-    workspace = resolveSpawnWorkspace(deps.spawnWorkspace);
-  } catch (error) {
-    return { ok: false, error: spawnCause(error) };
-  }
   const worker = runWorker(deps.db, deps.dataDir, {
     task: body.spec.task,
-    worktree_path: workspace,
     branch: WORKSPACE_BRANCH,
     enroll,
     spawnFn: deps.spawnFn,

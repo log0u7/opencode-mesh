@@ -374,11 +374,13 @@ describe("enrolled spawn (0.23.0)", () => {
     return { spawnFn, calls };
   }
 
-  it("mesh_spawn with name births an enrolled fleet agent", async () => {
+  it("mesh_spawn with name births an enrolled fleet agent (a residual spawnWorkspace option is silently ignored)", async () => {
     const spawned = captureSpawn();
     const { tools, hooks } = await loadTools({
       worktreeClient: fakeWorktreeClient(),
       spawnFn: spawned.spawnFn,
+      // Residual 0.25.0 config: the retired option must not fail setup nor
+      // impose a directory (0.25.1 default = the host's natural context).
       spawnWorkspace: dir,
     });
 
@@ -389,14 +391,14 @@ describe("enrolled spawn (0.23.0)", () => {
           ctx("s1"),
         ),
       ),
-    ) as { worker_id: string; mailbox: string; workspace: string };
+    ) as { worker_id: string; mailbox: string; workspace?: string };
 
     expect(result.mailbox).toBe("fleet-1");
-    // The 0.25.0 default: the child is a workspace COLLEAGUE, cwd = the
-    // configured fleet workspace, no worktree.
-    expect(result.workspace).toBe(dir);
-    expect(spawned.calls[0]?.argv).toContain("--dir");
-    expect(spawned.calls[0]?.argv).toContain(dir);
+    // The 0.25.1 default: the child is a colleague in the host's natural
+    // context — launched WITHOUT --dir, no worktree, no directory in the
+    // answer, and the residual option never imposed one.
+    expect(result.workspace).toBeUndefined();
+    expect(spawned.calls[0]?.argv).not.toContain("--dir");
     expect(spawned.calls[0]?.env?.OPENCODE_MESH_CHILD).toBe("enrolled");
     expect(spawned.calls[0]?.argv.at(-1)).toContain(
       "mesh_register(name=fleet-1, role=reviewer, primary=team:x)",
@@ -439,7 +441,6 @@ describe("enrolled spawn (0.23.0)", () => {
       spawnMax: 1,
       worktreeClient: fakeWorktreeClient(),
       spawnFn: hangingSpawn,
-      spawnWorkspace: dir,
     });
 
     const first = JSON.parse(
@@ -472,7 +473,6 @@ describe("enrolled spawn (0.23.0)", () => {
       worktreeClient: fakeWorktreeClient(),
       // Reports a session then exits 0: a completed enrolled worker.
       spawnFn: okSpawn([{ type: "step_start", sessionID: "ses-9" }]),
-      spawnWorkspace: dir,
     });
 
     const result = JSON.parse(

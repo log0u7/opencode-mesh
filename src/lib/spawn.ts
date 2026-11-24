@@ -9,9 +9,7 @@ import {
   renameSync,
   rmSync,
   statSync,
-  type Stats,
 } from "node:fs";
-import { homedir } from "node:os";
 import { basename, join } from "node:path";
 
 import type { MeshDb } from "./db.js";
@@ -50,33 +48,12 @@ export const CHILD_ENV = { OPENCODE_MESH_CHILD: "1" };
 // turn.
 export const CHILD_ENV_ENROLLED = { OPENCODE_MESH_CHILD: "enrolled" };
 
-// The fleet workspace (0.25.0): where a spawned COLLEAGUE lives by default.
-// A workspace directory shared by the fleet, not a project worktree: the
-// child is a session with a mailbox, like any other agent. Per-host override:
-// the spawnWorkspace option.
-export const DEFAULT_SPAWN_WORKSPACE = "~/projets/fleet";
-
-// The registry branch marker for a workspace-born child: it has no git branch,
-// and mesh_worker_remove must never hand this directory to the worktree API.
+// The registry branch sentinel for a child born with NO directory (the
+// natural-context colleague, 0.25.1): mesh_worker_remove must never hand
+// this row to the worktree API. The value predates 0.25.1 — the retired
+// fleet-workspace colleague (0.25.0) used the same sentinel — so rows
+// written by a 0.25.0 host stay safe on upgrade.
 export const WORKSPACE_BRANCH = "workspace";
-
-// Resolve the fleet workspace directory and refuse a missing one explicitly:
-// a silently wrong cwd would leave the child answering from $HOME. `~` is
-// expanded (options arrive as literal strings from the config).
-export function resolveSpawnWorkspace(configured?: string): string {
-  const raw = configured ?? DEFAULT_SPAWN_WORKSPACE;
-  const path = raw === "~" || raw.startsWith("~/") ? join(homedir(), raw.slice(1)) : raw;
-  let info: Stats;
-  try {
-    info = statSync(path);
-  } catch {
-    throw new Error(`spawn workspace ${path} does not exist — create it or set spawnWorkspace`);
-  }
-  if (!info.isDirectory()) {
-    throw new Error(`spawn workspace ${path} is not a directory — create it or set spawnWorkspace`);
-  }
-  return path;
-}
 
 export type EnrollIdentity = {
   /** The child's mailbox name. */
@@ -160,7 +137,11 @@ export function nodeSpawn(argv: string[], env?: Record<string, string>): Spawned
 
 export type RunWorkerInput = {
   task: string;
-  worktree_path: string;
+  /** Where the child opencode runs (--dir). Absent (0.25.1): the child is a
+   * colleague in the HOST'S NATURAL context — it inherits the cwd the host
+   * process already had, no directory is imposed and no worktree machinery
+   * runs. */
+  worktree_path?: string;
   branch: string;
   model?: string;
   agent?: string;
@@ -192,7 +173,7 @@ export function runWorker(db: MeshDb, dataDir: string, input: RunWorkerInput): W
   // the insert threw, and the pid is only known after spawnFn returns.
   const worker = insertWorker(db, {
     task: input.task,
-    worktree_path: input.worktree_path,
+    worktree_path: input.worktree_path ?? "",
     branch: input.branch,
     pid: null,
     ...(input.enroll !== undefined ? { mailbox: input.enroll.name } : {}),
@@ -374,7 +355,13 @@ function openCodeArgv0(): string {
 }
 
 function buildArgv(input: RunWorkerInput): string[] {
-  const argv = [openCodeArgv0(), "run", "--dir", input.worktree_path, "--format", "json"];
+  const argv = [openCodeArgv0(), "run"];
+  // No worktree_path (the natural-context colleague): NO --dir override, the
+  // child inherits the host process cwd. Anything else stays an override.
+  if (input.worktree_path !== undefined) {
+    argv.push("--dir", input.worktree_path);
+  }
+  argv.push("--format", "json");
   if (input.model !== undefined) {
     argv.push("--model", input.model);
   }

@@ -16,7 +16,7 @@ One OpenCode instance is one brain. When a task outgrows a single session, or yo
 
 - **Same machine:** sessions coordinate through a local registry - messages (`mesh_send` / `mesh_inbox`) and exclusive file claims (`mesh_lock`).
 - **Across the room:** nodes advertise over mDNS and pair with explicit operator approval (per-peer bearer tokens, deny by default). VPN overlay IPs are picked up automatically (Tailscale/Headscale, NetBird, ZeroTier) or declared statically for any tunnel (WireGuard, IPsec, SSL VPN).
-- **Headless workers:** `mesh_spawn` starts an isolated OpenCode worktree per worker, tracks its lifecycle, captures its logs, and cleans up on dispose. With a `name`, the spawn is an enrolled fleet agent: it keeps the mesh tools and joins the fleet at its first turn (0.23.0). Since 0.25.0 that agent is by default a workspace COLLEAGUE — an OpenCode session born in the fleet workspace (`spawnWorkspace`, default `~/projets/fleet`), with no project dependency; the project worktree machinery is opt-in via `project=<repo>`. With `node=<paired peer>`, that agent is born on the peer (signed request, deny-by-default `acceptSpawn`, per-peer quota, ack DM — 0.24.0).
+- **Headless workers:** `mesh_spawn` starts an isolated OpenCode worktree per worker, tracks its lifecycle, captures its logs, and cleans up on dispose. With a `name`, the spawn is an enrolled fleet agent: it keeps the mesh tools and joins the fleet at its first turn (0.23.0). Since 0.25.1 that agent is by default a COLLEAGUE — an OpenCode session born in the host's natural context (its own cwd; no directory is imposed), with no project dependency; the project worktree machinery is opt-in via `project=<repo>`. With `node=<paired peer>`, that agent is born on the peer (signed request, deny-by-default `acceptSpawn`, per-peer quota, ack DM — 0.24.0).
 
 ```mermaid
 flowchart LR
@@ -38,7 +38,7 @@ flowchart LR
 - **Wake idle agents.** A host-side loop watches mailboxes (5 s poll, 60 s per-mailbox cooldown) and injects a prompt into idle sessions, so an agent reacts to incoming work without a human relaying the message.
 - **Multi-host federation.** Pair hosts with a 6-digit code; `team:*` broadcasts fan out to paired peers with anti-loop `via[]` and `origin_id` dedup, and each host keeps master of its own boxes and wake.
 - **Anchored shared memory.** The fleet ledger lives in [opencode-memory](https://www.npmjs.com/package/@log0u7/opencode-memory) 0.11+: epics and tasks anchored to the code they touch self-stale when the code moves, and `supersedes` (0.12+) keeps one truth per decision instead of stacking duplicates.
-- **Spawn headless workers in one call.** `mesh_spawn(task, name)` starts an isolated OpenCode worktree per worker; `mesh_workers`, `mesh_worker_logs`, `mesh_worker_stop` and `mesh_worker_remove` track and reap them. A pool of N workers costs N worktrees, not N mesh nodes. With `name`, `role` and `pools`, the spawn is born a fleet agent (enrolled spawn, 0.23.0) — in the fleet workspace by default (0.25.0), in a project worktree on a `project=` opt-in.
+- **Spawn headless workers in one call.** `mesh_spawn(task, name)` starts an isolated OpenCode worktree per worker; `mesh_workers`, `mesh_worker_logs`, `mesh_worker_stop` and `mesh_worker_remove` track and reap them. A pool of N workers costs N worktrees, not N mesh nodes. With `name`, `role` and `pools`, the spawn is born a fleet agent (enrolled spawn, 0.23.0) — in the host's natural context by default (0.25.1), in a project worktree on a `project=` opt-in.
 - **Deny by default.** Every endpoint requires a per-peer bearer token except the rate-limited pairing bootstrap; pairing codes and offers expire after 30 minutes; every mail carries an Ed25519 proof, so a leaked offer or code alone cannot install or rotate a live credential.
 - **File claims between sessions.** `mesh_lock` gives exclusive claims on paths, enforced between sessions on the same machine (not part of the wire protocol), so two agents never edit the same file.
 - **Deliberately simple wire protocol.** mDNS for discovery, bearer tokens for auth, five HTTP routes (`/mail`, `/status`, `/metrics`, `/pools`, `/pair-code`), plain HTTP over loopback and trusted networks.
@@ -97,7 +97,7 @@ On 2.x hosts the key is `plugins` and each entry is an object:
 
 Node identity and mailbox live under `~/.local/share/opencode-mesh/` (honors `XDG_DATA_HOME`), created with restrictive permissions.
 
-Workers spawned with `mesh_spawn` run with `OPENCODE_MESH_CHILD=1`: they skip the mesh server, mDNS and all mesh tools, so a pool of N workers costs N worktrees, not N mesh nodes. Spawned WITH a `name`, a worker is instead an enrolled fleet agent (`OPENCODE_MESH_CHILD=enrolled`): it keeps the mesh tools, self-enrolls from its prompt header at its first turn and joins its pools; `spawnMax` (default 4) caps the running enrolled workers. Since 0.25.0 the enrolled agent is born in the fleet workspace — the `spawnWorkspace` directory (default `~/projets/fleet`, per host), NOT a project worktree: it is a colleague, a session with a mailbox, like any other agent, and a missing workspace directory refuses the spawn with the remedy (`create it or set spawnWorkspace`). For a code task in a repo, `project=<repo path>` opts back into the project worktree machinery. Spawned with `node=<paired peer>` (0.24.0), the enrolled agent is born ON THAT PEER: the request is signed with this node's key (the project id rides along ONLY on a `project=` opt-in — without one the payload is the spec alone and the peer applies ITS OWN default, its workspace) and the peer — after the operator enabled `acceptSpawn` there — runs its own enrolled-spawn path, stamps the worker with the requesting peer (`spawnQuotaPeer`, default 2, per peer) and DMs back `spawned <name> on <hostname> (worker <id>)`. A distant worker lives on the peer's registry: the parent does not manage it remotely (v1) — the agent posts its own `status:` to the pools like any member, and reaping is the peer's job (`mesh_worker_stop` there).
+Workers spawned with `mesh_spawn` run with `OPENCODE_MESH_CHILD=1`: they skip the mesh server, mDNS and all mesh tools, so a pool of N workers costs N worktrees, not N mesh nodes. Spawned WITH a `name`, a worker is instead an enrolled fleet agent (`OPENCODE_MESH_CHILD=enrolled`): it keeps the mesh tools, self-enrolls from its prompt header at its first turn and joins its pools; `spawnMax` (default 4) caps the running enrolled workers. Since 0.25.1 the enrolled agent is born in the host's NATURAL CONTEXT — it is a colleague, a session with a mailbox, like any other agent: the child opencode is launched WITHOUT a `--dir` override and inherits the cwd the host process already had, and no directory is imposed (the retired 0.25.0 `spawnWorkspace` option, default `~/projets/fleet`, is gone — a residual one in a config is silently ignored). For a code task in a repo, `project=<repo path>` opts into the project worktree machinery. Spawned with `node=<paired peer>` (0.24.0), the enrolled agent is born ON THAT PEER: the request is signed with this node's key (the project id rides along ONLY on a `project=` opt-in — without one the payload is the spec alone, no directory on the wire) and the peer — after the operator enabled `acceptSpawn` there — runs its own enrolled-spawn path, so the child runs in the PEER's natural context (the cwd its serve inherited), stamps the worker with the requesting peer (`spawnQuotaPeer`, default 2, per peer) and DMs back `spawned <name> on <hostname> (worker <id>)`. A distant worker lives on the peer's registry: the parent does not manage it remotely (v1) — the agent posts its own `status:` to the pools like any member, and reaping is the peer's job (`mesh_worker_stop` there).
 
 Note (npm 12): the package ships no lifecycle install scripts and needs no `allowScripts` / allowlist on install (its runtime dependency `bonjour-service` has none either).
 
@@ -240,14 +240,15 @@ flowchart TB
 ```
 mesh_spawn(task="implement the parser", name="parser", project="/repo/parser")     # -> worker_id, worktree, branch (project opt-in)
 mesh_spawn(task="review the diff", name="reviewer", role="reviewer", pools=["team:x"])
-                                                           # -> enrolled fleet agent, born in the fleet
-                                                           #    workspace by default (0.25.0, no worktree):
-                                                           #    keeps the mesh tools, self-enrolls at first turn
+                                                           # -> enrolled fleet agent, a COLLEAGUE born in the
+                                                           #    host's natural context (0.25.1, no directory
+                                                           #    imposed, no worktree): keeps the mesh tools,
+                                                           #    self-enrolls at first turn
 mesh_spawn(task="triage the queue", name="triage", pools=["team:x"], node="ricinus-communis")
                                                            # -> distant spawn (0.24.0): the enrolled agent is
-                                                           #    born on that paired peer — in ITS workspace by
-                                                           #    default (signed request; the peer must run
-                                                           #    acceptSpawn=true); it DMs back
+                                                           #    born on that paired peer — in ITS natural
+                                                           #    context by default (signed request; the peer
+                                                           #    must run acceptSpawn=true); it DMs back
                                                            #    "spawned <name> on <hostname> (worker <id>)"
 mesh_workers()                                             # lifecycle states, session ids
 mesh_worker_logs(worker_id="...", tail=50)                 # captured output
@@ -255,7 +256,7 @@ mesh_worker_stop(worker_id="...")                          # SIGTERM a running w
 mesh_worker_remove(worker_id="...", force=true)            # worktree + registry row cleanup
 ```
 
-Workers run `opencode run --dir <worktree> --format json` headless with `--auto` permissions by default (`auto=false` to require approvals). model/agent are optional args (defaults: your local config). `dispose` SIGTERMs every live worker so stopping opencode never leaves orphan processes.
+Workers born in a worktree run `opencode run --dir <worktree> --format json` headless with `--auto` permissions by default (`auto=false` to require approvals); a colleague (a `name` with no `project=`) runs WITHOUT `--dir`, in the host's own cwd. model/agent are optional args (defaults: your local config). `dispose` SIGTERMs every live worker so stopping opencode never leaves orphan processes.
 
 ### TUI
 

@@ -9,7 +9,7 @@ import {
 } from "node:fs";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { homedir, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -17,11 +17,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { openMeshDb } from "../src/lib/db.js";
 import { getWorker, insertWorker, reconcileWorkers } from "../src/lib/workers.js";
 import {
-  DEFAULT_SPAWN_WORKSPACE,
   enrollHeader,
   readLogTail,
   removeWorkerLog,
-  resolveSpawnWorkspace,
   runWorker,
   stopWorker,
   WORKSPACE_BRANCH,
@@ -663,58 +661,46 @@ describe("enrolled spawn (0.23.0)", () => {
   });
 });
 
-describe("resolveSpawnWorkspace (0.25.0)", () => {
-  it("defaults to the fleet workspace and expands ~", () => {
-    expect(DEFAULT_SPAWN_WORKSPACE).toBe("~/projets/fleet");
-    // `~` alone resolves to the home directory (it always exists): the test
-    // never writes into $HOME.
-    expect(resolveSpawnWorkspace("~")).toBe(homedir());
-  });
-
-  it("returns an existing directory as-is", () => {
-    expect(resolveSpawnWorkspace(dir)).toBe(dir);
-  });
-
-  it("refuses a missing workspace with the explicit remedy", () => {
-    const missing = join(dir, "no-such-fleet");
-    expect(() => resolveSpawnWorkspace(missing)).toThrowError(
-      `spawn workspace ${missing} does not exist — create it or set spawnWorkspace`,
-    );
-    // A missing default (~-expanded) reports the resolved path too.
-    expect(() => resolveSpawnWorkspace("~/no-such-fleet")).toThrowError(
-      `spawn workspace ${join(homedir(), "/no-such-fleet")} does not exist — create it or set spawnWorkspace`,
-    );
-  });
-
-  it("refuses a path that exists but is not a directory", () => {
-    const file = join(dir, "a-file");
-    writeFileSync(file, "x");
-    expect(() => resolveSpawnWorkspace(file)).toThrowError(
-      `spawn workspace ${file} is not a directory — create it or set spawnWorkspace`,
-    );
-  });
-});
-
-describe("workspace colleague spawn (0.25.0)", () => {
-  it("runs the enrolled child in the workspace with no project machinery", async () => {
+describe("colleague spawn without directory (0.25.1)", () => {
+  it("runs the enrolled child in the HOST'S NATURAL context: no --dir override", async () => {
     const db = openMeshDb(":memory:");
     const fake = fakeSpawn((proc) => proc.emitExit(0));
 
     const worker = await runWorker(db, dir, {
       task: "greet the fleet",
-      worktree_path: dir,
       branch: WORKSPACE_BRANCH,
       enroll: { name: "colleague", role: "worker", pools: ["team:x"] },
       spawnFn: fake.spawnFn,
     });
 
-    // cwd = the workspace directory, NOT a created worktree.
-    expect(fake.argv.slice(1, 4)).toEqual(["run", "--dir", dir]);
+    // The child opencode is launched WITHOUT --dir: it inherits the cwd the
+    // host process already had (the natural context) — no directory imposed.
+    expect(fake.argv[1]).toBe("run");
+    expect(fake.argv).not.toContain("--dir");
     expect(fake.env).toEqual([{ OPENCODE_MESH_CHILD: "enrolled" }]);
     expect(fake.argv.at(-1)).toContain(
       "mesh_register(name=colleague, role=worker, primary=team:x)",
     );
+    // The registry row keeps the no-directory sentinel so a later
+    // mesh_worker_remove never hands this row to the worktree API.
     expect(getWorker(db, worker.id)?.branch).toBe(WORKSPACE_BRANCH);
+    expect(getWorker(db, worker.id)?.worktree_path).toBe("");
+    db.close();
+  });
+
+  it("keeps the --dir override for a child born in a worktree (project opt-in)", async () => {
+    const db = openMeshDb(":memory:");
+    const fake = fakeSpawn((proc) => proc.emitExit(0));
+
+    await runWorker(db, dir, {
+      task: "t",
+      worktree_path: "/wt",
+      branch: "wt/x",
+      enroll: { name: "coder", role: "worker", pools: [] },
+      spawnFn: fake.spawnFn,
+    });
+
+    expect(fake.argv.slice(1, 4)).toEqual(["run", "--dir", "/wt"]);
     db.close();
   });
 });

@@ -5,6 +5,26 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.25.1] - 2026-11-24
+
+### Fixed
+
+- The enrolled spawn default is the HOST'S NATURAL CONTEXT. The PO rejected
+  the 0.25.0 fleet workspace (`~/projets/fleet`, deleted from the host): a
+  spawn must never impose a directory. The child opencode now launches
+  WITHOUT a `--dir` override and inherits the cwd the host process already
+  had; the spawn answer carries no directory either. The workspace concept
+  is dropped: the `spawnWorkspace` option, its validation and wiring (v1,
+  v2, serve) and the "spawn workspace <path> does not exist" refusal are
+  removed, and a residual `spawnWorkspace` in a config is silently ignored.
+- Distant spawn follows: the signed payload stays the spec alone (no
+  directory on the wire), and the peer births the colleague in ITS natural
+  context — the cwd its own serve inherited. The `project=<repo>` opt-in
+  (project worktree machinery, 0.23.0-0.24.x untouched) and the plain
+  headless worker are unchanged; a directory-less colleague's registry row
+  keeps the `workspace` branch sentinel (value unchanged, so 0.25.0 rows
+  stay safe) so `mesh_worker_remove` never hands it to the worktree API.
+
 ## [0.25.0] - 2026-11-24
 
 ### Changed
