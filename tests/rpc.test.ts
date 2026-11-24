@@ -315,7 +315,7 @@ describe("formatMeshSidebarExpanded (v4)", () => {
     const lines = formatMeshSidebarExpanded(s);
     expect(lines).toHaveLength(6); // header + also + unread + ≔ + my pool + counters
     expect(lines.some((l) => renderLine(l).includes("⇄"))).toBe(false);
-    expect(renderLine(lines[lines.length - 1])).toBe("  ⌂  4 agents · 3 pools · 1 hosts");
+    expect(renderLine(lines[lines.length - 1])).toBe("  ⌂  4 agents · 3 pools · 1 host");
   });
 });
 
@@ -343,11 +343,30 @@ describe("formatMeshSidebarCollapsed (v4)", () => {
     expect(formatMeshSidebarCollapsed(s)).toEqual([
       { text: "▶ Mesh", tone: "entity" },
       { text: " · ", tone: "value" },
-      { text: "4 agents", tone: "value" },
+      { text: "4", tone: "qualifier" },
+      { text: " agents", tone: "value" },
       { text: " · ", tone: "value" },
-      { text: "3 pools", tone: "value" },
+      { text: "3", tone: "qualifier" },
+      { text: " pools", tone: "value" },
       { text: " · ", tone: "value" },
-      { text: "1 hosts", tone: "value" },
+      { text: "1", tone: "qualifier" },
+      { text: " host", tone: "value" },
     ]);
+  });
+
+  it("pluralizes the counters (1 agent · 1 pool · 1 host, 11 agents), collapsed and expanded", () => {
+    const s = snapshot();
+    s.hats = s.hats.map((h) => ({ ...h, unread: 0 }));
+    s.mailboxes = [s.mailboxes[0]!];
+    s.pools = { "team:purser": ["purser"] };
+    s.peers = [];
+    expect(renderLine(formatMeshSidebarCollapsed(s))).toBe("▶ Mesh · 1 agent · 1 pool · 1 host");
+    const counters = formatMeshSidebarExpanded(s).find((l) => renderLine(l).startsWith("  ⌂  "));
+    expect(renderLine(counters)).toBe("  ⌂  1 agent · 1 pool · 1 host");
+    s.mailboxes = Array.from({ length: 11 }, (_, i) => ({
+      ...s.mailboxes[0]!,
+      name: `mailbox-${i}`,
+    }));
+    expect(renderLine(formatMeshSidebarCollapsed(s))).toBe("▶ Mesh · 11 agents · 1 pool · 1 host");
   });
 });

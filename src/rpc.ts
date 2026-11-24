@@ -111,6 +111,12 @@ function truncateAtWord(text: string, budget: number): string {
   return (space > 0 ? cut.slice(0, space) : cut) + "…";
 }
 
+/** Count labels pluralize like the memory panel's pattern: `1 agent`,
+ * `11 agents`. */
+function plural(kind: string, count: number): string {
+  return count === 1 ? kind : `${kind}s`;
+}
+
 /** Expanded sidebar (v4, quota-style): segment lines, tone per segment. Line 0
  * is the clickable bold header carrying the session's primary identity (the
  * first hat, name only); extra hats render as muted "also" lines. Each hat
@@ -211,13 +217,13 @@ export function formatMeshSidebarExpanded(
   lines.push([
     fleetMark,
     { text: `${s.mailboxes.length}`, tone: "qualifier" },
-    { text: " agents", tone: "value" },
+    { text: ` ${plural("agent", s.mailboxes.length)}`, tone: "value" },
     { text: " · ", tone: "value" },
     { text: `${Object.keys(s.pools).length}`, tone: "qualifier" },
-    { text: " pools", tone: "value" },
+    { text: ` ${plural("pool", Object.keys(s.pools).length)}`, tone: "value" },
     { text: " · ", tone: "value" },
     { text: `${hosts}`, tone: "qualifier" },
-    { text: " hosts", tone: "value" },
+    { text: ` ${plural("host", hosts)}`, tone: "value" },
   ]);
   for (const peer of s.peers.slice(0, ROWS_PER_GROUP)) {
     lines.push([peerMark, { text: peerLabel(peer), tone: "qualifier" }]);
@@ -233,8 +239,10 @@ export function formatMeshSidebarExpanded(
 
 /** Collapsed: ONE line, conditional. Mail pending: the attention state replaces
  * the inventory (`▶ Mesh ● N unread`, nothing else stacked). Quiet: the fleet
- * inventory only, counters in the muted value tone (like the expanded line's
- * unread segment, the attention drops at 0). The first segment carries the
+ * inventory only, each counter three segments (muted ` · ` separator, count in
+ * the qualifier tone, muted label; the 0.23.3 merge into one muted segment
+ * dropped a space and the count tone, restored in 0.24.4). The first segment
+ * carries the
  * toggle glyph (`▶ Mesh`, bold clickable — the expanded header is `▼ Mesh`),
  * restored in 0.24.2 after 0.23.3 dropped it from the conditional lines. */
 export function formatMeshSidebarCollapsed(s: MeshSnapshot): SidebarSegment[] {
@@ -248,13 +256,17 @@ export function formatMeshSidebarCollapsed(s: MeshSnapshot): SidebarSegment[] {
   }
   const hosts = 1 + s.peers.length;
   const counts: Array<[number, string]> = [
-    [s.mailboxes.length, "agents"],
-    [Object.keys(s.pools).length, "pools"],
-    [hosts, "hosts"],
+    [s.mailboxes.length, "agent"],
+    [Object.keys(s.pools).length, "pool"],
+    [hosts, "host"],
   ];
   const line: SidebarSegment[] = [{ text: "▶ Mesh", tone: "entity" }];
   for (const [count, label] of counts) {
-    line.push({ text: " · ", tone: "value" }, { text: `${count} ${label}`, tone: "value" });
+    line.push(
+      { text: " · ", tone: "value" },
+      { text: `${count}`, tone: "qualifier" },
+      { text: ` ${plural(label, count)}`, tone: "value" },
+    );
   }
   return line;
 }
