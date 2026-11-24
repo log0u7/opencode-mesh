@@ -5,6 +5,18 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.27.0] - 2026-11-25
+
+### Changed
+
+- The spawn default is the natural context of the host: the child runs with
+  no directory imposed, locally or on a peer (a session in the host's own
+  cwd). The workspace concept remains dropped — the PO rejected the fleet
+  workspace — and `project=<dir>` / `worktree: true` stay opt-in.
+- A distant spawn signs the projectID only on a project opt-in: the default
+  (session) payload is the spec alone — a legacy receiver still verifies it —
+  and the 0.24.8 worktree retarget keeps its signed project on its own path.
+
 ## [0.26.0] - 2026-11-25
 
 ### Added
