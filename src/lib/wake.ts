@@ -1,5 +1,5 @@
 import type { MeshDb } from "./db.js";
-import { listMailboxes, wakeBoxStats } from "./mail.js";
+import { listMailboxes, unreadBoxCount, wakeBoxStats } from "./mail.js";
 
 // Wake loop: polls every registered mailbox in the shared local database and,
 // when unread mail appears in a box whose session lives on THIS host, injects
@@ -138,10 +138,25 @@ export function startWakeLoop(options: WakeOptions): WakeHandle {
         }
         lastPromptAt.set(box.name, now);
         undrained.set(box.name, cycles + 1);
+        // The flash recomputes from the database at the moment it is emitted
+        // (0.24.6): the tick-start grouped stat can be seconds old by the time
+        // the loop reaches this box, and the prompt is queued — it fires later
+        // still. A count retained from a past delivery reads as a phantom
+        // (observed live: 1-5 phantom unreads per turn with an empty inbox and
+        // zero pending in the DB). One cheap COUNT per flash: drained since
+        // the stat read → nothing is displayed at all; the count shown is the
+        // database's, always.
+        const fresh = unreadBoxCount(options.db, box.name);
+        if (fresh === 0) {
+          lastUnread.delete(box.name);
+          undrained.delete(box.name);
+          continue;
+        }
+        lastUnread.set(box.name, fresh);
         // Dispose during this tick (stop() below the running interval): the
         // prompt would fire into a torn-down host binding.
         if (stopped) return;
-        // The unread count comes from this process' database, read one line
+        // The unread count was read from this process' database one statement
         // above the prompt: never an inherited or cached state. Compact
         // notification (0.16.0): count + first pending subject, truncated to
         // 60 chars — the message stays self-carrier, the agent knows
@@ -151,7 +166,7 @@ export function startWakeLoop(options: WakeOptions): WakeHandle {
           subject === null ? "" : subject.length > 60 ? `${subject.slice(0, 59)}…` : subject;
         await options.prompt(
           box.session_id,
-          preview === "" ? `mesh: ${unread} unread` : `mesh: ${unread} unread — "${preview}"`,
+          preview === "" ? `mesh: ${fresh} unread` : `mesh: ${fresh} unread — "${preview}"`,
         );
         // The prompt resolved after dispose: do not touch any further box.
         if (stopped) return;
