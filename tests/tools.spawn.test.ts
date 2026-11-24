@@ -29,7 +29,7 @@ function captureSpawn(): {
 } {
   const calls: Array<{ argv: string[]; env?: Record<string, string> }> = [];
   const spawnFn: SpawnFn = (argv, env) => {
-    calls.push({ argv, env });
+    calls.push({ argv, ...(env !== undefined ? { env } : {}) });
     return {
       pid: 4242,
       stdout: { on: () => {} },
