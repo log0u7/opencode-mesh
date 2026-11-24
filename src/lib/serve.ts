@@ -4,6 +4,7 @@ import { createServer as createHttpsServer } from "node:https";
 
 import type { MeshDb } from "./db.js";
 import { authenticateToken } from "./peers.js";
+import type { HostCapa } from "./capa.js";
 import type { TlsMaterial } from "./tls.js";
 import {
   deliverMessage,
@@ -59,6 +60,10 @@ export type MeshServerOptions = {
   /** Where /memory-sync stores peers' pushed JSONL (the inbox tree). Absent =
    * the endpoint answers 503: the plugin always passes its dataDir. */
   dataDir?: string;
+  /** Shared host-capability provider (createHostCapa): /status and /metrics
+   * read the SAME 60 s cache, so a scrape never doubles the probes. Absent =
+   * /metrics renders only the db counters. */
+  capa?: () => Promise<HostCapa>;
 };
 
 export type MeshServer = {
@@ -391,7 +396,22 @@ async function handle(
     json(res, 200, {
       node_id: peer.node_id,
       unread: unreadCount(db),
+      ...(options.capa ? { capa: await options.capa() } : {}),
     });
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/metrics") {
+    // Prometheus text format (the lingua franca: VictoriaMetrics ingests it
+    // natively). Same bearer-token auth as /status — Prometheus sends the
+    // Authorization header natively.
+    const peer = authenticate(db, req);
+    if (!peer) {
+      json(res, 401, { error: "unauthorized" });
+      return;
+    }
+    res.writeHead(200, { "content-type": "text/plain; version=1.0.0; charset=utf-8" });
+    res.end(await renderMetrics(db, options.capa));
     return;
   }
 
@@ -458,6 +478,42 @@ function unreadDeliveries(db: MeshDb): number {
       "SELECT COUNT(*) AS count FROM deliveries WHERE status = 'unread'",
     )?.count ?? 0
   );
+}
+
+// Prometheus text exposition: HELP + TYPE + one sample line per metric. The
+// capa gauges render only when the shared provider answered with them (a
+// CPU-only machine has no gpu metric); the db counters always render.
+async function renderMetrics(db: MeshDb, capa?: () => Promise<HostCapa>): Promise<string> {
+  const lines: string[] = [];
+  const push = (name: string, help: string, value: number): void => {
+    lines.push(`# HELP ${name} ${help}`, `# TYPE ${name} gauge`, `${name} ${value}`);
+  };
+  push(
+    "opencode_mesh_messages_total",
+    "Messages stored on this node (all statuses)",
+    db.conn.get<{ count: number }>("SELECT COUNT(*) AS count FROM messages")?.count ?? 0,
+  );
+  push(
+    "opencode_mesh_deliveries_unread",
+    "Unread box deliveries across every mailbox",
+    unreadDeliveries(db),
+  );
+  if (capa) {
+    const s = await capa();
+    push("opencode_mesh_cpu_load_avg", "One-minute load average", s.cpu.loadAvg);
+    push("opencode_mesh_ram_used_mb", "Resident memory in use, MB", s.ram.usedMb);
+    push("opencode_mesh_ram_total_mb", "Total resident memory, MB", s.ram.totalMb);
+    if (s.gpu) {
+      push("opencode_mesh_gpu_vram_used_mb", "GPU VRAM in use, MB", s.gpu.vramUsedMb);
+    }
+    push(
+      "opencode_mesh_workers_in_flight",
+      "mesh_workers rows in running state",
+      s.workersInFlight,
+    );
+    push("opencode_mesh_sessions_running", "Sessions currently mid-turn", s.sessionsRunning);
+  }
+  return `${lines.join("\n")}\n`;
 }
 
 function parseMail(raw: string): MailBody | null {

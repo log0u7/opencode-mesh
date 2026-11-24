@@ -3,8 +3,6 @@ import { describe, expect, it } from "vitest";
 import {
   ackMessages,
   deliverMessage,
-  firstPendingSubject,
-  hasWakeableUnread,
   inboxRead,
   joinPool,
   receiveMessage,
@@ -13,7 +11,14 @@ import {
   unreadCount,
   unreadMessages,
   waitReplyRead,
+  wakeBoxStats,
 } from "../src/lib/mail.js";
+
+/** The wake loop reads per-box stats in one grouped query; the gate tests
+ * below assert through that same function. */
+function statOf(db: Parameters<typeof wakeBoxStats>[0], box: string) {
+  return wakeBoxStats(db).find((s) => s.box === box);
+}
 import { openMeshDb } from "../src/lib/db.js";
 
 describe("mail ack flow", () => {
@@ -144,8 +149,8 @@ describe("wake flag (0.17.0 Slack model)", () => {
 
     expect(unreadBoxCount(db, "b")).toBe(1);
     expect(unreadBoxCount(db, "c")).toBe(1);
-    expect(hasWakeableUnread(db, "b")).toBe(false);
-    expect(hasWakeableUnread(db, "c")).toBe(false);
+    expect(statOf(db, "b")?.wakeable).toBe(false);
+    expect(statOf(db, "c")?.wakeable).toBe(false);
     db.close();
   });
 
@@ -163,8 +168,8 @@ describe("wake flag (0.17.0 Slack model)", () => {
     expect(r.ok).toBe(true);
     if (!r.ok) return;
 
-    expect(hasWakeableUnread(db, "b")).toBe(true);
-    expect(hasWakeableUnread(db, "c")).toBe(true);
+    expect(statOf(db, "b")?.wakeable).toBe(true);
+    expect(statOf(db, "c")?.wakeable).toBe(true);
     db.close();
   });
 
@@ -207,7 +212,7 @@ describe("wake flag (0.17.0 Slack model)", () => {
       origin_id: "origin-1",
       created_at: 1000,
     });
-    expect(hasWakeableUnread(db, "a")).toBe(false);
+    expect(statOf(db, "a")?.wakeable).toBe(false);
 
     deliverMessage(db, {
       from: "n",
@@ -218,7 +223,7 @@ describe("wake flag (0.17.0 Slack model)", () => {
       wake: true,
       created_at: 2000,
     });
-    expect(hasWakeableUnread(db, "a")).toBe(true);
+    expect(statOf(db, "a")?.wakeable).toBe(true);
     db.close();
   });
 
@@ -226,7 +231,7 @@ describe("wake flag (0.17.0 Slack model)", () => {
     const db = openMeshDb(":memory:");
     registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
     deliverMessage(db, { from: "n", to_box: "a", subject: "dm", body: "b", created_at: 1000 });
-    expect(hasWakeableUnread(db, "a")).toBe(true);
+    expect(statOf(db, "a")?.wakeable).toBe(true);
     db.close();
   });
 });
@@ -339,15 +344,15 @@ describe("content dedup at delivery (0.20.0 sender re-send defense)", () => {
 });
 
 describe("wake gates (0.16.0 token economy)", () => {
-  it("hasWakeableUnread: true for a direct mail, false for a fanout", () => {
+  it("wakeBoxStats: wakeable true for a direct mail, false for a fanout", () => {
     const db = openMeshDb(":memory:");
     registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
     deliverMessage(db, { from: "n", to_box: "a", subject: "dm", body: "b", created_at: 1000 });
-    expect(hasWakeableUnread(db, "a")).toBe(true);
+    expect(statOf(db, "a")?.wakeable).toBe(true);
     db.close();
   });
 
-  it("hasWakeableUnread: fanout (origin_id differs from id) is not direct", () => {
+  it("wakeBoxStats: fanout (origin_id differs from id) is not direct", () => {
     const db = openMeshDb(":memory:");
     registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
     deliverMessage(db, {
@@ -358,11 +363,11 @@ describe("wake gates (0.16.0 token economy)", () => {
       origin_id: "origin-1",
       created_at: 1000,
     });
-    expect(hasWakeableUnread(db, "a")).toBe(false);
+    expect(statOf(db, "a")?.wakeable).toBe(false);
     db.close();
   });
 
-  it("hasWakeableUnread: legacy rows (origin_id NULL) count as direct", () => {
+  it("wakeBoxStats: legacy rows (origin_id NULL) count as direct", () => {
     const db = openMeshDb(":memory:");
     registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
     db.conn.run(
@@ -372,17 +377,18 @@ describe("wake gates (0.16.0 token economy)", () => {
     db.conn.run(
       "INSERT INTO deliveries (id, message_id, to_box, status, created_at) VALUES ('d-legacy', 'm-legacy', 'a', 'unread', 1000)",
     );
-    expect(hasWakeableUnread(db, "a")).toBe(true);
+    expect(statOf(db, "a")?.wakeable).toBe(true);
     db.close();
   });
 
-  it("firstPendingSubject: oldest unread delivery, null when drained", () => {
+  it("wakeBoxStats: subject is the OLDEST unread delivery; a drained box has no row", () => {
     const db = openMeshDb(":memory:");
     registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
-    expect(firstPendingSubject(db, "a")).toBeNull();
+    expect(statOf(db, "a")).toBeUndefined();
     deliverMessage(db, { from: "n", to_box: "a", subject: "first", body: "b", created_at: 1000 });
     deliverMessage(db, { from: "n", to_box: "a", subject: "second", body: "b", created_at: 2000 });
-    expect(firstPendingSubject(db, "a")).toBe("first");
+    expect(statOf(db, "a")?.subject).toBe("first");
+    expect(statOf(db, "a")?.unread).toBe(2);
     db.close();
   });
 });

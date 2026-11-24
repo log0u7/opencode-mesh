@@ -1,5 +1,7 @@
 import { Rpc } from "@opencode/plugin/rpc";
 
+import type { HostCapa } from "./lib/capa.js";
+
 // The TUI sidebar reads one compact snapshot per tick over RPC. The pure helpers
 // (snapshotFromMesh, formatMeshSidebar) are testable without a renderer; the
 // definition itself carries the wire schema.
@@ -16,6 +18,8 @@ export type MailboxInfo = {
 export type MeshSnapshot = {
   node_id: string;
   hostname: string;
+  /** Host capabilities snapshot (60 s cache) when the setup side provided one. */
+  capa?: HostCapa;
   /** Paired peers only: discovery alone never makes a peer sendable. */
   peers: Array<{ node_id: string; hostname: string; address?: string }>;
   active_locks: number;
@@ -31,6 +35,7 @@ export type MeshSnapshot = {
 /** Structural input: the mesh context (identity, listPeers, listLocks) satisfies this. */
 export type SnapshotInput = {
   identity: { node_id: string; hostname: string };
+  capa?: HostCapa;
   peers: ReadonlyArray<{ node_id: string; hostname: string; paired: boolean }>;
   locks: ReadonlyArray<unknown>;
   server: string;
@@ -43,6 +48,7 @@ export function snapshotFromMesh(data: SnapshotInput): MeshSnapshot {
   return {
     node_id: data.identity.node_id,
     hostname: data.identity.hostname,
+    ...(data.capa !== undefined ? { capa: data.capa } : {}),
     peers: data.peers
       .filter((p) => p.paired)
       .map((p) => ({ node_id: p.node_id, hostname: p.hostname })),
@@ -159,6 +165,45 @@ export const MeshRpc = Rpc.define({
         properties: {
           node_id: { type: "string", description: "This node's id" },
           hostname: { type: "string", description: "This node's hostname" },
+          capa: {
+            type: "object",
+            description: "Host capabilities snapshot (60 s cache)",
+            properties: {
+              cpu: {
+                type: "object",
+                properties: {
+                  cores: { type: "number" },
+                  loadAvg: { type: "number" },
+                },
+                required: ["cores", "loadAvg"],
+                additionalProperties: false,
+              },
+              ram: {
+                type: "object",
+                properties: {
+                  totalMb: { type: "number" },
+                  usedMb: { type: "number" },
+                },
+                required: ["totalMb", "usedMb"],
+                additionalProperties: false,
+              },
+              gpu: {
+                type: "object",
+                description: "Present only when nvidia-smi answers",
+                properties: {
+                  model: { type: "string" },
+                  vramTotalMb: { type: "number" },
+                  vramUsedMb: { type: "number" },
+                },
+                required: ["model", "vramTotalMb", "vramUsedMb"],
+                additionalProperties: false,
+              },
+              workersInFlight: { type: "number" },
+              sessionsRunning: { type: "number" },
+            },
+            required: ["cpu", "ram", "workersInFlight", "sessionsRunning"],
+            additionalProperties: false,
+          },
           peers: {
             type: "array",
             items: {

@@ -147,6 +147,17 @@ const TOOL_NAMES = [
 ].sort();
 
 describe("opencode-mesh v2 setup", () => {
+  it("exposes host capabilities through the RPC snapshot", async () => {
+    const { ctx, rpcHandlers } = fakeCtx(tmpDataDir());
+    const cleanup = await pluginModule.setup(ctx);
+    const snap = (await rpcHandlers.snapshot?.({ sessionID: "s1" })) as {
+      capa?: { cpu: { cores: number }; sessionsRunning: number };
+    };
+    expect(snap.capa?.cpu.cores).toBeGreaterThan(0);
+    expect(snap.capa?.sessionsRunning).toBe(0);
+    await cleanup?.();
+  });
+
   it("registers the mesh tools", async () => {
     const { ctx, added } = fakeCtx(tmpDataDir());
     const cleanup = await pluginModule.setup(ctx);

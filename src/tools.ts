@@ -34,6 +34,7 @@ import {
   resolvePeerTarget,
 } from "./lib/peers.js";
 import { readLogTail, removeWorkerLog, runWorker, stopWorker, type SpawnFn } from "./lib/spawn.js";
+import type { HostCapa } from "./lib/capa.js";
 import {
   createWorkerWorktree,
   removeWorkerWorktree,
@@ -78,6 +79,9 @@ export type MeshContext = {
   /** Address providers config + static tunnel addresses: the advertised
    * candidate IPs (mesh_status `tailnet_addresses`). */
   addressing?: AddressOptions;
+  /** Shared host-capability provider (createHostCapa): mesh_status reads the
+   * same 60 s cache as /status and /metrics. Absent = no capa field. */
+  capa?: () => Promise<HostCapa>;
 };
 
 function str(name: string, description: string, required = true): ToolField {
@@ -134,16 +138,18 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
     worktreeClient,
     spawnFn,
     addressing,
+    capa: capa_,
   } = mesh;
   return [
     {
       name: "mesh_status",
-      description: "Show this node's identity, server address, and known peers.",
+      description: "Show this node's identity, address, host capabilities and peers.",
       fields: [],
       execute: async (args, context) => {
         const peers = listPeers(db);
         const ownAddresses = await listOwnAddresses(addressing);
         const now = Date.now();
+        const capa = capa_ ? await capa_().catch(() => null) : null;
         return JSON.stringify(
           {
             node_id: identity.node_id,
@@ -170,6 +176,7 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
             })),
             unread: unreadCount(db),
             locks: listLocks(db, { now: Date.now() }),
+            ...(capa !== null ? { capa } : {}),
           },
           null,
           2,
@@ -180,18 +187,14 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
     {
       name: "mesh_pair",
       description:
-        "Pair with a peer. With no args: emit a 6-digit pairing code (30 min). With code=: complete pairing on the peer running mesh_pair() — LAN autodiscovers the address, cross-subnet adds address=. With offer=: complete a MESH1- offer blob (agents, files). Legacy node_id/token still accepted.",
+        "Pair two nodes. Bare: emit a 6-digit code (30 min). code=: complete (LAN autodiscovers; cross-subnet: address=). offer=: complete a MESH1- blob. Legacy node_id/token.",
       fields: [
-        str("code", "6-digit pairing code shown by the peer's mesh_pair()", false),
-        str(
-          "address",
-          "Peer server address as host:port (cross-subnet only; LAN autodiscovers)",
-          false,
-        ),
-        str("offer", "MESH1- offer blob from the peer's mesh_pair output", false),
-        str("node_id", "Peer node id (legacy completion)", false),
-        str("token", "Pairing token (legacy completion)", false),
-        str("pk", "Peer public key (legacy completion)", false),
+        str("code", "Code shown by the peer's mesh_pair()", false),
+        str("address", "Peer host:port (cross-subnet; LAN autodiscovers)", false),
+        str("offer", "MESH1- blob from the peer's output", false),
+        str("node_id", "Peer node id (legacy)", false),
+        str("token", "Pairing token (legacy)", false),
+        str("pk", "Peer public key (legacy)", false),
       ],
       execute: async (args) => {
         // Code flow: one 6-digit code, both directions.
@@ -310,15 +313,11 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
     {
       name: "mesh_register",
       description:
-        "Register this session's mailbox under a name so other sessions and pools can route mail to it. primary: your primary group (pool id) — joined automatically if you have not joined it yet; its lead receives your enrollment confirmation (falls back to the orchestrator when the lead is you or offline)",
+        "Register a mailbox for this session. primary: your primary group (pool id), auto-joined; its lead gets enrollment confirmation (orchestrator fallback when the lead is you or offline)",
       fields: [
-        str("name", "Mailbox name: letters, digits, . _ - (max 64 chars)"),
-        str("role", "Informational role, e.g. manager", false),
-        str(
-          "primary",
-          "Pool id of your primary group, e.g. team:infra (must exist; auto-joins if not joined yet)",
-          false,
-        ),
+        str("name", "Mailbox name: letters, digits, . _ - (max 64)"),
+        str("role", "Role, e.g. manager", false),
+        str("primary", "Primary pool id, e.g. team:infra (must exist; auto-joins)", false),
       ],
       execute: async (args, context) => {
         const name = String(args.name);
@@ -351,18 +350,15 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
     {
       name: "mesh_send",
       description:
-        "Send a message: to a mailbox name, 'team:<pool>' or 'all' on this node, or to a paired peer on another node.",
+        "Send a message: a mailbox, 'team:<pool>' or 'all' (local), or a paired peer (remote).",
       fields: [
-        str("peer", "Peer node id or hostname (remote send)", false),
-        str("to", "Mailbox name, 'team:<pool>' or 'all' (local delivery)", false),
+        str("peer", "Peer node id or hostname (remote)", false),
+        str("to", "Mailbox, 'team:<pool>' or 'all' (local)", false),
         str("subject", "Short subject"),
         str("body", "Message body"),
-        str("reply_to", "Message id this message answers, from mesh_send output", false),
-        str("box", "Which of YOUR mailboxes sends (multi-box sessions)", false),
-        bool(
-          "wake",
-          "Wake every recipient — use when the message is deliberately addressed to the whole pool and must be seen now. Direct mail always wakes.",
-        ),
+        str("reply_to", "Id this answers, from mesh_send output", false),
+        str("box", "Your sending mailbox", false),
+        bool("wake", "Wake all recipients (deliberate broadcast). Direct mail always wakes."),
       ],
       execute: async (args, context) => {
         const peer = typeof args.peer === "string" ? args.peer : null;
@@ -491,8 +487,8 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
     {
       name: "mesh_inbox",
       description:
-        "List unread messages for this session's mailbox (unregistered sessions see the legacy global feed) and mark them read.",
-      fields: [bool("ack", "Mark messages read (default true)")],
+        "List this session's unread mail (unregistered: legacy global feed) and mark it read.",
+      fields: [bool("ack", "Mark read (default true)")],
       execute: async (args, context) => {
         const sid = sessionID(context);
         touchMailbox(db, sid, Date.now());
@@ -523,9 +519,9 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
     {
       name: "mesh_wait",
       description:
-        "Wait for a reply to one of your sent messages (matching its reply_to) and return it. Blocks the agent turn by design: request/response completes within one turn.",
+        "Wait for a reply to a sent message (matching its reply_to). Blocks the turn: request/response completes within it.",
       fields: [
-        str("id", "Message id to wait a reply for, from mesh_send output"),
+        str("id", "Message id from mesh_send output"),
         num("timeout", "Seconds to wait (default 120)"),
       ],
       execute: async (args, context) => {
@@ -548,12 +544,12 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
     {
       name: "mesh_journal",
       description:
-        "Read-only journal of mesh traffic this machine saw — who said what to whom, when. Consultable on demand; replaces narrating routine ops to the human.",
+        "Read-only journal of mesh traffic: who said what to whom, when. Consult on demand instead of narrating ops.",
       fields: [
-        str("since", "Only entries at or after this time: ISO date or epoch ms", false),
-        str("mailbox", "Only entries where this mailbox is sender or recipient", false),
+        str("since", "Entries at or after this time: ISO date or epoch ms", false),
+        str("mailbox", "Filter: sender or recipient mailbox", false),
         num("limit", "Max entries, newest first (default 50, max 200)"),
-        bool("pool", "Only pool/broadcast traffic (more than one recipient)"),
+        bool("pool", "Only pool/broadcast traffic"),
       ],
       execute: async (args) => {
         let since: number | undefined;
@@ -582,10 +578,10 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
     {
       name: "mesh_join",
       description:
-        "Join a pool (e.g. team:x) so broadcasts to that pool reach this mailbox. Defaults to the most recently touched box of this session.",
+        "Join a pool (e.g. team:x) so its broadcasts reach this mailbox. Defaults to the last touched box.",
       fields: [
         str("pool", "Pool id, e.g. team:x"),
-        str("box", "Which of YOUR mailboxes joins (multi-box sessions)", false),
+        str("box", "Which of your mailboxes joins", false),
       ],
       execute: async (args, context) => {
         const boxName = resolveBox(
@@ -605,10 +601,10 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
 
     {
       name: "mesh_leave",
-      description: "Leave a pool joined with mesh_join. Defaults to the most recently touched box.",
+      description: "Leave a pool joined with mesh_join. Defaults to the last touched box.",
       fields: [
         str("pool", "Pool id, e.g. team:x"),
-        str("box", "Which of YOUR mailboxes leaves (multi-box sessions)", false),
+        str("box", "Which of your mailboxes leaves", false),
       ],
       execute: async (args, context) => {
         const boxName = resolveBox(
@@ -647,10 +643,10 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
     {
       name: "mesh_lock",
       description:
-        "Claim exclusive ownership of a file or path so other sessions on THIS MACHINE wait. Not distributed: a peer on another node does not see this lock.",
+        "Claim a path: other sessions on THIS MACHINE wait. Not distributed (other nodes do not see it).",
       fields: [
-        str("path", "Path to lock (relative to worktree or absolute)"),
-        num("ttl", "Seconds before the lock expires (default 600)"),
+        str("path", "Path to lock (worktree-relative or absolute)"),
+        num("ttl", "Seconds before expiry (default 600)"),
       ],
       execute: async (args, context) => {
         const path = String(args.path);
@@ -681,13 +677,13 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
     {
       name: "mesh_spawn",
       description:
-        "Run a task as a background worker in an isolated opencode worktree (headless, --auto permissions by default). Returns worker id, worktree, and branch.",
+        "Run a task as a headless background worker in an isolated opencode worktree (--auto by default). Returns worker id, worktree, branch.",
       fields: [
-        str("task", "Task description given to the worker"),
-        str("name", "Worktree/branch name (random by default)", false),
-        str("model", "provider/model for the worker", false),
+        str("task", "Task for the worker"),
+        str("name", "Worktree/branch name (random)", false),
+        str("model", "Worker provider/model", false),
         str("agent", "Agent for the worker", false),
-        bool("auto", "Grant all permissions to the worker (default true)"),
+        bool("auto", "Grant all permissions (default true)"),
       ],
       execute: async (args) => {
         let info: WorktreeInfo | undefined;
@@ -750,7 +746,7 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
 
     {
       name: "mesh_workers",
-      description: "List spawned workers with their lifecycle state.",
+      description: "List workers with their lifecycle state.",
       fields: [],
       execute: async () => {
         const workers = listWorkers(db);
@@ -763,11 +759,8 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
 
     {
       name: "mesh_worker_logs",
-      description: "Show the tail of a worker's captured output.",
-      fields: [
-        str("worker_id", "Worker id, from mesh_spawn or mesh_workers"),
-        num("tail", "Number of lines (default 50)"),
-      ],
+      description: "Show the tail of a worker's output.",
+      fields: [str("worker_id", "Worker id"), num("tail", "Number of lines (default 50)")],
       execute: async (args) => {
         const worker_id = String(args.worker_id);
         const worker = getWorker(db, worker_id);
@@ -800,8 +793,7 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
 
     {
       name: "mesh_worker_remove",
-      description:
-        "Remove a finished worker: deletes the worktree (native API) and the registry row.",
+      description: "Remove a finished worker: deletes the worktree and registry row.",
       fields: [
         str("worker_id", "Worker id"),
         bool("force", "Stop a running worker before removal"),

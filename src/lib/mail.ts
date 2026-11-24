@@ -552,44 +552,44 @@ export function unreadBoxCount(db: MeshDb, box: string): number {
 // `forwarded` semantics: origin_id differs from the local id; legacy rows
 // have origin_id NULL). Pool mail is read on natural turns — only a DIRECT
 // mail (origin_id equals the local id, or NULL legacy) may wake the session.
-/** Does the box hold pending mail that wakes its session (Slack model,
- * 0.17.0)? A message wakes when it is deliberate (`wake = 1`) OR direct:
- * exactly one local recipient and no foreign origin (origin_id null or equal
- * to the local id). A multi-recipient broadcast or a cross-host fanout
- * without the flag is quiet: channels are quiet by default, the sender flags
- * the mention. Legacy rows (pre-origin_id) count as direct, like every
- * other gate. */
-export function hasWakeableUnread(db: MeshDb, box: string): boolean {
-  return (
-    db.conn.get<{ wakeable: number }>(
-      `SELECT EXISTS(
-           SELECT 1 FROM deliveries d JOIN messages m ON m.id = d.message_id
-           WHERE d.to_box = ? AND d.status = 'unread'
-             AND (
-               m.wake = 1
-               OR (
-                 (m.origin_id IS NULL OR m.origin_id = m.id)
-                 AND (SELECT COUNT(*) FROM deliveries d2 WHERE d2.message_id = m.id) <= 1
-               )
-             )
-         ) AS wakeable`,
-      [box],
-    )?.wakeable === 1
-  );
-}
+export type WakeBoxStat = {
+  box: string;
+  unread: number;
+  wakeable: boolean;
+  /** Subject of the box's OLDEST unread delivery (the wake preview). */
+  subject: string;
+};
 
-/** Subject of the box's oldest pending delivery: the wake notification
- * preview. Null when the box has no unread delivery. */
-export function firstPendingSubject(db: MeshDb, box: string): string | null {
-  return (
-    db.conn.get<{ subject: string }>(
-      `SELECT m.subject AS subject
-         FROM deliveries d JOIN messages m ON m.id = d.message_id
-         WHERE d.to_box = ? AND d.status = 'unread'
-         ORDER BY d.created_at ASC LIMIT 1`,
-      [box],
-    )?.subject ?? null
-  );
+/** Per-box unread stats for the wake loop, in ONE grouped statement: before
+ * 0.21.0 the tick ran two queries per mailbox (unread count + wake gate) plus
+ * one more at prompt time (preview subject) — N boxes cost 3N reads per tick.
+ * A message wakes when it is deliberate (`wake = 1`) OR direct: exactly one
+ * local recipient and no foreign origin (origin_id null or equal to the local
+ * id). A multi-recipient broadcast or a cross-host fanout without the flag is
+ * quiet: channels are quiet by default, the sender flags the mention. Legacy
+ * rows (pre-origin_id) count as direct, like every other gate. */
+export function wakeBoxStats(db: MeshDb): WakeBoxStat[] {
+  return db.conn
+    .all<{ box: string; unread: number; wakeable: number; subject: string }>(
+      `SELECT d.to_box AS box,
+              COUNT(*) AS unread,
+              MAX(CASE WHEN m.wake = 1
+                        OR ((m.origin_id IS NULL OR m.origin_id = m.id)
+                            AND (SELECT COUNT(*) FROM deliveries d2 WHERE d2.message_id = m.id) <= 1)
+                       THEN 1 ELSE 0 END) AS wakeable,
+              (SELECT m3.subject FROM deliveries d3 JOIN messages m3 ON m3.id = d3.message_id
+                WHERE d3.to_box = d.to_box AND d3.status = 'unread'
+                ORDER BY d3.created_at ASC LIMIT 1) AS subject
+       FROM deliveries d JOIN messages m ON m.id = d.message_id
+       WHERE d.status = 'unread'
+       GROUP BY d.to_box`,
+    )
+    .map((row) => ({
+      box: row.box,
+      unread: row.unread,
+      wakeable: row.wakeable === 1,
+      subject: row.subject,
+    }));
 }
 
 export function ackMessages(db: MeshDb, ids: string[]): void {
