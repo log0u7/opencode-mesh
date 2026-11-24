@@ -310,7 +310,7 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
     {
       name: "mesh_register",
       description:
-        "Register this session's mailbox under a name so other sessions and pools can route mail to it. primary: your primary group (pool id) — joined automatically if you have not joined it yet; its lead receives your enrollment confirmation",
+        "Register this session's mailbox under a name so other sessions and pools can route mail to it. primary: your primary group (pool id) — joined automatically if you have not joined it yet; its lead receives your enrollment confirmation (falls back to the orchestrator when the lead is you or offline)",
       fields: [
         str("name", "Mailbox name: letters, digits, . _ - (max 64 chars)"),
         str("role", "Informational role, e.g. manager", false),

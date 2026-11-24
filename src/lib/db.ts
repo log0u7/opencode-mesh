@@ -10,7 +10,7 @@ export type MeshDb = {
 
 // Bump when a schema change needs a migration step; the version anchors future
 // migrations that cannot be expressed as idempotent `CREATE ... IF NOT EXISTS`.
-const SCHEMA_VERSION = 9;
+const SCHEMA_VERSION = 10;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS peers (
@@ -52,6 +52,13 @@ CREATE TABLE IF NOT EXISTS deliveries (
   to_box TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'unread',
   created_at INTEGER NOT NULL
+);
+-- v10: sender-side re-send defense (0.20.0). Pure addition: an existing v9
+-- database is brought up by the idempotent SCHEMA re-run, no guarded ALTER.
+CREATE TABLE IF NOT EXISTS recent_mails (
+  hash TEXT PRIMARY KEY,
+  ts INTEGER NOT NULL,
+  message_id TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS locks (
   path TEXT PRIMARY KEY,

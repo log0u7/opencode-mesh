@@ -5,6 +5,22 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.20.0] - 2026-11-24
+
+### Added
+
+- **Content dedup at delivery** — the same mail from the same sender to the
+  same box delivered twice within 60 s is a no-op: the second delivery
+  returns the existing message id instead of writing a second row. The
+  duplicate-delivery defense for sender-side re-sends (bug 3 sysops, seen
+  live: one DM delivered twice, 14 s apart, two message ids, after the sender
+  re-executed its sends following a local crash). The key carries the full
+  content — sender node, sending box, target box, subject, body, reply_to —
+  so a broadcast never swallows the same text to another box, and `reply_to`
+  stays in the key so identical replies to different messages remain
+  distinct. The 60 s window keeps legitimate repeats passing: daily
+  reminders with identical content land hours apart.
+
 ## [0.19.0] - 2026-11-23
 
 ### Changed

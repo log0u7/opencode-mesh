@@ -231,6 +231,113 @@ describe("wake flag (0.17.0 Slack model)", () => {
   });
 });
 
+describe("content dedup at delivery (0.20.0 sender re-send defense)", () => {
+  const MAIL = {
+    from: "n1",
+    from_box: "sender",
+    subject: "arbitrage (B)",
+    body: "same body",
+  } as const;
+
+  function boxDb() {
+    const db = openMeshDb(":memory:");
+    registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
+    return db;
+  }
+
+  function counts(db: ReturnType<typeof boxDb>) {
+    return {
+      messages: db.conn.get<{ n: number }>("SELECT COUNT(*) AS n FROM messages")?.n ?? 0,
+      deliveries: db.conn.get<{ n: number }>("SELECT COUNT(*) AS n FROM deliveries")?.n ?? 0,
+    };
+  }
+
+  it("a re-executed send 14 s later is a no-op: existing id, no new row", () => {
+    const db = boxDb();
+    const first = deliverMessage(db, { ...MAIL, to_box: "a", created_at: 1000 });
+    if (!first.ok) throw new Error("first delivery failed");
+    const second = deliverMessage(db, { ...MAIL, to_box: "a", created_at: 15000 });
+
+    expect(second.ok).toBe(true);
+    if (!second.ok) return;
+    expect(second.id).toBe(first.id);
+    expect(counts(db)).toEqual({ messages: 1, deliveries: 1 });
+    db.close();
+  });
+
+  it("the same content 61 s later delivers again (window elapsed)", () => {
+    const db = boxDb();
+    const first = deliverMessage(db, { ...MAIL, to_box: "a", created_at: 1000 });
+    const second = deliverMessage(db, { ...MAIL, to_box: "a", created_at: 62000 });
+    if (!first.ok || !second.ok) throw new Error("delivery failed");
+
+    expect(second.id).not.toBe(first.id);
+    expect(counts(db)).toEqual({ messages: 2, deliveries: 2 });
+    db.close();
+  });
+
+  it("an identical body answering a different message is a distinct delivery (reply_to in the key)", () => {
+    const db = boxDb();
+    deliverMessage(db, { ...MAIL, to_box: "a", created_at: 1000 });
+    const reply = deliverMessage(db, {
+      ...MAIL,
+      to_box: "a",
+      reply_to: "m-question",
+      created_at: 15000,
+    });
+
+    expect(reply.ok).toBe(true);
+    expect(counts(db)).toEqual({ messages: 2, deliveries: 2 });
+    db.close();
+  });
+
+  it("a broadcast reaches every member box once; re-executing it adds nothing", () => {
+    const db = openMeshDb(":memory:");
+    registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
+    registerMailbox(db, { name: "b", session_id: "s2", now: 1000 });
+    registerMailbox(db, { name: "c", session_id: "s3", now: 1000 });
+    joinPool(db, "a", "team:x");
+    joinPool(db, "b", "team:x");
+    joinPool(db, "c", "team:x");
+
+    const first = deliverMessage(db, {
+      ...MAIL,
+      from_box: "a",
+      to_box: "team:x",
+      created_at: 1000,
+    });
+    if (!first.ok) throw new Error("broadcast failed");
+    expect(first.recipients).toEqual(["b", "c"]);
+    expect(unreadBoxCount(db, "b")).toBe(1);
+    expect(unreadBoxCount(db, "c")).toBe(1);
+
+    const second = deliverMessage(db, {
+      ...MAIL,
+      from_box: "a",
+      to_box: "team:x",
+      created_at: 15000,
+    });
+    expect(second.ok).toBe(true);
+    if (!second.ok) return;
+    expect(second.id).toBe(first.id);
+    expect(counts(db)).toEqual({ messages: 1, deliveries: 2 });
+    db.close();
+  });
+
+  it("the same content to a different box is a distinct delivery (to_box in the key)", () => {
+    const db = openMeshDb(":memory:");
+    registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
+    registerMailbox(db, { name: "b", session_id: "s2", now: 1000 });
+    deliverMessage(db, { ...MAIL, to_box: "a", created_at: 1000 });
+    deliverMessage(db, { ...MAIL, to_box: "b", created_at: 11000 });
+
+    expect(counts(db)).toEqual({ messages: 2, deliveries: 2 });
+    expect(unreadBoxCount(db, "a")).toBe(1);
+    expect(unreadBoxCount(db, "b")).toBe(1);
+    db.close();
+  });
+});
+
 describe("wake gates (0.16.0 token economy)", () => {
   it("hasWakeableUnread: true for a direct mail, false for a fanout", () => {
     const db = openMeshDb(":memory:");

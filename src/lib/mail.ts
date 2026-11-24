@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 import type { MeshDb } from "./db.js";
 import type { MailMessage } from "../types/peer.js";
@@ -70,6 +70,30 @@ export type InboxRow = {
 
 // 7 days: read or not, a message older than this is swept at server boot.
 export const MESSAGE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
+// 60 s rolling window for the sender-side re-send defense: a sender that
+// re-executes its sends after a local crash lands its duplicates within
+// seconds (seen live: the same DM twice, 14 s apart), while legitimate
+// identical content (daily reminders) repeats hours later and passes.
+export const RESEND_WINDOW_MS = 60_000;
+
+// Content key of the re-send defense. to_box stays in the key so a broadcast
+// to one box never swallows the same text to another, and reply_to so an
+// identical reply to a different message is still a distinct delivery.
+function mailContentHash(input: DeliverInput): string {
+  return createHash("sha256")
+    .update(
+      JSON.stringify([
+        input.from,
+        input.from_box ?? null,
+        input.to_box ?? null,
+        input.subject,
+        input.body,
+        input.reply_to ?? null,
+      ]),
+    )
+    .digest("hex");
+}
 
 function parsePools(raw: string): string[] {
   try {
@@ -230,6 +254,24 @@ export function deliverMessage(db: MeshDb, input: DeliverInput): DeliverResult {
     }
   }
 
+  // Sender-side re-send defense (0.20.0): the same mail from the same sender
+  // to the same box delivered twice within RESEND_WINDOW_MS is a no-op — the
+  // second call returns the EXISTING delivery's id, no new row. This is the
+  // duplicate-delivery defense for sender-side re-sends (bug 3 sysops, seen
+  // live: one DM delivered twice, 14 s apart, two message ids, after the
+  // sender re-executed its sends following a local crash). Runs after the
+  // origin_id check: cross-host replays dedup there, real re-sends here.
+  const contentHash = mailContentHash(input);
+  const resent = db.conn.get<{ message_id: string }>(
+    "SELECT message_id FROM recent_mails WHERE hash = ? AND ts > ?",
+    [contentHash, created_at - RESEND_WINDOW_MS],
+  );
+  if (resent) {
+    // recipients: [] keeps callers from re-fanouting the duplicate (same
+    // contract as the origin_id dedup above).
+    return { ok: true, id: resent.message_id, recipients: [] };
+  }
+
   // Resolve first: a legacy global mail or a failure never leaves a message row.
   const global = input.to_box == null;
   let recipients: string[];
@@ -269,6 +311,15 @@ export function deliverMessage(db: MeshDb, input: DeliverInput): DeliverResult {
       [randomUUID(), id, box, created_at],
     );
   }
+  // Record the delivery under its content hash: purge the expired hashes at
+  // insert (rolling window, KISS), then insert. The freshness lookup above
+  // uses the same cutoff, so a live hash is never overwritten here.
+  db.conn.run("DELETE FROM recent_mails WHERE ts <= ?", [created_at - RESEND_WINDOW_MS]);
+  db.conn.run("INSERT INTO recent_mails (hash, ts, message_id) VALUES (?, ?, ?)", [
+    contentHash,
+    created_at,
+    id,
+  ]);
   return { ok: true, id, recipients };
 }
 
