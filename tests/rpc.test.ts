@@ -92,7 +92,7 @@ describe("formatMeshSidebarExpanded (v4)", () => {
     expect(lines).toEqual([
       [
         { text: "▼ Mesh", tone: "entity" },
-        { text: " — ", tone: "value" },
+        { text: ": ", tone: "value" },
         { text: "purser", tone: "entity" },
         { text: " (lead)", tone: "value" },
       ],
@@ -153,7 +153,7 @@ describe("formatMeshSidebarExpanded (v4)", () => {
     };
     const lines = formatMeshSidebarExpanded(s);
     expect(lines).toHaveLength(6); // header + also + 2 of my pools + counters + peer
-    expect(renderLine(lines[0])).toBe("▼ Mesh — purser (lead)");
+    expect(renderLine(lines[0])).toBe("▼ Mesh: purser (lead)");
     expect(renderLine(lines[1])).toBe("  also orchestrator");
     expect(lines.some((l) => renderLine(l).includes("unread"))).toBe(false);
     expect(lines.some((l) => renderLine(l).includes("lock"))).toBe(false);
@@ -185,7 +185,7 @@ describe("formatMeshSidebarExpanded (v4)", () => {
       { name: "blogger", role: "editor", unread: 0 },
     ];
     const lines = formatMeshSidebarExpanded(s);
-    expect(renderLine(lines[0])).toBe("▼ Mesh — orchestrator");
+    expect(renderLine(lines[0])).toBe("▼ Mesh: orchestrator");
     expect(renderLine(lines[1])).toBe("  also blogger (editor)");
   });
 
@@ -194,7 +194,7 @@ describe("formatMeshSidebarExpanded (v4)", () => {
     s.hats = [];
     const lines = formatMeshSidebarExpanded(s);
     expect(renderLine(lines[0])).toBe("▼ Mesh");
-    expect(renderLine(lines[1])).toBe("  no mailbox — mesh_register");
+    expect(renderLine(lines[1])).toBe("  no mailbox: mesh_register");
   });
 
   it("skips empty pools and caps my pools and peers at six rows plus an overflow line", () => {
