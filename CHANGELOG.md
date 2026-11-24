@@ -5,6 +5,31 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.24.8] - 2026-11-24
+
+### Fixed
+
+- The headless server's WorktreeTable was never registered (follow-up on the
+  0.24.7 live bug): a peer's mesh instance running inside `opencode serve
+  --service` binds the serve's OWN project — often `$HOME`, not even a git
+  repo — where project resolution registers no source row (only git projects
+  get one) and no worktree discovery can ever succeed. The 0.24.7
+  refresh-and-retry therefore kept answering "spawn refused: no source
+  directory on peer" even after the operator opened a session in the repo
+  (that registers the REPO project, not the serve's home project). Distant
+  spawn now retargets: the parent signs its own opencode projectID into the
+  request (a git project id derives from the git remote, so it names the same
+  repo on every host that has it cloned), and the peer creates the child's
+  worktree under THAT project — the 0.24.7 discovery refresh then runs against
+  the right project and finally registers its source. The retarget is signed
+  (a MITM must not swap the birth project), requests without it keep the
+  exact legacy signature (old parents verify on new peers), and a peer whose
+  opencode never resolved the parent's project answers an explicit refusal:
+  "spawn refused: the spawned project is not registered on this peer — open
+  the peer's opencode in that project once, then retry". 1.x REST hosts have
+  no retarget (their client cannot address another project): unchanged
+  behavior.
+
 ## [0.24.7] - 2026-11-24
 
 ### Fixed

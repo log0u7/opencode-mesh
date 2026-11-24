@@ -22,7 +22,7 @@ import { postSpawn } from "../src/lib/client.js";
 import { startMeshServer } from "../src/lib/serve.js";
 import { nodeTlsMaterial } from "../src/lib/tls.js";
 import type { SpawnFn, SpawnedProcess } from "../src/lib/spawn.js";
-import type { WorktreeClient } from "../src/lib/worktree.js";
+import type { WorktreeClient, WorktreeDomain } from "../src/lib/worktree.js";
 import { buildToolSpecs, type ToolSpec } from "../src/tools.js";
 
 let dir: string;
@@ -76,6 +76,7 @@ async function startNode(
     spawnWorktreeBase?: string;
     omitDistantSpawn?: boolean;
     worktreeClient?: WorktreeClient;
+    worktreeDomain?: WorktreeDomain;
     breakReplay?: boolean;
   } = {},
 ): Promise<Node> {
@@ -126,6 +127,9 @@ async function startNode(
             privateKey: identity.private_key,
             worktreeClient,
             spawnFn,
+            ...(options.worktreeDomain !== undefined
+              ? { worktreeDomain: options.worktreeDomain }
+              : {}),
           },
         }
       : {}),
@@ -133,7 +137,12 @@ async function startNode(
   return { identity, db, port, server: { server } };
 }
 
-function tools(identity: NodeIdentity, db: MeshDb, worktreeClient: WorktreeClient) {
+function tools(
+  identity: NodeIdentity,
+  db: MeshDb,
+  worktreeClient: WorktreeClient,
+  options: { projectID?: string } = {},
+) {
   const specs = new Map<string, ToolSpec>(
     buildToolSpecs({
       db,
@@ -144,6 +153,7 @@ function tools(identity: NodeIdentity, db: MeshDb, worktreeClient: WorktreeClien
       bindKey: "test-bind",
       worktreeClient,
       spawnFn: fakeSpawnFn(),
+      ...(options.projectID !== undefined ? { projectID: options.projectID } : {}),
     }).map((s) => [s.name, s]),
   );
   return (name: string, args: Record<string, unknown> = {}, sessionID = "s-a"): Promise<string> =>
@@ -789,6 +799,120 @@ describe("distant spawn source directory (0.24.7)", () => {
       true,
     );
     expect(listWorkers(b.db)[0]?.worktree_path).toBe("/tmp/wt-parser");
+    a.server.server.close();
+    b.server.server.close();
+  });
+});
+
+describe("distant spawn project retarget (0.24.8)", () => {
+  // The live 0.24.7 follow-up: a headless peer (`opencode serve --service`)
+  // hosts its mesh instance under the serve's own project (often $HOME, not a
+  // git repo), so its own project has no source directory and even the 0.24.7
+  // discovery refresh can never register one. The fix: the parent signs its
+  // own projectID into the request, and the peer retargets the worktree
+  // create to THAT project — the same repo the parent spawned from, which the
+  // peer's opencode has registered (a git project id derives from the git
+  // remote, so it matches across hosts).
+  const PARENT_PROJECT = "30ad8aadfbe7ebd4fdfc884f4fe00cf447d7b079";
+
+  function domainMock(mode: "ok" | "missing-project"): {
+    domain: WorktreeDomain;
+    calls: Array<{ projectID: string; name?: string; directory?: string }>;
+  } {
+    const calls: Array<{ projectID: string; name?: string; directory?: string }> = [];
+    const domain: WorktreeDomain = {
+      create: async (input) => {
+        calls.push({
+          projectID: input.projectID,
+          ...(input.name !== undefined ? { name: input.name } : {}),
+          ...(input.directory !== undefined ? { directory: input.directory } : {}),
+        });
+        if (mode === "missing-project") {
+          const error = new Error("");
+          (error as unknown as { _tag: string })._tag = "Project.NotFoundError";
+          error.name = "Project.NotFoundError";
+          throw error;
+        }
+        return { directory: `/tmp/wt-${input.name ?? "x"}` };
+      },
+      remove: async () => {},
+      refresh: async () => undefined,
+    };
+    return { domain, calls };
+  }
+
+  it("signs the projectID: the receiver verifies the retargeted request, a legacy request still verifies", () => {
+    const identity = loadOrCreateIdentity(join(dir, "retarget-wire"));
+    const body = parseSpawnRequest(
+      buildSpawnRequest(identity, { spec: SPEC, now: 1_000, projectID: PARENT_PROJECT }),
+    )!;
+    expect(body.projectID).toBe(PARENT_PROJECT);
+    expect(verifySpawnRequest({ public_key: identity.public_key }, body, 1_001)).toBeNull();
+    // A signature computed WITHOUT the projectID must not pass on a body that
+    // carries one: the retarget is authenticated, not spoofable.
+    const legacy = parseSpawnRequest(buildSpawnRequest(identity, { spec: SPEC, now: 1_000 }))!;
+    expect(legacy.projectID).toBeUndefined();
+    const forged = { ...body, sig: legacy.sig };
+    expect(verifySpawnRequest({ public_key: identity.public_key }, forged, 1_001)).toContain(
+      "invalid signature",
+    );
+    // An old parent (no projectID) keeps verifying against the new receiver.
+    expect(verifySpawnRequest({ public_key: identity.public_key }, legacy, 1_001)).toBeNull();
+    // A malformed projectID is a malformed request, never a silent downgrade.
+    const broken = buildSpawnRequest(identity, { spec: SPEC, now: 1_000, projectID: "bad id" });
+    expect(parseSpawnRequest(broken)).toBeNull();
+  });
+
+  it("creates the child worktree under the REQUEST's project on the peer", async () => {
+    const a = await startNode("a-r1");
+    const retarget = domainMock("ok");
+    const b = await startNode("b-r1", {
+      worktreeClient: fakeWorktreeClient(),
+      worktreeDomain: retarget.domain,
+    });
+    pairBoth(a, b, "tR1");
+    const call = tools(a.identity, a.db, fakeWorktreeClient(), { projectID: PARENT_PROJECT });
+    const out = await call("mesh_spawn", { task: SPEC.task, name: SPEC.name, node: "host-b" });
+    expect(JSON.parse(out).worker_id).toBeTruthy();
+    expect(retarget.calls).toHaveLength(1);
+    expect(retarget.calls[0]?.projectID).toBe(PARENT_PROJECT);
+    expect(retarget.calls[0]?.name).toBe(SPEC.name);
+    expect(listWorkers(b.db)[0]?.worktree_path).toBe("/tmp/wt-parser");
+    a.server.server.close();
+    b.server.server.close();
+  });
+
+  it("keeps the receiver's own project when the request carries none", async () => {
+    const a = await startNode("a-r2");
+    const retarget = domainMock("ok");
+    const b = await startNode("b-r2", {
+      worktreeClient: fakeWorktreeClient(),
+      worktreeDomain: retarget.domain,
+    });
+    pairBoth(a, b, "tR2");
+    const call = tools(a.identity, a.db, fakeWorktreeClient());
+    const out = await call("mesh_spawn", { task: SPEC.task, name: SPEC.name, node: "host-b" });
+    expect(JSON.parse(out).worker_id).toBeTruthy();
+    expect(retarget.calls).toHaveLength(0);
+    expect(listWorkers(b.db)).toHaveLength(1);
+    a.server.server.close();
+    b.server.server.close();
+  });
+
+  it("refuses explicitly when the spawned project is unknown on the peer", async () => {
+    const a = await startNode("a-r3");
+    const retarget = domainMock("missing-project");
+    const b = await startNode("b-r3", {
+      worktreeClient: fakeWorktreeClient(),
+      worktreeDomain: retarget.domain,
+    });
+    pairBoth(a, b, "tR3");
+    const call = tools(a.identity, a.db, fakeWorktreeClient(), { projectID: PARENT_PROJECT });
+    const out = await call("mesh_spawn", { task: SPEC.task, name: SPEC.name, node: "host-b" });
+    expect(out).toBe(
+      "error: spawn refused: the spawned project is not registered on this peer — open the peer's opencode in that project once, then retry",
+    );
+    expect(listWorkers(b.db)).toHaveLength(0);
     a.server.server.close();
     b.server.server.close();
   });

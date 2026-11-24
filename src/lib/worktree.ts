@@ -170,6 +170,22 @@ export function isSourceDirectoryError(error: unknown): boolean {
   );
 }
 
+// Same Effect tagged-error shape: the retargeted project has no row on this
+// host (the peer's opencode never resolved it, 0.24.8). The v2 domain rejects
+// with the raw tagged error; a REST surface serializes it as
+// "ProjectNotFoundError" / "Project not found: …" — all three are covered.
+export function isProjectNotFoundError(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+  const hay = `${(error as { _tag?: string })._tag ?? ""} ${error.name} ${error.message}`;
+  return (
+    hay.includes("Project.NotFound") ||
+    hay.includes("ProjectNotFoundError") ||
+    hay.includes("Project not found")
+  );
+}
+
 export async function removeWorkerWorktree(
   client: WorktreeClient,
   input: { directory: string },
