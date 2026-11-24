@@ -322,7 +322,7 @@ The sidebar panel (OpenCode 2.x) shows this tab's view of the fleet and refreshe
 | `≡ <pool> (N)` | A pool one of your hats belongs to; `N` = its member count. Sorted by your unread in them (descending, then alphabetical), capped at six rows before `≡ … +N more`. |
 | `⌂ N agents · N pools · N hosts` | The fleet as seen by this host. |
 | `⇄ <hostname>` | A paired host, one per line (TLS-pinned); capped at six rows before `⇄ … +N more`. |
-| `Mesh ● N unread` (mail pending) or `Mesh · N agents · N pools · N hosts` (quiet) | Collapsed: the attention state replaces the inventory — never both stacked. |
+| `▶ Mesh ● N unread` (mail pending) or `▶ Mesh · N agents · N pools · N hosts` (quiet) | Collapsed: the toggle plus either the attention state or the inventory — never both stacked. |
 
 The glyphs are single-width Unicode characters (DejaVu renders them correctly); the `icons: false` plugin option swaps them for the text labels `pools`, `fleet` and `peers`, for terminals that draw them double-cell.
 
@@ -340,8 +340,8 @@ Every state and marker the panel can render, verified against the sidebar format
 | `≡ <pool> (N)` | A pool one of your hats belongs to; `N` = its member count. Sorted by your unread in them (descending, then alphabetical), capped at six rows before `≡ … +N more`. |
 | `⌂ N agents · N pools · N hosts` | The fleet as seen by this host: `N agents` counts every mailbox registered on the node, `N pools` every pool it knows, `N hosts` = 1 + paired peers. |
 | `⇄ <hostname>` | A paired host, one per line, capped at six rows before `⇄ … +N more`. Manual pairings (placeholder hostname `manual`) show the short node id instead. |
-| `Mesh ● N unread` | Collapsed, mail pending: the attention state alone; it replaces the inventory, never stacked with it. |
-| `Mesh · N agents · N pools · N hosts` | Collapsed, quiet (nothing unread): the same fleet inventory as the expanded `⌂` line. |
+| `▶ Mesh ● N unread` | Collapsed, mail pending: the attention state alone; it replaces the inventory, never stacked with it. |
+| `▶ Mesh · N agents · N pools · N hosts` | Collapsed, quiet (nothing unread): the same fleet inventory as the expanded `⌂` line. |
 | `pools` / `fleet` / `peers` | With the `icons: false` option: the `≡`, `⌂` and `⇄` glyphs (and their `…` overflow marks) swap for these lowercase labels; `▼`, `●`, `≔` and `also` stay. |
 
 The collapsed header carries either the attention state or the inventory, never both; the expanded panel lays out everything that applies.
