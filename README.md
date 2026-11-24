@@ -318,6 +318,25 @@ The sidebar panel (OpenCode 2.x) shows this tab's view of the fleet and refreshe
 
 The glyphs are single-width Unicode characters (DejaVu renders them correctly); the `icons: false` plugin option swaps them for the text labels `pools`, `fleet` and `peers`, for terminals that draw them double-cell.
 
+### Status reference
+
+Every state and marker the panel can render, verified against the sidebar formatters in `src/rpc.ts`:
+
+| Marker | Meaning |
+|---|---|
+| `▼ Mesh: <name> (<role>)` | Expanded header, the clickable row: this tab's first hat. The `(<role>)` part drops when the hat declares no role; a session without a mailbox renders a bare `▼ Mesh`. |
+| `also <name> (<role>)` | Each extra hat of this tab, one line per mailbox in enrollment order; the role part drops when the hat declares none. |
+| `● N unread` | Unread mail across your mailboxes, the counter the wake loop reacts to. Shown only when `N > 0`. |
+| `no mailbox: mesh_register` | Expanded only: this session has no mailbox yet, enroll with `mesh_register`. |
+| `≡ <pool> (N)` | A pool one of your hats belongs to; `N` = its member count. Sorted by your unread in them (descending, then alphabetical), capped at six rows before `≡ … +N more`. |
+| `⌂ N agents · N pools · N hosts` | The fleet as seen by this host: `N agents` counts every mailbox registered on the node, `N pools` every pool it knows, `N hosts` = 1 + paired peers. |
+| `⇄ <hostname>` | A paired host, one per line, capped at six rows before `⇄ … +N more`. Manual pairings (placeholder hostname `manual`) show the short node id instead. |
+| `Mesh ● N unread` | Collapsed, mail pending: the attention state alone; it replaces the inventory, never stacked with it. |
+| `Mesh · N agents · N pools · N hosts` | Collapsed, quiet (nothing unread): the same fleet inventory as the expanded `⌂` line. |
+| `pools` / `fleet` / `peers` | With the `icons: false` option: the `≡`, `⌂` and `⇄` glyphs (and their `…` overflow marks) swap for these lowercase labels; `▼`, `●` and `also` stay. |
+
+The collapsed header carries either the attention state or the inventory, never both; the expanded panel lays out everything that applies.
+
 ## Development
 
 Requires Node >= 22.5 (`mise install`) and pnpm (corepack).
