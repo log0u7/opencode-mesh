@@ -42,7 +42,7 @@ export type PluginOptions = {
   /** Static addresses of tunnels without a CLI (WireGuard/IPsec/any VPN this
    * instance manages), advertised alongside the provider-discovered IPs. */
   addresses?: string[];
-  /** Render the sidebar glyphs (☰ ⌂ ⇄); default true. false swaps them for
+  /** Render the sidebar glyphs (≡ ⌂ ⇄); default true. false swaps them for
    * lowercase dim text labels (pools, fleet, peers), the fallback for
    * terminals that draw ambiguous-width glyphs double-cell and glue the next
    * character. */

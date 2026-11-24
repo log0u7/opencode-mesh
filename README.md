@@ -297,7 +297,7 @@ sequenceDiagram
 The sidebar panel (OpenCode 2.x) shows this tab's view of the fleet and refreshes live; click its header to collapse it. Expanded:
 
 ```
-▼ Mesh — quartermaster (lead)
+▼ Mesh: quartermaster (lead)
   also purser (lead)
   ● 3 unread
   ≡  team:purser (2)
@@ -309,7 +309,7 @@ The sidebar panel (OpenCode 2.x) shows this tab's view of the fleet and refreshe
 
 | Line | Meaning |
 |---|---|
-| `▼ Mesh — <name> (<role>)` | The identity of THIS tab: the first hat; the other hats follow as `also` lines. |
+| `▼ Mesh: <name> (<role>)` | The identity of THIS tab: the first hat; the other hats follow as `also` lines. |
 | `● N unread` | Unread messages in your mailboxes, the ones the wake loop reacts to. Omitted at 0. |
 | `≡ <pool> (N)` | A pool one of your hats belongs to; `N` = its member count. Sorted by your unread in them (descending, then alphabetical), capped at six rows before `≡ … +N more`. |
 | `⌂ N agents · N pools · N hosts` | The fleet as seen by this host. |

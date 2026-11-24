@@ -137,7 +137,7 @@ export function formatMeshSidebarExpanded(
   const primary = s.hats[0];
   const header: SidebarSegment[] = [{ text: "▼ Mesh", tone: "entity" }];
   if (primary) {
-    header.push({ text: " — ", tone: "value" }, { text: primary.name, tone: "entity" });
+    header.push({ text: ": ", tone: "value" }, { text: primary.name, tone: "entity" });
     if (primary.role) header.push({ text: ` (${primary.role})`, tone: "value" });
   }
   const lines: SidebarSegment[][] = [header];
@@ -151,7 +151,7 @@ export function formatMeshSidebarExpanded(
       { text: `${unread} unread`, tone: "qualifier" },
     ]);
   } else if (s.hats.length === 0) {
-    lines.push([{ text: "  no mailbox — mesh_register", tone: "value" }]);
+    lines.push([{ text: "  no mailbox: mesh_register", tone: "value" }]);
   }
   const scores = poolUnread(s);
   // A pool lists only when one of the asking session's hats is a member of it:
