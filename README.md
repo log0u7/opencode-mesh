@@ -314,7 +314,7 @@ The sidebar panel (OpenCode 2.x) shows this tab's view of the fleet and refreshe
 | `≡ <pool> (N)` | A pool one of your hats belongs to; `N` = its member count. Sorted by your unread in them (descending, then alphabetical), capped at six rows before `≡ … +N more`. |
 | `⌂ N agents · N pools · N hosts` | The fleet as seen by this host. |
 | `⇄ <hostname>` | A paired host, one per line (TLS-pinned); capped at six rows before `⇄ … +N more`. |
-| `▶ Mesh ● N unread · N agents · N pools · N hosts` | Collapsed: the same counters on one line (the unread segment drops at 0). |
+| `Mesh ● N unread` (mail pending) or `Mesh · N agents · N pools · N hosts` (quiet) | Collapsed: the attention state replaces the inventory — never both stacked. |
 
 The glyphs are single-width Unicode characters (DejaVu renders them correctly); the `icons: false` plugin option swaps them for the text labels `pools`, `fleet` and `peers`, for terminals that draw them double-cell.
 
