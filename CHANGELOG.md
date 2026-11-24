@@ -5,6 +5,29 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.24.4] - 2026-11-24
+
+### Changed
+
+- The mesh sidebar starts folded by default. The durable store's initial value
+  was already collapsed, but the RPC fallback answered expanded when nothing
+  was persisted, and the TUI store adopts that answer right away, so new
+  sessions ended up expanded; the RPC default is collapsed now. Sessions with
+  a persisted state keep it, and the user's toggle persists on top of the
+  initial value as before.
+
+### Fixed
+
+- The collapsed inventory lost a space and the counter tone tiers in the
+  0.23.3 rewrite: merging each counter into one muted segment glued `· 7
+  pools` to the header and dropped the count's qualifier tone. The counters
+  render again as three segments (muted ` · ` separator, count in the
+  qualifier tone, label muted), the same grammar as the expanded `⌂` line and
+  the memory panel.
+- The counters pluralize like the memory panel's `plural` pattern: `1 agent ·
+  1 pool · 1 host` instead of `1 agents · 1 pools · 1 hosts`, in the collapsed
+  inventory and the expanded fleet line.
+
 ## [0.24.3] - 2026-11-24
 
 ### Fixed

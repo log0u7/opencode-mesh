@@ -374,7 +374,9 @@ export const MeshV2 = Plugin.define({
       },
       sidebar: async () => {
         const state = await sidebarPersist.load<{ collapsed: boolean }>();
-        return { collapsed: state?.collapsed === true };
+        // Default folded (0.24.4): nothing persisted renders collapsed; the
+        // user's toggle persists on top of that initial value.
+        return { collapsed: state?.collapsed ?? true };
       },
       set_sidebar: async (input: unknown) => {
         const collapsed =
