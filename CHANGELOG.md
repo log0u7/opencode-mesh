@@ -5,7 +5,7 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.25.0] - 2026-11-24
+## [0.26.0] - 2026-11-25
 
 ### Added
 
@@ -36,6 +36,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the signature, the receiver rebuilds them canonically) and the 0.24.5
   one-log-line-per-spawn and 0.24.7 SourceDirectoryNotFoundError paths stay
   dead on the default and project modes (no worktree machinery runs there).
+
+### Removed
+
+- The 0.25.0 fleet-workspace spawn design (`spawnWorkspace` option, the
+  `~/projets/fleet` workspace colleague default, `resolveSpawnWorkspace`,
+  `WORKSPACE_BRANCH`): superseded by the three spawn modes above — a spawned
+  child is now born in the host's natural context by default (session mode),
+  not in a shared workspace directory. The 0.25.0 release shipped that
+  design; this one replaces it one day later, per the validated redesign.
 
 ## [0.24.8] - 2026-11-24
 
