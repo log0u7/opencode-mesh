@@ -48,8 +48,8 @@ describe("mesh_register", () => {
     expect(await call("mesh_register", { name: "bad name!" })).toMatch(/^error:/);
   });
 
-  it("stores the primary pool when it exists and reports it via mesh_status", async () => {
-    const { call } = setup();
+  it("auto-joins a primary pool the box has not joined yet", async () => {
+    const { db, call } = setup();
     // The pool exists once any box carries it: a first box joins, then the
     // new box declares it primary.
     await call("mesh_register", { name: "orchestrator" }, "s0");
@@ -61,6 +61,11 @@ describe("mesh_register", () => {
       mailboxes: Array<{ name: string; primary?: string }>;
     };
     expect(status.mailboxes.find((m) => m.name === "alice")?.primary).toBe("team:infra");
+    // The declared primary is joined automatically: one call settles the
+    // box, the role and the primary group.
+    expect(mailboxByName(db, "alice")?.pools).toContain("team:infra");
+    const pools = JSON.parse(await call("mesh_pools")) as Record<string, string[]>;
+    expect(pools["team:infra"]).toContain("alice");
   });
 
   it("rejects a primary pool that does not exist", async () => {

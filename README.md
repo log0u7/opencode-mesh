@@ -68,7 +68,7 @@ Restart OpenCode. The package is installed automatically at startup into opencod
 
 ```json
 {
-  "plugin": ["@log0u7/opencode-mesh@0.18.1"]
+  "plugin": ["@log0u7/opencode-mesh@0.19.0"]
 }
 ```
 
@@ -210,7 +210,7 @@ and the role prompts plus the enrollment lifecycle in
 | Tool | Args | Description |
 |---|---|---|
 | `mesh_status` | | Local session registry, named mailboxes (role, pools, presence), paired peers, active locks. |
-| `mesh_register` | `name`, `role?` | Bind this session to a named mailbox (one box per session, re-register = handoff). |
+| `mesh_register` | `name`, `role?`, `primary?` | Bind this session to a named mailbox (one box per session, re-register = handoff). `primary` declares the primary group (pool id, must exist) and auto-joins it if the box has not joined it yet. |
 | `mesh_pair` | `code?`, `address?`, `offer?`, `node_id?`, `token?`, `pk?` | No args: emit a 6-digit pairing code (30 min). `code=`: complete pairing — LAN autodiscovers the address, cross-subnet adds `address=`; both sides end up paired. `offer=`: complete a `MESH1-` blob. Legacy `node_id`/`token` accepted. |
 | `mesh_send` | `peer?`, `to?`, `subject`, `body`, `reply_to?` | Deliver mail: `to` a mailbox / `team:<pool>` / `all` locally, and/or `peer` on another node. |
 | `mesh_inbox` | `ack?` | Fetch unread messages addressed to this session's mailbox; ack marks them read. |
