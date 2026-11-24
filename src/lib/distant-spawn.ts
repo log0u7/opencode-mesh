@@ -5,9 +5,12 @@ import { pairingProof, signPayload, verifyPayload, type NodeIdentity } from "./i
 import type { MeshDb } from "./db.js";
 import {
   createWorkerWorktree,
+  isProjectNotFoundError,
   isSourceDirectoryError,
   removeWorkerWorktree,
+  v2WorktreeDomainClient,
   type WorktreeClient,
+  type WorktreeDomain,
 } from "./worktree.js";
 import { runWorker, type SpawnFn } from "./spawn.js";
 import type { Worker } from "./workers.js";
@@ -37,10 +40,16 @@ export type SpawnRequestBody = {
   nonce: string;
   /** Epoch ms of the signature; outside the window the request dies. */
   ts: number;
-  /** base64 Ed25519 over spawnRequestPayload(spec, from, nonce, ts). */
+  /** base64 Ed25519 over spawnRequestPayload(spec, from, nonce, ts, projectID). */
   sig: string;
   /** Standard pairing proof, for the token-bind path (same as /mail). */
   proof?: string;
+  /** The parent's opencode project id (0.24.8): the peer creates the child's
+   * worktree under THIS project instead of its own mesh instance's. A git
+   * project id derives from the git remote, so it names the same repo on
+   * every host that has it cloned. Absent on pre-0.24.8 parents (legacy
+   * signature, the peer keeps its own project). */
+  projectID?: string;
 };
 
 // Anti-replay window: a request older than 5 minutes is refused even with a
@@ -55,19 +64,24 @@ export const DEFAULT_SPAWN_QUOTA_PEER = 2;
 // The canonical signature payload: deterministic on both sides (the receiver
 // rebuilds it from its own parse — the same fixed key order). Mirrors the
 // pairing-proof pattern: a versioned prefix, then the exact signed fields.
+// The projectID (0.24.8) rides INSIDE the signature: it chooses which of the
+// peer's projects births the child, so a MITM must not swap it. Requests
+// without one keep the exact legacy string (old parents verify on new peers).
 export function spawnRequestPayload(
   spec: SpawnSpec,
   from: string,
   nonce: string,
   ts: number,
+  projectID?: string,
 ): string {
-  return `opencode-mesh-spawn:${from}:${nonce}:${ts}:${JSON.stringify(spec)}`;
+  const project = projectID !== undefined ? `${projectID}:` : "";
+  return `opencode-mesh-spawn:${from}:${nonce}:${ts}:${project}${JSON.stringify(spec)}`;
 }
 
 // Parent side: serialize the request and sign it with the node key.
 export function buildSpawnRequest(
   identity: Pick<NodeIdentity, "node_id" | "public_key" | "private_key">,
-  input: { spec: SpawnSpec; from_box?: string; now?: number },
+  input: { spec: SpawnSpec; from_box?: string; now?: number; projectID?: string },
 ): string {
   const ts = input.now ?? Date.now();
   const nonce = randomUUID();
@@ -79,8 +93,9 @@ export function buildSpawnRequest(
     ts,
     sig: signPayload(
       identity.private_key,
-      spawnRequestPayload(input.spec, identity.node_id, nonce, ts),
+      spawnRequestPayload(input.spec, identity.node_id, nonce, ts, input.projectID),
     ),
+    ...(input.projectID !== undefined ? { projectID: input.projectID } : {}),
   };
   return JSON.stringify(body);
 }
@@ -116,6 +131,15 @@ export function parseSpawnRequest(raw: string): SpawnRequestBody | null {
   ) {
     return null;
   }
+  // A present-but-malformed projectID kills the request outright: dropping it
+  // would downgrade the signed retarget into a legacy create and the signature
+  // would never verify anyway.
+  if (
+    body.projectID !== undefined &&
+    (typeof body.projectID !== "string" || !/^[A-Za-z0-9._-]{1,128}$/.test(body.projectID))
+  ) {
+    return null;
+  }
   return {
     spec: {
       task: spec.task,
@@ -131,6 +155,7 @@ export function parseSpawnRequest(raw: string): SpawnRequestBody | null {
     ts: body.ts,
     sig: body.sig,
     ...(typeof body.proof === "string" ? { proof: body.proof } : {}),
+    ...(typeof body.projectID === "string" ? { projectID: body.projectID } : {}),
   };
 }
 
@@ -152,7 +177,7 @@ export function verifySpawnRequest(
   if (Math.abs(now - body.ts) > SPAWN_REQUEST_TTL_MS) {
     return "spawn refused: stale request (outside the 5 min window)";
   }
-  const payload = spawnRequestPayload(body.spec, body.from, body.nonce, body.ts);
+  const payload = spawnRequestPayload(body.spec, body.from, body.nonce, body.ts, body.projectID);
   if (!verifyPayload(peer.public_key, payload, body.sig)) {
     return "spawn refused: invalid signature";
   }
@@ -243,6 +268,10 @@ export type DistantSpawnDeps = {
   /** Destination base for the child's worktree (0.24.7): where spawned
    * agents are born on this peer. Default: the host's own worktree base. */
   spawnWorktreeBase?: string;
+  /** The host's in-process worktree domain (0.24.8, v2 hosts only): lets a
+   * signed request retarget the create to the parent's project. Absent on
+   * 1.x REST hosts, whose client cannot address another project. */
+  worktreeDomain?: WorktreeDomain;
 };
 
 export type DistantSpawnResult = { ok: true; worker: Worker } | { ok: false; error: string };
@@ -262,8 +291,19 @@ export async function runDistantSpawn(
   }
   const enroll = { name: body.spec.name, role: body.spec.role, pools: body.spec.pools };
   let directory: string | undefined;
+  // Project retarget (0.24.8): a signed request may name the parent's project
+  // (a git remote hash, stable across hosts). The peer's own mesh instance
+  // can be bound to a project with no usable source — a headless
+  // `opencode serve --service` often hosts $HOME (not even a git repo), where
+  // NO discovery can ever register a source — so the create must address the
+  // project the parent actually spawned from. The 0.24.7 discovery refresh
+  // then runs against THAT project and finally registers its source.
+  const worktreeClient =
+    body.projectID !== undefined && deps.worktreeDomain !== undefined
+      ? v2WorktreeDomainClient(deps.worktreeDomain, body.projectID)
+      : deps.worktreeClient;
   try {
-    const info = await createWorkerWorktree(deps.worktreeClient, {
+    const info = await createWorkerWorktree(worktreeClient, {
       name: enroll.name,
       ...(deps.spawnWorktreeBase !== undefined ? { directory: deps.spawnWorktreeBase } : {}),
     });
@@ -279,7 +319,7 @@ export async function runDistantSpawn(
     if (worker.status === "failed") {
       // The child never ran: clean up exactly like mesh_spawn (worktree, row,
       // log) so the peer is not left with a stranded directory.
-      const cleaned = await removeWorkerWorktree(deps.worktreeClient, {
+      const cleaned = await removeWorkerWorktree(worktreeClient, {
         directory: info.directory,
       }).catch(() => false);
       deps.db.conn.run("DELETE FROM workers WHERE id = ?", [worker.id]);
@@ -294,7 +334,17 @@ export async function runDistantSpawn(
     return { ok: true, worker };
   } catch (error) {
     if (directory !== undefined) {
-      await removeWorkerWorktree(deps.worktreeClient, { directory }).catch(() => false);
+      await removeWorkerWorktree(worktreeClient, { directory }).catch(() => false);
+    }
+    if (isProjectNotFoundError(error)) {
+      // The retargeted project has no row on this peer: the peer's opencode
+      // never resolved it, so no source can be registered either (the project
+      // resolution is what inserts both). An explicit refusal with the remedy.
+      return {
+        ok: false,
+        error:
+          "spawn refused: the spawned project is not registered on this peer — open the peer's opencode in that project once, then retry",
+      };
     }
     if (isSourceDirectoryError(error)) {
       // No usable source on the peer even after discovery: an explicit

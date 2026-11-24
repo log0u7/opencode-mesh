@@ -7,7 +7,7 @@ import { authenticateToken, findPeerById } from "./peers.js";
 import type { HostCapa } from "./capa.js";
 import type { TlsMaterial } from "./tls.js";
 import type { SpawnFn } from "./spawn.js";
-import type { WorktreeClient } from "./worktree.js";
+import type { WorktreeClient, WorktreeDomain } from "./worktree.js";
 import {
   DEFAULT_SPAWN_QUOTA_PEER,
   ackSpawned,
@@ -87,6 +87,9 @@ export type MeshServerOptions = {
     /** This node's private key: the ack DM carries a standard pairing proof. */
     privateKey: string;
     worktreeClient: WorktreeClient;
+    /** The host's in-process worktree domain (0.24.8, v2 hosts): lets a
+     * signed request retarget the create to the parent's project. */
+    worktreeDomain?: WorktreeDomain;
     spawnFn: SpawnFn;
   };
   /** Shared host-capability provider (createHostCapa): /status and /metrics
@@ -435,6 +438,7 @@ async function handle(
         },
         worktreeClient: distant.worktreeClient,
         spawnFn: distant.spawnFn,
+        ...(distant.worktreeDomain !== undefined ? { worktreeDomain: distant.worktreeDomain } : {}),
         ...(distant.spawnWorktreeBase !== undefined
           ? { spawnWorktreeBase: distant.spawnWorktreeBase }
           : {}),

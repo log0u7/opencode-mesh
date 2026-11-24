@@ -80,6 +80,7 @@ export const MeshV2 = Plugin.define({
           worktreeClient,
           spawnFn: options.spawnFn ?? nodeSpawn,
           addressing: addressingOptions(options),
+          projectID: ctx.location.project.id,
           ...(options.spawnMax !== undefined ? { spawnMax: options.spawnMax } : {}),
         })) {
           editor.add({
@@ -147,6 +148,7 @@ export const MeshV2 = Plugin.define({
         privateKey: identity.private_key,
         worktreeClient,
         spawnFn,
+        worktreeDomain: ctx.worktree,
       },
     });
     // Outbound memory sync: push the shareable outbox to paired peers on a cadence.
@@ -224,6 +226,7 @@ export const MeshV2 = Plugin.define({
         spawnFn,
         addressing: addressingOptions(options),
         capa: hostCapa.get,
+        projectID: ctx.location.project.id,
         ...(options.spawnMax !== undefined ? { spawnMax: options.spawnMax } : {}),
       })) {
         editor.add({

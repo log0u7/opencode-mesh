@@ -90,6 +90,10 @@ export type MeshContext = {
   bindKey: string;
   worktreeClient: WorktreeClient;
   spawnFn: SpawnFn;
+  /** This instance's opencode project id (0.24.8, v2 hosts): signed into
+   * distant spawn requests so the peer births the child under THIS project
+   * (a git remote hash, stable across hosts). Absent on 1.x hosts. */
+  projectID?: string;
   /** Address providers config + static tunnel addresses: the advertised
    * candidate IPs (mesh_status `tailnet_addresses`). */
   addressing?: AddressOptions;
@@ -160,6 +164,7 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
     addressing,
     capa: capa_,
     spawnMax,
+    projectID,
   } = mesh;
   return [
     {
@@ -945,6 +950,7 @@ async function distantSpawn(
       pools: input.enroll.pools,
     },
     ...(fromBox !== null ? { from_box: fromBox } : {}),
+    ...(mesh.projectID !== undefined ? { projectID: mesh.projectID } : {}),
   });
   const result = await postSpawn({
     url: conn.url,
