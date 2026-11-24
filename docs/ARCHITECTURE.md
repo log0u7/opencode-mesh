@@ -30,12 +30,24 @@ opencode (host)
     ├── bonjour         advertise + browse        _opencode-mesh._tcp
     └── tools           mesh_*                    exposed to every session
         └── worker      opencode run --dir <wt>   OPENCODE_MESH_CHILD=1
+                                                   (or =enrolled: tools, no server)
 ```
 
 The child marker matters: a worker spawned by `mesh_spawn` loads the same
 plugin, and the `OPENCODE_MESH_CHILD=1` environment variable makes it skip
 booting its own mesh server, advertising over mDNS and registering mesh tools.
-A worker pool costs N worktrees, not N mesh nodes.
+A worker pool costs N worktrees, not N mesh nodes. An enrolled spawn (0.23.0)
+runs with `OPENCODE_MESH_CHILD=enrolled` instead: same skip for the server and
+mDNS, but the mesh tools stay (they act on the shared host database), and the
+child self-enrolls — `mesh_register`/`mesh_join` from its prompt header — at
+its first turn, joining the pools given at spawn time.
+
+Reaping an enrolled spawn (0.23.0): a deliberate `mesh_worker_stop`/`mesh_worker_remove`
+makes the reaper leave the mailbox's pools (the mailbox row itself survives and
+re-binds on the next `mesh_register` of the same name — last binder wins; the
+reaper skips the leave when the box was already handed over to another
+session). A child that dies brutally is NOT reaped: its pool memberships stay
+until a future mailbox GC handles the leftovers.
 
 The data directory holds `node.json` (file mode `0600`, first run), `mesh.db`
 (SQLite, WAL) and the `workers/` log files. Then two opencode sessions in the

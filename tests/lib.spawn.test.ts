@@ -17,12 +17,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { openMeshDb } from "../src/lib/db.js";
 import { getWorker, insertWorker, reconcileWorkers } from "../src/lib/workers.js";
 import {
+  enrollHeader,
   readLogTail,
   removeWorkerLog,
   runWorker,
   stopWorker,
   type SpawnedProcess,
 } from "../src/lib/spawn.js";
+import { joinPool, mailboxByName, registerMailbox } from "../src/lib/mail.js";
 
 class FakeProc {
   exitCode: number | null = null;
@@ -521,6 +523,117 @@ describe("reconcileWorkers", () => {
     expect(getWorker(db, alive.id)?.status).toBe("running");
     expect(getWorker(db, gone.id)?.status).toBe("stopped");
 
+    db.close();
+  });
+});
+
+describe("enrolled spawn (0.23.0)", () => {
+  it("builds the self-enrollment header with the primary pool first", () => {
+    const header = enrollHeader({
+      name: "fleet-1",
+      role: "worker",
+      pools: ["team:x", "team:y"],
+    });
+
+    expect(header).toContain("mesh_register(name=fleet-1, role=worker, primary=team:x)");
+    expect(header).toContain("mesh_join(team:y)");
+    expect(header).toContain('If mesh_register errors "unknown pool"');
+    expect(header).toContain("treat the following task");
+  });
+
+  it("registers without a primary when the spawn joins no pool", () => {
+    const header = enrollHeader({ name: "fleet-1", role: "reviewer", pools: [] });
+
+    expect(header).toContain("mesh_register(name=fleet-1, role=reviewer)");
+    expect(header).not.toContain("mesh_join");
+  });
+
+  it("marks the child enrolled and prepends the header to the prompt", async () => {
+    const db = openMeshDb(":memory:");
+    const fake = fakeSpawn((proc) => proc.emitExit(0));
+
+    const worker = await runWorker(db, dir, {
+      task: "fix the bug",
+      worktree_path: "/wt",
+      branch: "b",
+      enroll: { name: "fleet-1", role: "worker", pools: ["team:x"] },
+      spawnFn: fake.spawnFn,
+    });
+
+    // The enrolled child keeps the mesh tools (the plugin consumes this flag)
+    // but still boots no server of its own.
+    expect(fake.env).toEqual([{ OPENCODE_MESH_CHILD: "enrolled" }]);
+    expect(fake.argv.at(-1)).toContain("mesh_register(name=fleet-1, role=worker, primary=team:x)");
+    expect(fake.argv.at(-1)).toContain("\n\nfix the bug");
+    // The registry row keeps the RAW task; the mailbox marks it enrolled.
+    expect(getWorker(db, worker.id)?.task).toBe("fix the bug");
+    expect(getWorker(db, worker.id)?.mailbox).toBe("fleet-1");
+    db.close();
+  });
+
+  it("keeps the plain task and the headless marker without enroll (back-compat)", async () => {
+    const db = openMeshDb(":memory:");
+    const fake = fakeSpawn((proc) => proc.emitExit(0));
+
+    await runWorker(db, dir, {
+      task: "t",
+      worktree_path: "/wt",
+      branch: "b",
+      spawnFn: fake.spawnFn,
+    });
+
+    expect(fake.env).toEqual([{ OPENCODE_MESH_CHILD: "1" }]);
+    expect(fake.argv.at(-1)).toBe("t");
+    db.close();
+  });
+
+  it("stopWorker leaves the enrolled worker's pools but keeps the mailbox", async () => {
+    const db = openMeshDb(":memory:");
+    registerMailbox(db, { name: "fleet-1", session_id: "ses-1", now: Date.now() });
+    joinPool(db, "fleet-1", "team:x");
+    joinPool(db, "fleet-1", "team:y");
+    const fake = fakeSpawn((proc) => {
+      proc.write('{"type":"step_start","sessionID":"ses-1"}\n');
+    });
+
+    const worker = await runWorker(db, dir, {
+      task: "t",
+      worktree_path: "/wt",
+      branch: "b",
+      enroll: { name: "fleet-1", role: "worker", pools: ["team:x", "team:y"] },
+      spawnFn: fake.spawnFn,
+    });
+
+    stopWorker(db, worker.id, { killFn: vi.fn() });
+
+    // The mailbox row survives (the name re-binds on the next register of the
+    // same name); only the pool memberships are shed.
+    const box = mailboxByName(db, "fleet-1");
+    expect(box).not.toBeNull();
+    expect(box?.pools).toEqual([]);
+    db.close();
+  });
+
+  it("stopWorker does not touch pools after a name handoff to another session", async () => {
+    const db = openMeshDb(":memory:");
+    registerMailbox(db, { name: "fleet-1", session_id: "ses-2", now: Date.now() });
+    joinPool(db, "fleet-1", "team:x");
+    const fake = fakeSpawn((proc) => {
+      proc.write('{"type":"step_start","sessionID":"ses-1"}\n');
+    });
+
+    const worker = await runWorker(db, dir, {
+      task: "t",
+      worktree_path: "/wt",
+      branch: "b",
+      enroll: { name: "fleet-1", role: "worker", pools: ["team:x"] },
+      spawnFn: fake.spawnFn,
+    });
+
+    stopWorker(db, worker.id, { killFn: vi.fn() });
+
+    // Last binder wins: the box now belongs to ses-2, its pools are not ours.
+    expect(mailboxByName(db, "fleet-1")?.pools).toEqual(["team:x"]);
     db.close();
   });
 });

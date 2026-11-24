@@ -5,6 +5,31 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.23.0] - 2026-11-24
+
+### Added
+
+- **Enrolled spawn — `mesh_spawn(task, name, role, pools)` births a fleet
+  agent**: a worker spawned with a `name` runs with
+  `OPENCODE_MESH_CHILD=enrolled` instead of `=1` — it skips the mesh server and
+  mDNS exactly like a headless worker (the host's server serves every session
+  of the host), but keeps ALL the mesh tools (they act on the shared host
+  database), self-enrolls at its first turn through its prompt header
+  (`mesh_register`/`mesh_join`, no new protocol; `pools[0]` becomes the primary
+  group, with a documented fallback when the pool is brand new) and reports
+  status like any agent. Without `name`, the spawn is unchanged (plain headless
+  worker, back-compat). The registry row carries the mailbox name (schema v11);
+  a name collision hands the mailbox over — last binder wins.
+- **`spawnMax` quota** (option, default `4`): `mesh_spawn` refuses an enrolled
+  spawn past the limit ("spawn limit N reached, reap one first"); only RUNNING
+  enrolled workers count, plain headless workers are unlimited.
+- **Reap leaves the pools**: a deliberate `mesh_worker_stop`/`mesh_worker_remove`
+  of an enrolled worker makes the reaper leave its pool memberships; the
+  mailbox row itself survives and re-binds on the next `mesh_register` of the
+  same name (the reaper skips the leave when the box was already handed over to
+  another session). A child that dies brutally is NOT reaped: its pools stay
+  until a future mailbox GC handles the leftovers.
+
 ## [0.22.1] - 2026-11-24
 
 ### Fixed
