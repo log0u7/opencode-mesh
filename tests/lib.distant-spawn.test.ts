@@ -1170,7 +1170,7 @@ function domainMockForModes(): {
     create: async (input) => {
       calls.push({
         projectID: input.projectID,
-        name: input.name,
+        ...(input.name !== undefined ? { name: input.name } : {}),
         ...(input.directory !== undefined ? { directory: input.directory } : {}),
       });
       return { directory: `/tmp/wt-${input.name ?? "x"}` };
