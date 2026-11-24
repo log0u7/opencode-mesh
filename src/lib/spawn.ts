@@ -20,6 +20,7 @@ import {
   setWorkerPid,
   setWorkerSession,
   setWorkerStatus,
+  type SpawnMode,
   type Worker,
   type WorkerStatus,
 } from "./workers.js";
@@ -130,8 +131,15 @@ export function nodeSpawn(argv: string[], env?: Record<string, string>): Spawned
 
 export type RunWorkerInput = {
   task: string;
-  worktree_path: string;
-  branch: string;
+  /** WHERE the child runs (0.25.0): present = an explicit cwd (`--dir`) — a
+   * worktree directory or a project directory. Absent = session mode, the
+   * child runs in the host's natural context (no cwd override). */
+  worktree_path?: string;
+  /** Registry label; empty for non-worktree spawns (no branch exists). */
+  branch?: string;
+  /** Spawn mode recorded on the row. Default: worktree when worktree_path is
+   * given (every 0.24.x spawn), session otherwise. */
+  spawn_mode?: SpawnMode;
   model?: string;
   agent?: string;
   auto?: boolean;
@@ -155,15 +163,18 @@ const DEFAULT_KILL_GRACE_MS = 3000;
 // Session-id line-buffer cap: session lines are short, 64 KiB is generous.
 const PENDING_MAX_CHARS = 64 * 1024;
 
-// Headless worker: one prompt in an isolated worktree, tracked by pid and log.
+// Headless worker: one prompt run where the spawn mode says (an isolated
+// worktree, a project directory, or the host's natural context), tracked by
+// pid and log.
 export function runWorker(db: MeshDb, dataDir: string, input: RunWorkerInput): Worker {
   mkdirSync(join(dataDir, "workers"), { recursive: true });
   // Insert first: a process spawned before the row exists would be untracked if
   // the insert threw, and the pid is only known after spawnFn returns.
   const worker = insertWorker(db, {
     task: input.task,
-    worktree_path: input.worktree_path,
-    branch: input.branch,
+    worktree_path: input.worktree_path ?? "",
+    branch: input.branch ?? "",
+    spawn_mode: input.spawn_mode ?? (input.worktree_path !== undefined ? "worktree" : "session"),
     pid: null,
     ...(input.enroll !== undefined ? { mailbox: input.enroll.name } : {}),
     ...(input.spawned_by !== undefined ? { spawned_by: input.spawned_by } : {}),
@@ -344,7 +355,13 @@ function openCodeArgv0(): string {
 }
 
 function buildArgv(input: RunWorkerInput): string[] {
-  const argv = [openCodeArgv0(), "run", "--dir", input.worktree_path, "--format", "json"];
+  // Session mode (0.25.0): no --dir, the child keeps the host's natural
+  // context (the serve peer's cwd). Project/worktree modes pass --dir.
+  const argv = [openCodeArgv0(), "run"];
+  if (input.worktree_path !== undefined) {
+    argv.push("--dir", input.worktree_path);
+  }
+  argv.push("--format", "json");
   if (input.model !== undefined) {
     argv.push("--model", input.model);
   }

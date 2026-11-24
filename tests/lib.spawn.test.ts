@@ -139,6 +139,60 @@ describe("runWorker argv", () => {
     db.close();
   });
 
+  it("session mode: omits --dir so the child keeps the host's natural context", async () => {
+    const db = openMeshDb(":memory:");
+    const fake = fakeSpawn((proc) => proc.emitExit(0));
+
+    const worker = await runWorker(db, dir, {
+      task: "t",
+      spawn_mode: "session",
+      spawnFn: fake.spawnFn,
+    });
+
+    // No cwd override: the child runs where the host's opencode context puts it.
+    expect(fake.argv).not.toContain("--dir");
+    expect(fake.argv.slice(1, 3)).toEqual(["run", "--format"]);
+    // The row records the mode; the NOT NULL registry columns carry an empty
+    // label because no worktree exists.
+    expect(worker.spawn_mode).toBe("session");
+    expect(worker.worktree_path).toBe("");
+    expect(worker.branch).toBe("");
+    db.close();
+  });
+
+  it("project mode: passes the directory as --dir and records the mode", async () => {
+    const db = openMeshDb(":memory:");
+    const fake = fakeSpawn((proc) => proc.emitExit(0));
+
+    const worker = await runWorker(db, dir, {
+      task: "t",
+      worktree_path: "/srv/my-project",
+      spawn_mode: "project",
+      spawnFn: fake.spawnFn,
+    });
+
+    expect(fake.argv.slice(1, 5)).toEqual(["run", "--dir", "/srv/my-project", "--format"]);
+    expect(worker.spawn_mode).toBe("project");
+    expect(worker.worktree_path).toBe("/srv/my-project");
+    db.close();
+  });
+
+  it("defaults the spawn mode from the input shape (0.24.x callers keep worktree)", async () => {
+    const db = openMeshDb(":memory:");
+    const withPath = fakeSpawn((proc) => proc.emitExit(0));
+    const withoutPath = fakeSpawn((proc) => proc.emitExit(0));
+    const worktree = await runWorker(db, dir, {
+      task: "t",
+      worktree_path: "/wt",
+      branch: "b",
+      spawnFn: withPath.spawnFn,
+    });
+    const session = await runWorker(db, dir, { task: "t", spawnFn: withoutPath.spawnFn });
+    expect(worktree.spawn_mode).toBe("worktree");
+    expect(session.spawn_mode).toBe("session");
+    db.close();
+  });
+
   it("resolves the child to the running binary, not a PATH lookup", async () => {
     const db = openMeshDb(":memory:");
     const fake = fakeSpawn((proc) => proc.emitExit(0));

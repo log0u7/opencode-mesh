@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { existsSync } from "node:fs";
 import { basename } from "node:path";
 
 import { pairingProof, signPayload, verifyPayload, type NodeIdentity } from "./identity.js";
@@ -12,7 +13,7 @@ import {
   type WorktreeClient,
   type WorktreeDomain,
 } from "./worktree.js";
-import { runWorker, type SpawnFn } from "./spawn.js";
+import { runWorker, removeWorkerLog, type SpawnFn } from "./spawn.js";
 import type { Worker } from "./workers.js";
 import { findPeerById, resolvePeerTarget } from "./peers.js";
 import { sendMail } from "./client.js";
@@ -28,6 +29,14 @@ export type SpawnSpec = {
   name: string;
   role: string;
   pools: string[];
+  /** Spawn mode project (0.25.0): the child runs in this directory on the
+   * peer (it must exist there — the peer checks and refuses otherwise). The
+   * directory rides INSIDE the signed spec, so a MITM cannot swap it. */
+  project?: string;
+  /** Spawn mode worktree (0.25.0): the peer runs its worktree machinery (the
+   * git isolation, opt-in). Requires project. Absent with no project =
+   * session mode, the peer's natural context. */
+  worktree?: boolean;
 };
 
 export type SpawnRequestBody = {
@@ -140,12 +149,25 @@ export function parseSpawnRequest(raw: string): SpawnRequestBody | null {
   ) {
     return null;
   }
+  // Same for the 0.25.0 spawn-mode fields: a malformed project (it decides
+  // WHERE the child runs) kills the request instead of being dropped.
+  if (spec.project !== undefined && (typeof spec.project !== "string" || spec.project === "")) {
+    return null;
+  }
+  if (spec.worktree !== undefined && typeof spec.worktree !== "boolean") {
+    return null;
+  }
   return {
+    // The receiver rebuilds the spec in ITS OWN canonical key order (task,
+    // name, role, pools, project, worktree) so the signed payload it verifies
+    // byte-matches the parent's JSON.stringify of the same fields.
     spec: {
       task: spec.task,
       name: spec.name,
       role: spec.role,
       pools: spec.pools.filter((p) => p.length > 0),
+      ...(typeof spec.project === "string" ? { project: spec.project } : {}),
+      ...(spec.worktree === true ? { worktree: true } : {}),
     },
     from: body.from,
     ...(typeof body.from_box === "string" && body.from_box.length > 0
@@ -208,14 +230,17 @@ export function createDbSpawnReplayStore(db: MeshDb): SpawnReplayStore {
 }
 
 // The enrolled-spawn spec is re-validated on the receiver: it feeds the enroll
-// header (mesh_register/mesh_join lines) and names a worktree, so it must
-// satisfy the same rules the parent's mesh_spawn applies. Both sides run this
-// before any worktree work. Control characters are refused outright: the role
-// and the pools are interpolated line-by-line into the enroll header.
+// header (mesh_register/mesh_join lines), names the worktree in worktree mode
+// and now (0.25.0) may carry the project directory, so it must satisfy the
+// same rules the parent's mesh_spawn applies. Both sides run this before any
+// worktree work. Control characters are refused outright: the role and the
+// pools are interpolated line-by-line into the enroll header.
 const hasControlChar = (s: string): boolean =>
   [...s].some((c) => c.charCodeAt(0) < 0x20 || c.charCodeAt(0) === 0x7f);
 
-export function validateSpawnSpec(spec: Pick<SpawnSpec, "name" | "role" | "pools">): string | null {
+export function validateSpawnSpec(
+  spec: Pick<SpawnSpec, "name" | "role" | "pools" | "project" | "worktree">,
+): string | null {
   if (!/^[A-Za-z0-9._-]{1,64}$/.test(spec.name)) {
     return "spawn refused: invalid name (1-64 chars of letters, digits, . _ -)";
   }
@@ -235,6 +260,24 @@ export function validateSpawnSpec(spec: Pick<SpawnSpec, "name" | "role" | "pools
     )
   ) {
     return "spawn refused: invalid pools (max 8, each non-empty, max 64 chars, no control characters)";
+  }
+  // Spawn mode fields (0.25.0): the project path feeds a cwd on the receiving
+  // host, so it gets the same no-control-characters rule as the role/pools.
+  if (spec.worktree !== undefined && spec.worktree !== true) {
+    return "spawn refused: invalid worktree flag (true, or omit it)";
+  }
+  if (spec.project !== undefined) {
+    if (
+      typeof spec.project !== "string" ||
+      spec.project.length === 0 ||
+      spec.project.length > 512 ||
+      hasControlChar(spec.project)
+    ) {
+      return "spawn refused: invalid project (non-empty directory, max 512 chars, no control characters)";
+    }
+  }
+  if (spec.worktree === true && spec.project === undefined) {
+    return "spawn refused: worktree requires project (pass project=<directory>)";
   }
   return null;
 }
@@ -276,11 +319,18 @@ export type DistantSpawnDeps = {
 
 export type DistantSpawnResult = { ok: true; worker: Worker } | { ok: false; error: string };
 
-// The peer executes ITS OWN local enrolled-spawn path (the 0.23.0 machinery,
-// runWorker: worktree named after the mailbox, the enrolled child env, the
-// self-enroll header, logs, session capture, exit tracking). The worker row is
-// stamped with the requesting peer so the per-peer quota can count it.
-// Failure cleans the worktree like mesh_spawn does.
+// The peer executes ITS OWN enrolled-spawn path (the 0.23.0 machinery,
+// runWorker) in the spawn mode the signed spec names (0.25.0):
+// - worktree (explicit opt-in): the 0.24.x machinery unchanged — a worktree
+//   named after the mailbox, the 0.24.8 projectID retarget, the 0.24.7
+//   discovery refresh retry;
+// - project: the child runs in an existing directory on this peer (git or
+//   not), no worktree machinery runs;
+// - session (default): the child runs in this peer's natural context, no cwd
+//   override — nothing touches the worktree table or discovery.
+// The worker row is stamped with the requesting peer so the per-peer quota
+// can count it. Failure cleans the worktree like mesh_spawn does (worktree
+// mode) or just the row and log (the other modes never created one).
 export async function runDistantSpawn(
   deps: DistantSpawnDeps,
   body: SpawnRequestBody,
@@ -290,74 +340,118 @@ export async function runDistantSpawn(
     return { ok: false, error: specError };
   }
   const enroll = { name: body.spec.name, role: body.spec.role, pools: body.spec.pools };
-  let directory: string | undefined;
-  // Project retarget (0.24.8): a signed request may name the parent's project
-  // (a git remote hash, stable across hosts). The peer's own mesh instance
-  // can be bound to a project with no usable source — a headless
-  // `opencode serve --service` often hosts $HOME (not even a git repo), where
-  // NO discovery can ever register a source — so the create must address the
-  // project the parent actually spawned from. The 0.24.7 discovery refresh
-  // then runs against THAT project and finally registers its source.
-  const worktreeClient =
-    body.projectID !== undefined && deps.worktreeDomain !== undefined
-      ? v2WorktreeDomainClient(deps.worktreeDomain, body.projectID)
-      : deps.worktreeClient;
-  try {
-    const info = await createWorkerWorktree(worktreeClient, {
-      name: enroll.name,
-      ...(deps.spawnWorktreeBase !== undefined ? { directory: deps.spawnWorktreeBase } : {}),
-    });
-    directory = info.directory;
+  if (body.spec.worktree === true) {
+    let directory: string | undefined;
+    // Project retarget (0.24.8): a signed request may name the parent's project
+    // (a git remote hash, stable across hosts). The peer's own mesh instance
+    // can be bound to a project with no usable source — a headless
+    // `opencode serve --service` often hosts $HOME (not even a git repo), where
+    // NO discovery can ever register a source — so the create must address the
+    // project the parent actually spawned from. The 0.24.7 discovery refresh
+    // then runs against THAT project and finally registers its source.
+    const worktreeClient =
+      body.projectID !== undefined && deps.worktreeDomain !== undefined
+        ? v2WorktreeDomainClient(deps.worktreeDomain, body.projectID)
+        : deps.worktreeClient;
+    try {
+      const info = await createWorkerWorktree(worktreeClient, {
+        name: enroll.name,
+        ...(deps.spawnWorktreeBase !== undefined ? { directory: deps.spawnWorktreeBase } : {}),
+      });
+      directory = info.directory;
+      const worker = runWorker(deps.db, deps.dataDir, {
+        task: body.spec.task,
+        worktree_path: info.directory,
+        branch: info.branch ?? info.name ?? basename(info.directory),
+        spawn_mode: "worktree",
+        enroll,
+        spawnFn: deps.spawnFn,
+        spawned_by: body.from,
+      });
+      if (worker.status === "failed") {
+        // The child never ran: clean up exactly like mesh_spawn (worktree, row,
+        // log) so the peer is not left with a stranded directory.
+        const cleaned = await removeWorkerWorktree(worktreeClient, {
+          directory: info.directory,
+        }).catch(() => false);
+        deps.db.conn.run("DELETE FROM workers WHERE id = ?", [worker.id]);
+        if (!cleaned) {
+          return {
+            ok: false,
+            error: `spawn failed: the worker did not start; worktree ${info.directory} may be stranded`,
+          };
+        }
+        return { ok: false, error: "spawn failed: the worker process did not start" };
+      }
+      return { ok: true, worker };
+    } catch (error) {
+      if (directory !== undefined) {
+        await removeWorkerWorktree(worktreeClient, { directory }).catch(() => false);
+      }
+      if (isProjectNotFoundError(error)) {
+        // The retargeted project has no row on this peer: the peer's opencode
+        // never resolved it, so no source can be registered either (the project
+        // resolution is what inserts both). An explicit refusal with the remedy.
+        return {
+          ok: false,
+          error:
+            "spawn refused: the spawned project is not registered on this peer — open the peer's opencode in that project once, then retry",
+        };
+      }
+      if (isSourceDirectoryError(error)) {
+        // No usable source on the peer even after discovery: an explicit
+        // refusal the parent can act on, never the bare tagged error (the
+        // 0.24.7 live bug). "spawn refused" routes the HTTP answer to 403.
+        return {
+          ok: false,
+          error:
+            "spawn refused: no source directory on peer — open the peer's opencode in its project once (worktree discovery registers the source)",
+        };
+      }
+      return { ok: false, error: `spawn failed: ${spawnCause(error)}` };
+    }
+  }
+  // Project mode: the directory must exist ON THE PEER (it is checked here,
+  // inside the signed request's execution — the parent cannot know the peer's
+  // filesystem). A relative path resolves against the peer's own cwd.
+  if (body.spec.project !== undefined) {
+    const directory = body.spec.project;
+    if (!existsSync(directory)) {
+      return {
+        ok: false,
+        error: `spawn refused: project directory ${directory} does not exist on peer`,
+      };
+    }
     const worker = runWorker(deps.db, deps.dataDir, {
       task: body.spec.task,
-      worktree_path: info.directory,
-      branch: info.branch ?? info.name ?? basename(info.directory),
+      worktree_path: directory,
+      spawn_mode: "project",
       enroll,
       spawnFn: deps.spawnFn,
       spawned_by: body.from,
     });
     if (worker.status === "failed") {
-      // The child never ran: clean up exactly like mesh_spawn (worktree, row,
-      // log) so the peer is not left with a stranded directory.
-      const cleaned = await removeWorkerWorktree(worktreeClient, {
-        directory: info.directory,
-      }).catch(() => false);
+      // No worktree was created: only the row and the log need cleaning.
       deps.db.conn.run("DELETE FROM workers WHERE id = ?", [worker.id]);
-      if (!cleaned) {
-        return {
-          ok: false,
-          error: `spawn failed: the worker did not start; worktree ${info.directory} may be stranded`,
-        };
-      }
+      removeWorkerLog(deps.dataDir, worker.id);
       return { ok: false, error: "spawn failed: the worker process did not start" };
     }
     return { ok: true, worker };
-  } catch (error) {
-    if (directory !== undefined) {
-      await removeWorkerWorktree(worktreeClient, { directory }).catch(() => false);
-    }
-    if (isProjectNotFoundError(error)) {
-      // The retargeted project has no row on this peer: the peer's opencode
-      // never resolved it, so no source can be registered either (the project
-      // resolution is what inserts both). An explicit refusal with the remedy.
-      return {
-        ok: false,
-        error:
-          "spawn refused: the spawned project is not registered on this peer — open the peer's opencode in that project once, then retry",
-      };
-    }
-    if (isSourceDirectoryError(error)) {
-      // No usable source on the peer even after discovery: an explicit
-      // refusal the parent can act on, never the bare tagged error (the
-      // 0.24.7 live bug). "spawn refused" routes the HTTP answer to 403.
-      return {
-        ok: false,
-        error:
-          "spawn refused: no source directory on peer — open the peer's opencode in its project once (worktree discovery registers the source)",
-      };
-    }
-    return { ok: false, error: `spawn failed: ${spawnCause(error)}` };
   }
+  // Session mode (default): the child keeps the peer's natural cwd.
+  const worker = runWorker(deps.db, deps.dataDir, {
+    task: body.spec.task,
+    spawn_mode: "session",
+    enroll,
+    spawnFn: deps.spawnFn,
+    spawned_by: body.from,
+  });
+  if (worker.status === "failed") {
+    deps.db.conn.run("DELETE FROM workers WHERE id = ?", [worker.id]);
+    removeWorkerLog(deps.dataDir, worker.id);
+    return { ok: false, error: "spawn failed: the worker process did not start" };
+  }
+  return { ok: true, worker };
 }
 
 // The self-enroll header text lives in src/lib/spawn.ts (enrollHeader) and is

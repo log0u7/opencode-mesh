@@ -64,7 +64,7 @@ describe("mesh database schema", () => {
       legacy.close();
 
       const db = openMeshDb(file);
-      expect(db.conn.get<{ user_version: number }>("PRAGMA user_version")?.user_version).toBe(13);
+      expect(db.conn.get<{ user_version: number }>("PRAGMA user_version")?.user_version).toBe(14);
       const names = db.conn
         .all<{ name: string }>("SELECT name FROM sqlite_master WHERE type = 'index'")
         .map((row) => row.name);
@@ -89,7 +89,7 @@ describe("mesh database schema", () => {
       v1.close();
 
       const db = openMeshDb(file);
-      expect(db.conn.get<{ user_version: number }>("PRAGMA user_version")?.user_version).toBe(13);
+      expect(db.conn.get<{ user_version: number }>("PRAGMA user_version")?.user_version).toBe(14);
       const columns = db.conn
         .all<{ name: string }>("PRAGMA table_info(peers)")
         .map((row) => row.name);
@@ -101,7 +101,7 @@ describe("mesh database schema", () => {
       // migration pass, no version churn.
       const reopened = openMeshDb(file);
       expect(reopened.conn.get<{ user_version: number }>("PRAGMA user_version")?.user_version).toBe(
-        13,
+        14,
       );
       reopened.close();
     } finally {
@@ -157,13 +157,46 @@ describe("mesh database schema", () => {
       v8.close();
 
       const db = openMeshDb(file);
-      expect(db.conn.get<{ user_version: number }>("PRAGMA user_version")?.user_version).toBe(13);
+      expect(db.conn.get<{ user_version: number }>("PRAGMA user_version")?.user_version).toBe(14);
       const columns = db.conn
         .all<{ name: string }>("PRAGMA table_info(messages)")
         .map((row) => row.name);
       expect(columns).toContain("wake");
       const row = db.conn.get<{ wake: number }>("SELECT wake FROM messages WHERE id = 'm1'");
       expect(row?.wake).toBe(0);
+      db.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // v14 adds workers.spawn_mode (0.25.0): every pre-v14 row was a worktree
+  // spawn, so the guarded ALTER back-fills them with the 'worktree' default.
+  it("adds spawn_mode to a pre-v14 workers table, defaulting legacy rows to worktree", () => {
+    const dir = mkdtempSync(join(tmpdir(), "opencode-mesh-db-"));
+    const file = join(dir, "v13.db");
+    try {
+      const v13 = openSqlite(file);
+      v13.exec(`
+        CREATE TABLE workers (id TEXT PRIMARY KEY, task TEXT NOT NULL, worktree_path TEXT NOT NULL,
+          branch TEXT NOT NULL, pid INTEGER, session_id TEXT, status TEXT NOT NULL DEFAULT 'running',
+          exit_code INTEGER, started_at INTEGER NOT NULL, finished_at INTEGER, mailbox TEXT, spawned_by TEXT);
+        INSERT INTO workers (id, task, worktree_path, branch, pid, status, started_at)
+          VALUES ('w1', 't', '/wt', 'b', NULL, 'running', 1);
+        PRAGMA user_version = 13;
+      `);
+      v13.close();
+
+      const db = openMeshDb(file);
+      expect(db.conn.get<{ user_version: number }>("PRAGMA user_version")?.user_version).toBe(14);
+      const columns = db.conn
+        .all<{ name: string }>("PRAGMA table_info(workers)")
+        .map((row) => row.name);
+      expect(columns).toContain("spawn_mode");
+      const row = db.conn.get<{ spawn_mode: string }>(
+        "SELECT spawn_mode FROM workers WHERE id = 'w1'",
+      );
+      expect(row?.spawn_mode).toBe("worktree");
       db.close();
     } finally {
       rmSync(dir, { recursive: true, force: true });

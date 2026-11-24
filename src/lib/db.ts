@@ -10,7 +10,7 @@ export type MeshDb = {
 
 // Bump when a schema change needs a migration step; the version anchors future
 // migrations that cannot be expressed as idempotent `CREATE ... IF NOT EXISTS`.
-const SCHEMA_VERSION = 13;
+const SCHEMA_VERSION = 14;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS peers (
@@ -82,7 +82,8 @@ CREATE TABLE IF NOT EXISTS workers (
   started_at INTEGER NOT NULL,
   finished_at INTEGER,
   mailbox TEXT,
-  spawned_by TEXT
+  spawned_by TEXT,
+  spawn_mode TEXT NOT NULL DEFAULT 'worktree'
 );
 -- v13: distant-spawn nonces are persisted (0.24.1): a receiver restart no
 -- longer re-opens the 5 min replay window.
@@ -190,6 +191,14 @@ function migrate(conn: SqliteConn): void {
   // the paired peer that requested the worker, for the per-peer quota.
   if (!workerColumns.includes("spawned_by")) {
     conn.exec("ALTER TABLE workers ADD COLUMN spawned_by TEXT");
+  }
+  // v14: workers.spawn_mode (0.25.0) — which of the three spawn modes the
+  // child runs in (session: no cwd override, project: an existing directory,
+  // worktree: the git isolation). Every 0.24.x row was a worktree spawn, so
+  // the default back-fills them correctly; mesh_worker_remove uses it to
+  // NEVER touch a directory the mesh did not create.
+  if (!workerColumns.includes("spawn_mode")) {
+    conn.exec("ALTER TABLE workers ADD COLUMN spawn_mode TEXT NOT NULL DEFAULT 'worktree'");
   }
   conn.exec(INDEXES_V3);
   conn.exec("CREATE INDEX IF NOT EXISTS idx_messages_origin ON messages(origin_id);");

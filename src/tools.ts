@@ -1,7 +1,8 @@
+import { existsSync } from "node:fs";
 import { basename } from "node:path";
 import { randomUUID } from "node:crypto";
 import { postPairCode, postSpawn, sendMail } from "./lib/client.js";
-import { buildSpawnRequest, validateSpawnSpec } from "./lib/distant-spawn.js";
+import { buildSpawnRequest, validateSpawnSpec, type SpawnSpec } from "./lib/distant-spawn.js";
 import type { MeshDb } from "./lib/db.js";
 import type { Fanout } from "./lib/fanout.js";
 import { buildOfferBlob, parseOfferBlob } from "./lib/offer-blob.js";
@@ -42,6 +43,7 @@ import {
   type EnrollIdentity,
   type SpawnFn,
 } from "./lib/spawn.js";
+import type { SpawnMode } from "./lib/workers.js";
 import type { HostCapa } from "./lib/capa.js";
 import {
   createWorkerWorktree,
@@ -703,12 +705,12 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
     {
       name: "mesh_spawn",
       description:
-        "Run a task as a headless background worker in an isolated opencode worktree (--auto by default). Returns worker id, worktree, branch. With name: births an ENROLLED fleet agent instead — the child keeps the mesh tools, self-enrolls (mesh_register/mesh_join) at its first turn and joins the pools. Name collisions hand the mailbox over: last binder wins. Refuses past the enrolled spawn quota (spawnMax, default 4 running). With node=<paired peer>: the enrolled agent is born ON THAT PEER instead — the request is signed with this node's key, the peer runs its own enrolled-spawn path and DMs back an ack; the worker lives on the peer's registry (reap it there), local spawnMax does not apply.",
+        "Run a task as a headless background worker. Three spawn modes: session (default — the child runs in this host's natural context), project (project=<dir> — the child runs in that existing directory, git or not; a non-git project is still a project), worktree (worktree=true + project=<dir> — the git isolation, opt-in). With name: births an ENROLLED fleet agent instead — the child keeps the mesh tools, self-enrolls (mesh_register/mesh_join) at its first turn and joins the pools. Name collisions hand the mailbox over: last binder wins. Refuses past the enrolled spawn quota (spawnMax, default 4 running). With node=<paired peer>: the enrolled agent is born ON THAT PEER instead — the request is signed with this node's key, the peer runs its own enrolled-spawn path (same three modes; project must exist there) and DMs back an ack; the worker lives on the peer's registry (reap it there), local spawnMax does not apply.",
       fields: [
         str("task", "Task for the worker"),
         str(
           "name",
-          "Enrolled spawn: the child's mailbox name (letters, digits, . _ -; max 64); also names the worktree/branch",
+          "Enrolled spawn: the child's mailbox name (letters, digits, . _ -; max 64); names the worktree/branch in worktree mode",
           false,
         ),
         str("role", "Enrolled spawn: fleet role (default worker)", false),
@@ -718,6 +720,15 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
           false,
         ),
         str("node", "Paired peer (node id or hostname): spawn the enrolled agent THERE", false),
+        str(
+          "project",
+          "Spawn mode project: run the child in this directory (must exist on the target host; git or not). With worktree=true: the source repo for the worktree",
+          false,
+        ),
+        bool(
+          "worktree",
+          "Spawn mode worktree (requires project=): isolate the child in a git worktree",
+        ),
         str("model", "Worker provider/model (local spawn only)", false),
         str("agent", "Agent for the worker (local spawn only)", false),
         bool("auto", "Grant all permissions (default true; local spawn only)"),
@@ -738,15 +749,32 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
                 pools,
               }
             : undefined;
+        const project =
+          typeof args.project === "string" && args.project.length > 0 ? args.project : undefined;
+        const wantsWorktree = args.worktree === true;
+        if (wantsWorktree && project === undefined) {
+          return "error: worktree requires project (pass project=<directory>)";
+        }
+        // Mode resolution (0.25.0): explicit args win; with neither, an
+        // enrolled child defaults to session (the host's natural context)
+        // while the legacy headless spawn keeps its worktree (back-compat).
+        const mode: SpawnMode = wantsWorktree
+          ? "worktree"
+          : project !== undefined
+            ? "project"
+            : "session";
         const node = typeof args.node === "string" && args.node.length > 0 ? args.node : undefined;
         if (node !== undefined) {
           return await distantSpawn(mesh, {
             task: String(args.task),
             node,
+            mode,
+            ...(project !== undefined ? { project } : {}),
             ...(enroll !== undefined ? { enroll } : {}),
             sessionID: sessionID(context),
           });
         }
+        const localMode: SpawnMode = enroll === undefined && mode === "session" ? "worktree" : mode;
         if (enroll !== undefined) {
           const max = spawnMax ?? 4;
           if (countRunningEnrolled(db) >= max) {
@@ -755,16 +783,60 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
         }
         let info: WorktreeInfo | undefined;
         try {
-          info = await createWorkerWorktree(worktreeClient, {
-            ...(typeof args.name === "string" ? { name: args.name } : {}),
-          });
+          if (localMode === "worktree") {
+            info = await createWorkerWorktree(worktreeClient, {
+              ...(typeof args.name === "string" ? { name: args.name } : {}),
+            });
+            const worker = runWorker(db, dataDir, {
+              task: String(args.task),
+              worktree_path: info.directory,
+              // The 2.x domain reports only the directory; fall back to its
+              // basename (git's branch name for the worktree) for the NOT NULL
+              // branch column.
+              branch: info.branch ?? info.name ?? basename(info.directory),
+              spawn_mode: "worktree",
+              ...(typeof args.model === "string" ? { model: args.model } : {}),
+              ...(typeof args.agent === "string" ? { agent: args.agent } : {}),
+              ...(typeof args.auto === "boolean" ? { auto: args.auto } : {}),
+              ...(enroll !== undefined ? { enroll } : {}),
+              spawnFn,
+            });
+            if (worker.status === "failed") {
+              // The child never ran: do not leak the worktree. Only drop the row
+              // once the worktree is gone, so an unclean removal stays visible.
+              const cleaned = await removeWorkerWorktree(worktreeClient, {
+                directory: info.directory,
+              }).catch(() => false);
+              info = undefined;
+              if (!cleaned) {
+                return `error: worker ${worker.id} failed to start; worktree ${worker.worktree_path} may be stranded`;
+              }
+              deleteWorker(db, worker.id);
+              removeWorkerLog(dataDir, worker.id);
+              return `error: worker ${worker.id} failed to start`;
+            }
+            return JSON.stringify(
+              {
+                worker_id: worker.id,
+                worktree: info.directory,
+                branch: worker.branch,
+                pid: worker.pid,
+                ...(enroll !== undefined ? { mailbox: enroll.name } : {}),
+              },
+              null,
+              2,
+            );
+          }
+          // Session/project: NO worktree machinery runs — nothing touches the
+          // worktree table or discovery, and the 0.24.7
+          // SourceDirectoryNotFoundError path is unreachable here.
+          if (localMode === "project" && !existsSync(project!)) {
+            return `error: spawn refused: project directory ${project} does not exist`;
+          }
           const worker = runWorker(db, dataDir, {
             task: String(args.task),
-            worktree_path: info.directory,
-            // The 2.x domain reports only the directory; fall back to its
-            // basename (git's branch name for the worktree) for the NOT NULL
-            // branch column.
-            branch: info.branch ?? info.name ?? basename(info.directory),
+            ...(localMode === "project" && project !== undefined ? { worktree_path: project } : {}),
+            spawn_mode: localMode,
             ...(typeof args.model === "string" ? { model: args.model } : {}),
             ...(typeof args.agent === "string" ? { agent: args.agent } : {}),
             ...(typeof args.auto === "boolean" ? { auto: args.auto } : {}),
@@ -772,15 +844,8 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
             spawnFn,
           });
           if (worker.status === "failed") {
-            // The child never ran: do not leak the worktree. Only drop the row
-            // once the worktree is gone, so an unclean removal stays visible.
-            const cleaned = await removeWorkerWorktree(worktreeClient, {
-              directory: info.directory,
-            }).catch(() => false);
-            info = undefined;
-            if (!cleaned) {
-              return `error: worker ${worker.id} failed to start; worktree ${worker.worktree_path} may be stranded`;
-            }
+            // The child never ran and no worktree was created: only the row
+            // and the log need cleaning.
             deleteWorker(db, worker.id);
             removeWorkerLog(dataDir, worker.id);
             return `error: worker ${worker.id} failed to start`;
@@ -788,8 +853,8 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
           return JSON.stringify(
             {
               worker_id: worker.id,
-              worktree: info.directory,
-              branch: worker.branch,
+              mode: localMode,
+              ...(localMode === "project" ? { dir: project } : {}),
               pid: worker.pid,
               ...(enroll !== undefined ? { mailbox: enroll.name } : {}),
             },
@@ -886,6 +951,18 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
             // Nothing live to signal; the registry row is what gets cleaned up.
           }
         }
+        // Session/project spawns (0.25.0) run in a directory the mesh did not
+        // create: there is nothing to remove, and a project dir is the user's
+        // own tree — NEVER hand it to the worktree API.
+        if (worker.spawn_mode !== "worktree") {
+          const rowDeleted = deleteWorker(db, worker_id);
+          if (!rowDeleted) {
+            return `error: worker row ${worker_id} was already gone`;
+          }
+          reapEnrolledPools(db, worker);
+          removeWorkerLog(dataDir, worker.id);
+          return `removed ${worker.id} (registry row and log deleted; spawn mode ${worker.spawn_mode} keeps its directory)`;
+        }
         let removed: boolean;
         try {
           removed = await removeWorkerWorktree(worktreeClient, {
@@ -914,16 +991,37 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
 
 // Distant spawn (0.24.0): send the signed spawn request to a paired peer and
 // surface its verdict. The peer runs its own enrolled-spawn path; the worker
-// lives on the peer's registry and the ack comes back as a DM.
+// lives on the peer's registry and the ack comes back as a DM. The spawn mode
+// (0.25.0) rides in the signed spec: worktree = the peer's worktree machinery
+// (the 0.24.8 projectID retarget stays on this path only), project = an
+// existing directory on the peer, session = the peer's natural context.
 async function distantSpawn(
   mesh: MeshContext,
-  input: { task: string; node: string; enroll?: EnrollIdentity; sessionID: string },
+  input: {
+    task: string;
+    node: string;
+    mode: SpawnMode;
+    project?: string;
+    enroll?: EnrollIdentity;
+    sessionID: string;
+  },
 ): Promise<string> {
   const { db, identity } = mesh;
   if (input.enroll === undefined) {
     return "error: distant spawn requires name= (the child enrolls on the peer)";
   }
-  const specError = validateSpawnSpec(input.enroll);
+  const spec: SpawnSpec = {
+    task: input.task,
+    name: input.enroll.name,
+    role: input.enroll.role,
+    pools: input.enroll.pools,
+    // Key order is part of the canonical signed payload: the receiver rebuilds
+    // the spec in exactly this order (task, name, role, pools, project,
+    // worktree).
+    ...(input.project !== undefined ? { project: input.project } : {}),
+    ...(input.mode === "worktree" ? { worktree: true } : {}),
+  };
+  const specError = validateSpawnSpec(spec);
   if (specError !== null) {
     return `error: ${specError}`;
   }
@@ -943,12 +1041,7 @@ async function distantSpawn(
   }
   const fromBox = resolveBox(db, input.sessionID);
   const body = buildSpawnRequest(identity, {
-    spec: {
-      task: input.task,
-      name: input.enroll.name,
-      role: input.enroll.role,
-      pools: input.enroll.pools,
-    },
+    spec,
     ...(fromBox !== null ? { from_box: fromBox } : {}),
     ...(mesh.projectID !== undefined ? { projectID: mesh.projectID } : {}),
   });

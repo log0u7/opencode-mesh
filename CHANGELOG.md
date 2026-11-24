@@ -5,6 +5,38 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.25.0] - 2026-11-24
+
+### Added
+
+- Three spawn modes for mesh_spawn — where the child runs is now a choice,
+  and the default stops being the worktree:
+  - **session** (default): the child runs in the host's natural context — the
+    cwd of the peer's serve — with no directory imposed and zero
+    dependencies. Nothing touches the worktree table or discovery.
+  - **project** (`project=<dir>`): the child runs in that existing directory
+    — a real project, git or not (a non-git project is still a project; the
+    core opencode conflates the two, the mesh does not inherit that). The
+    directory is checked on the target host: locally with a direct existence
+    check, remotely inside the signed request, where the peer answers an
+    explicit refusal "spawn refused: project directory <dir> does not exist
+    on peer".
+  - **worktree** (`worktree: true` + `project=<dir>`): the git isolation,
+    opt-in by choice — the unchanged 0.24.x machinery (worktree create, the
+    0.24.7 discovery refresh retry, the 0.24.8 signed projectID retarget,
+    which lives on this path only). `worktree: true` without `project=` is
+    refused ("worktree requires project").
+- The spawn mode is recorded on the worker row (workers.spawn_mode, schema
+  v14; every pre-0.25.0 row is a worktree spawn) so mesh_worker_remove only
+  ever removes what the mesh created — a project or session spawn keeps its
+  directory, and the worktree API is never called for it.
+- Local back-compat: a nameless headless spawn keeps the legacy worktree
+  behavior; an enrolled spawn (name=) defaults to session mode. The spawn
+  mode travels in the signed distant-spawn spec (project/worktree ride inside
+  the signature, the receiver rebuilds them canonically) and the 0.24.5
+  one-log-line-per-spawn and 0.24.7 SourceDirectoryNotFoundError paths stay
+  dead on the default and project modes (no worktree machinery runs there).
+
 ## [0.24.8] - 2026-11-24
 
 ### Fixed

@@ -5,6 +5,12 @@ import { leavePool, mailboxByName } from "./mail.js";
 
 export type WorkerStatus = "running" | "completed" | "failed" | "stopped";
 
+// The three spawn modes (0.25.0): WHERE the child runs. "session" (default):
+// the host's natural context, no cwd override. "project": an existing
+// directory (git or not). "worktree": the git isolation, opt-in. Recorded on
+// the row so mesh_worker_remove only ever removes what the mesh created.
+export type SpawnMode = "session" | "project" | "worktree";
+
 export type Worker = {
   id: string;
   task: string;
@@ -22,11 +28,14 @@ export type Worker = {
   /** Set for a DISTANT spawn (0.24.0): the node id of the paired peer that
    * requested it (per-peer quota). NULL for a local spawn. */
   spawned_by: string | null;
+  /** Which spawn mode the child runs in (0.25.0). Legacy rows (0.24.x and
+   * before) are all worktree spawns: the column defaults to "worktree". */
+  spawn_mode: SpawnMode;
 };
 
 const TERMINAL_STATUSES = new Set<WorkerStatus>(["completed", "failed", "stopped"]);
 
-type WorkerRow = Omit<Worker, "status"> & { status: string };
+type WorkerRow = Omit<Worker, "status" | "spawn_mode"> & { status: string; spawn_mode: string };
 
 export function insertWorker(
   db: MeshDb,
@@ -38,14 +47,16 @@ export function insertWorker(
     pid: number | null;
     mailbox?: string | null;
     spawned_by?: string | null;
+    spawn_mode?: SpawnMode;
   },
 ): Worker {
   const id = input.id ?? randomUUID();
   const now = Date.now();
+  const spawnMode = input.spawn_mode ?? "worktree";
 
   db.conn.run(
-    `INSERT INTO workers (id, task, worktree_path, branch, pid, session_id, status, exit_code, started_at, finished_at, mailbox, spawned_by)
-     VALUES (?, ?, ?, ?, ?, NULL, 'running', NULL, ?, NULL, ?, ?)`,
+    `INSERT INTO workers (id, task, worktree_path, branch, pid, session_id, status, exit_code, started_at, finished_at, mailbox, spawned_by, spawn_mode)
+     VALUES (?, ?, ?, ?, ?, NULL, 'running', NULL, ?, NULL, ?, ?, ?)`,
     [
       id,
       input.task,
@@ -55,6 +66,7 @@ export function insertWorker(
       now,
       input.mailbox ?? null,
       input.spawned_by ?? null,
+      spawnMode,
     ],
   );
 
@@ -71,6 +83,7 @@ export function insertWorker(
     finished_at: null,
     mailbox: input.mailbox ?? null,
     spawned_by: input.spawned_by ?? null,
+    spawn_mode: spawnMode,
   };
 }
 
@@ -222,7 +235,17 @@ function rowToWorker(row: WorkerRow): Worker {
     finished_at: row.finished_at,
     mailbox: row.mailbox,
     spawned_by: row.spawned_by,
+    spawn_mode: spawnModeFromRow(row.spawn_mode),
   };
+}
+
+// A NULL spawn_mode can only come from a pre-v14 row mid-migration window;
+// those were worktree spawns.
+function spawnModeFromRow(raw: string): SpawnMode {
+  if (raw === "session" || raw === "project" || raw === "worktree") {
+    return raw;
+  }
+  return "worktree";
 }
 
 function statusFromRow(raw: string): WorkerStatus {
