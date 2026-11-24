@@ -84,6 +84,9 @@ export type MeshServerOptions = {
     quotaPeer?: number;
     /** Destination base for the worktrees of spawned children (0.24.7). */
     spawnWorktreeBase?: string;
+    /** The fleet workspace of THIS host (0.25.0): where a request without a
+     * projectID births its colleague. Default: ~/projets/fleet. */
+    spawnWorkspace?: string;
     /** This node's private key: the ack DM carries a standard pairing proof. */
     privateKey: string;
     worktreeClient: WorktreeClient;
@@ -442,6 +445,7 @@ async function handle(
         ...(distant.spawnWorktreeBase !== undefined
           ? { spawnWorktreeBase: distant.spawnWorktreeBase }
           : {}),
+        ...(distant.spawnWorkspace !== undefined ? { spawnWorkspace: distant.spawnWorkspace } : {}),
       };
       const result = await runDistantSpawn(dsDeps, parsed);
       if (!result.ok) {

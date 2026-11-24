@@ -379,6 +379,7 @@ describe("enrolled spawn (0.23.0)", () => {
     const { tools, hooks } = await loadTools({
       worktreeClient: fakeWorktreeClient(),
       spawnFn: spawned.spawnFn,
+      spawnWorkspace: dir,
     });
 
     const result = JSON.parse(
@@ -388,9 +389,14 @@ describe("enrolled spawn (0.23.0)", () => {
           ctx("s1"),
         ),
       ),
-    ) as { worker_id: string; mailbox: string };
+    ) as { worker_id: string; mailbox: string; workspace: string };
 
     expect(result.mailbox).toBe("fleet-1");
+    // The 0.25.0 default: the child is a workspace COLLEAGUE, cwd = the
+    // configured fleet workspace, no worktree.
+    expect(result.workspace).toBe(dir);
+    expect(spawned.calls[0]?.argv).toContain("--dir");
+    expect(spawned.calls[0]?.argv).toContain(dir);
     expect(spawned.calls[0]?.env?.OPENCODE_MESH_CHILD).toBe("enrolled");
     expect(spawned.calls[0]?.argv.at(-1)).toContain(
       "mesh_register(name=fleet-1, role=reviewer, primary=team:x)",
@@ -433,6 +439,7 @@ describe("enrolled spawn (0.23.0)", () => {
       spawnMax: 1,
       worktreeClient: fakeWorktreeClient(),
       spawnFn: hangingSpawn,
+      spawnWorkspace: dir,
     });
 
     const first = JSON.parse(
@@ -465,6 +472,7 @@ describe("enrolled spawn (0.23.0)", () => {
       worktreeClient: fakeWorktreeClient(),
       // Reports a session then exits 0: a completed enrolled worker.
       spawnFn: okSpawn([{ type: "step_start", sessionID: "ses-9" }]),
+      spawnWorkspace: dir,
     });
 
     const result = JSON.parse(

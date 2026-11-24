@@ -62,6 +62,10 @@ export type PluginOptions = {
    * mesh_spawn(node=…) requests accepted on this peer — where spawned agents
    * are born. Default: the host's own opencode worktree base. */
   spawnWorktreeBase?: string;
+  /** The fleet workspace (0.25.0): where mesh_spawn WITHOUT project= births
+   * its colleague — an opencode session with no project dependency. Default
+   * ~/projets/fleet; a missing directory refuses the spawn explicitly. */
+  spawnWorkspace?: string;
   worktreeClient?: WorktreeClient;
   spawnFn?: SpawnFn;
 };
@@ -237,6 +241,12 @@ export function parseOptions(raw: PluginOptions | undefined): PluginOptions {
       throw new Error("opencode-mesh: options.spawnWorktreeBase must be a non-empty string");
     }
     options.spawnWorktreeBase = raw.spawnWorktreeBase;
+  }
+  if (raw.spawnWorkspace !== undefined) {
+    if (typeof raw.spawnWorkspace !== "string" || raw.spawnWorkspace.length === 0) {
+      throw new Error("opencode-mesh: options.spawnWorkspace must be a non-empty string");
+    }
+    options.spawnWorkspace = raw.spawnWorkspace;
   }
   // Opaque collaborators are passed through untouched: the plugin cannot
   // validate a client or spawn function beyond its nominal type.

@@ -83,6 +83,9 @@ export const MeshPlugin: Plugin = async (input, rawOptions?: PluginOptions) => {
           worktreeClient,
           spawnFn: options.spawnFn ?? nodeSpawn,
           addressing: addressingOptions(options),
+          ...(options.spawnWorkspace !== undefined
+            ? { spawnWorkspace: options.spawnWorkspace }
+            : {}),
           ...(options.spawnMax !== undefined ? { spawnMax: options.spawnMax } : {}),
         }).map((spec) => [
           spec.name,
@@ -143,6 +146,7 @@ export const MeshPlugin: Plugin = async (input, rawOptions?: PluginOptions) => {
       ...(options.spawnWorktreeBase !== undefined
         ? { spawnWorktreeBase: options.spawnWorktreeBase }
         : {}),
+      ...(options.spawnWorkspace !== undefined ? { spawnWorkspace: options.spawnWorkspace } : {}),
       privateKey: identity.private_key,
       worktreeClient,
       spawnFn,
@@ -195,6 +199,7 @@ export const MeshPlugin: Plugin = async (input, rawOptions?: PluginOptions) => {
         spawnFn,
         addressing: addressingOptions(options),
         capa: hostCapa.get,
+        ...(options.spawnWorkspace !== undefined ? { spawnWorkspace: options.spawnWorkspace } : {}),
         ...(options.spawnMax !== undefined ? { spawnMax: options.spawnMax } : {}),
       }).map((spec) => [
         spec.name,

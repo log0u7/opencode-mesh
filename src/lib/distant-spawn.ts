@@ -12,7 +12,7 @@ import {
   type WorktreeClient,
   type WorktreeDomain,
 } from "./worktree.js";
-import { runWorker, type SpawnFn } from "./spawn.js";
+import { runWorker, resolveSpawnWorkspace, WORKSPACE_BRANCH, type SpawnFn } from "./spawn.js";
 import type { Worker } from "./workers.js";
 import { findPeerById, resolvePeerTarget } from "./peers.js";
 import { sendMail } from "./client.js";
@@ -44,11 +44,11 @@ export type SpawnRequestBody = {
   sig: string;
   /** Standard pairing proof, for the token-bind path (same as /mail). */
   proof?: string;
-  /** The parent's opencode project id (0.24.8): the peer creates the child's
-   * worktree under THIS project instead of its own mesh instance's. A git
-   * project id derives from the git remote, so it names the same repo on
-   * every host that has it cloned. Absent on pre-0.24.8 parents (legacy
-   * signature, the peer keeps its own project). */
+  /** The parent's opencode project id, signed ONLY on a project opt-in
+   * (0.25.0; before that 0.24.8 signed it on every request). The peer births
+   * the child's worktree under THIS project instead of its workspace default.
+   * A git project id derives from the git remote, so it names the same repo on
+   * every host that has it cloned. Absent = the workspace colleague default. */
   projectID?: string;
 };
 
@@ -272,15 +272,20 @@ export type DistantSpawnDeps = {
    * signed request retarget the create to the parent's project. Absent on
    * 1.x REST hosts, whose client cannot address another project. */
   worktreeDomain?: WorktreeDomain;
+  /** The fleet workspace of THIS host (0.25.0): where a request without a
+   * projectID births its colleague. Default: ~/projets/fleet. */
+  spawnWorkspace?: string;
 };
 
 export type DistantSpawnResult = { ok: true; worker: Worker } | { ok: false; error: string };
 
-// The peer executes ITS OWN local enrolled-spawn path (the 0.23.0 machinery,
-// runWorker: worktree named after the mailbox, the enrolled child env, the
-// self-enroll header, logs, session capture, exit tracking). The worker row is
-// stamped with the requesting peer so the per-peer quota can count it.
-// Failure cleans the worktree like mesh_spawn does.
+// The peer executes ITS OWN local enrolled-spawn path (runWorker: the enrolled
+// child env, the self-enroll header, logs, session capture, exit tracking) in
+// the fleet workspace (0.25.0 default) or, on a project opt-in (projectID
+// signed), in a worktree named after the mailbox — the 0.23.0/0.24.x machinery
+// untouched. The worker row is stamped with the requesting peer so the
+// per-peer quota can count it. A worktree failure cleans the worktree like
+// mesh_spawn does.
 export async function runDistantSpawn(
   deps: DistantSpawnDeps,
   body: SpawnRequestBody,
@@ -290,6 +295,13 @@ export async function runDistantSpawn(
     return { ok: false, error: specError };
   }
   const enroll = { name: body.spec.name, role: body.spec.role, pools: body.spec.pools };
+  // The 0.25.0 default: a request that names no project births a workspace
+  // COLLEAGUE on this peer — an opencode session in the fleet workspace, no
+  // project dependency, no worktree machinery, the SourceDirectoryNotFoundError
+  // dead by construction. The peer resolves its OWN spawnWorkspace.
+  if (body.projectID === undefined) {
+    return runWorkspaceSpawn(deps, body, enroll);
+  }
   let directory: string | undefined;
   // Project retarget (0.24.8): a signed request may name the parent's project
   // (a git remote hash, stable across hosts). The peer's own mesh instance
@@ -358,6 +370,36 @@ export async function runDistantSpawn(
     }
     return { ok: false, error: `spawn failed: ${spawnCause(error)}` };
   }
+}
+
+// The workspace colleague (0.25.0): the peer's own fleet workspace, the same
+// enrolled-spawn runWorker otherwise (env, header, logs, session capture,
+// exit tracking), stamped with the requesting peer for the per-peer quota.
+// No worktree is created, so a failed spawn only deletes the row.
+async function runWorkspaceSpawn(
+  deps: DistantSpawnDeps,
+  body: SpawnRequestBody,
+  enroll: { name: string; role: string; pools: string[] },
+): Promise<DistantSpawnResult> {
+  let workspace: string;
+  try {
+    workspace = resolveSpawnWorkspace(deps.spawnWorkspace);
+  } catch (error) {
+    return { ok: false, error: spawnCause(error) };
+  }
+  const worker = runWorker(deps.db, deps.dataDir, {
+    task: body.spec.task,
+    worktree_path: workspace,
+    branch: WORKSPACE_BRANCH,
+    enroll,
+    spawnFn: deps.spawnFn,
+    spawned_by: body.from,
+  });
+  if (worker.status === "failed") {
+    deps.db.conn.run("DELETE FROM workers WHERE id = ?", [worker.id]);
+    return { ok: false, error: "spawn failed: the worker process did not start" };
+  }
+  return { ok: true, worker };
 }
 
 // The self-enroll header text lives in src/lib/spawn.ts (enrollHeader) and is
