@@ -9,7 +9,9 @@ import {
   renameSync,
   rmSync,
   statSync,
+  type Stats,
 } from "node:fs";
+import { homedir } from "node:os";
 import { basename, join } from "node:path";
 
 import type { MeshDb } from "./db.js";
@@ -47,6 +49,34 @@ export const CHILD_ENV = { OPENCODE_MESH_CHILD: "1" };
 // keeps the mesh tools, and self-enrolls from its prompt header at its first
 // turn.
 export const CHILD_ENV_ENROLLED = { OPENCODE_MESH_CHILD: "enrolled" };
+
+// The fleet workspace (0.25.0): where a spawned COLLEAGUE lives by default.
+// A workspace directory shared by the fleet, not a project worktree: the
+// child is a session with a mailbox, like any other agent. Per-host override:
+// the spawnWorkspace option.
+export const DEFAULT_SPAWN_WORKSPACE = "~/projets/fleet";
+
+// The registry branch marker for a workspace-born child: it has no git branch,
+// and mesh_worker_remove must never hand this directory to the worktree API.
+export const WORKSPACE_BRANCH = "workspace";
+
+// Resolve the fleet workspace directory and refuse a missing one explicitly:
+// a silently wrong cwd would leave the child answering from $HOME. `~` is
+// expanded (options arrive as literal strings from the config).
+export function resolveSpawnWorkspace(configured?: string): string {
+  const raw = configured ?? DEFAULT_SPAWN_WORKSPACE;
+  const path = raw === "~" || raw.startsWith("~/") ? join(homedir(), raw.slice(1)) : raw;
+  let info: Stats;
+  try {
+    info = statSync(path);
+  } catch {
+    throw new Error(`spawn workspace ${path} does not exist — create it or set spawnWorkspace`);
+  }
+  if (!info.isDirectory()) {
+    throw new Error(`spawn workspace ${path} is not a directory — create it or set spawnWorkspace`);
+  }
+  return path;
+}
 
 export type EnrollIdentity = {
   /** The child's mailbox name. */

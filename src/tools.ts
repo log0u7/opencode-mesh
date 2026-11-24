@@ -49,6 +49,7 @@ import {
   type WorktreeClient,
   type WorktreeInfo,
 } from "./lib/worktree.js";
+import { resolveSpawnWorkspace, WORKSPACE_BRANCH } from "./lib/spawn.js";
 import {
   deleteWorker,
   getWorker,
@@ -94,6 +95,9 @@ export type MeshContext = {
    * distant spawn requests so the peer births the child under THIS project
    * (a git remote hash, stable across hosts). Absent on 1.x hosts. */
   projectID?: string;
+  /** The fleet workspace of THIS host (0.25.0): where a mesh_spawn without
+   * project= births its colleague. Default: ~/projets/fleet. */
+  spawnWorkspace?: string;
   /** Address providers config + static tunnel addresses: the advertised
    * candidate IPs (mesh_status `tailnet_addresses`). */
   addressing?: AddressOptions;
@@ -703,18 +707,23 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
     {
       name: "mesh_spawn",
       description:
-        "Run a task as a headless background worker in an isolated opencode worktree (--auto by default). Returns worker id, worktree, branch. With name: births an ENROLLED fleet agent instead — the child keeps the mesh tools, self-enrolls (mesh_register/mesh_join) at its first turn and joins the pools. Name collisions hand the mailbox over: last binder wins. Refuses past the enrolled spawn quota (spawnMax, default 4 running). With node=<paired peer>: the enrolled agent is born ON THAT PEER instead — the request is signed with this node's key, the peer runs its own enrolled-spawn path and DMs back an ack; the worker lives on the peer's registry (reap it there), local spawnMax does not apply.",
+        "Run a task as a headless background worker in an isolated opencode worktree (--auto by default). Returns worker id, worktree, branch. With name: births an ENROLLED fleet agent instead — the child keeps the mesh tools, self-enrolls (mesh_register/mesh_join) at its first turn and joins the pools. By default (0.25.0) the child is a workspace COLLEAGUE: a session in the fleet workspace (spawnWorkspace option, default ~/projets/fleet), no project dependency and no worktree. For a code task in a repo, pass project=<repo path> to opt back into the project worktree machinery (the worktree is created from this host's project). Name collisions hand the mailbox over: last binder wins. Refuses past the enrolled spawn quota (spawnMax, default 4 running). With node=<paired peer>: the enrolled agent is born ON THAT PEER instead — the request is signed with this node's key (the project is signed along ONLY on a project opt-in), the peer runs its own enrolled-spawn path — its workspace by default, its worktree machinery on a project opt-in — and DMs back an ack; the worker lives on the peer's registry (reap it there), local spawnMax does not apply.",
       fields: [
         str("task", "Task for the worker"),
         str(
           "name",
-          "Enrolled spawn: the child's mailbox name (letters, digits, . _ -; max 64); also names the worktree/branch",
+          "Enrolled spawn: the child's mailbox name (letters, digits, . _ -; max 64); also names the worktree/branch on a project opt-in",
           false,
         ),
         str("role", "Enrolled spawn: fleet role (default worker)", false),
         strArr(
           "pools",
           "Enrolled spawn: pool ids to join; the first becomes the primary group",
+          false,
+        ),
+        str(
+          "project",
+          "Opt-in (0.25.0): birth the child in a PROJECT WORKTREE instead of the fleet workspace — for code tasks in a repo. The worktree is created from this host's project",
           false,
         ),
         str("node", "Paired peer (node id or hostname): spawn the enrolled agent THERE", false),
@@ -738,12 +747,15 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
                 pools,
               }
             : undefined;
+        const project =
+          typeof args.project === "string" && args.project.length > 0 ? args.project : undefined;
         const node = typeof args.node === "string" && args.node.length > 0 ? args.node : undefined;
         if (node !== undefined) {
           return await distantSpawn(mesh, {
             task: String(args.task),
             node,
             ...(enroll !== undefined ? { enroll } : {}),
+            ...(project !== undefined ? { project } : {}),
             sessionID: sessionID(context),
           });
         }
@@ -752,6 +764,19 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
           if (countRunningEnrolled(db) >= max) {
             return `error: spawn limit ${max} reached, reap one first`;
           }
+        }
+        // The 0.25.0 default: an enrolled spawn without project= is a workspace
+        // COLLEAGUE — born in the fleet workspace, no project dependency, no
+        // worktree machinery, the SourceDirectoryNotFoundError dead by
+        // construction. The project machinery is opt-in only.
+        if (enroll !== undefined && project === undefined) {
+          return spawnWorkspaceColleague(mesh, {
+            task: String(args.task),
+            enroll,
+            ...(typeof args.model === "string" ? { model: args.model } : {}),
+            ...(typeof args.agent === "string" ? { agent: args.agent } : {}),
+            ...(typeof args.auto === "boolean" ? { auto: args.auto } : {}),
+          });
         }
         let info: WorktreeInfo | undefined;
         try {
@@ -886,6 +911,18 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
             // Nothing live to signal; the registry row is what gets cleaned up.
           }
         }
+        // A workspace colleague (0.25.0) owns no worktree: its directory IS
+        // the fleet workspace, and handing it to the worktree API would ask
+        // opencode to delete shared fleet property. Remove only the row.
+        if (worker.branch === WORKSPACE_BRANCH) {
+          const rowDeleted = deleteWorker(db, worker_id);
+          if (!rowDeleted) {
+            return `error: worker row ${worker_id} was already gone`;
+          }
+          reapEnrolledPools(db, worker);
+          removeWorkerLog(dataDir, worker.id);
+          return `removed ${worker.id} (registry row and log deleted; the workspace directory stays)`;
+        }
         let removed: boolean;
         try {
           removed = await removeWorkerWorktree(worktreeClient, {
@@ -914,10 +951,19 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
 
 // Distant spawn (0.24.0): send the signed spawn request to a paired peer and
 // surface its verdict. The peer runs its own enrolled-spawn path; the worker
-// lives on the peer's registry and the ack comes back as a DM.
+// lives on the peer's registry and the ack comes back as a DM. Since 0.25.0
+// the request names the project ONLY on a project opt-in: without one the
+// payload is the spec alone (the exact legacy signature) and the peer births
+// a workspace colleague in ITS OWN fleet workspace.
 async function distantSpawn(
   mesh: MeshContext,
-  input: { task: string; node: string; enroll?: EnrollIdentity; sessionID: string },
+  input: {
+    task: string;
+    node: string;
+    enroll?: EnrollIdentity;
+    project?: string;
+    sessionID: string;
+  },
 ): Promise<string> {
   const { db, identity } = mesh;
   if (input.enroll === undefined) {
@@ -950,7 +996,12 @@ async function distantSpawn(
       pools: input.enroll.pools,
     },
     ...(fromBox !== null ? { from_box: fromBox } : {}),
-    ...(mesh.projectID !== undefined ? { projectID: mesh.projectID } : {}),
+    // The retarget is opt-in (0.25.0): signed only when the caller named a
+    // project. A 1.x host has no projectID to sign: its request stays legacy
+    // and the peer applies its own default (the workspace colleague).
+    ...(input.project !== undefined && mesh.projectID !== undefined
+      ? { projectID: mesh.projectID }
+      : {}),
   });
   const result = await postSpawn({
     url: conn.url,
@@ -978,6 +1029,56 @@ async function distantSpawn(
       worker_id: result.worker_id,
       mailbox: input.enroll.name,
       ack: "the peer DMs `spawned <name> on <hostname> (worker <id>)` to your mailbox; the worker lives on the peer's registry — reap it there (mesh_worker_stop on the peer)",
+    },
+    null,
+    2,
+  );
+}
+
+// The workspace colleague (0.25.0): the DEFAULT birthplace of an enrolled
+// spawn. The child opencode runs with cwd = the fleet workspace
+// (spawnWorkspace option, default ~/projets/fleet) — no worktree is created,
+// no project machinery runs, the SourceDirectoryNotFoundError cannot happen.
+// The registry row marks it with the WORKSPACE_BRANCH sentinel: a later
+// mesh_worker_remove must never hand the shared workspace to the worktree API.
+function spawnWorkspaceColleague(
+  mesh: MeshContext,
+  input: {
+    task: string;
+    enroll: EnrollIdentity;
+    model?: string;
+    agent?: string;
+    auto?: boolean;
+  },
+): string {
+  let workspace: string;
+  try {
+    workspace = resolveSpawnWorkspace(mesh.spawnWorkspace);
+  } catch (error) {
+    return `error: ${error instanceof Error ? error.message : String(error)}`;
+  }
+  const worker = runWorker(mesh.db, mesh.dataDir, {
+    task: input.task,
+    worktree_path: workspace,
+    branch: WORKSPACE_BRANCH,
+    ...(input.model !== undefined ? { model: input.model } : {}),
+    ...(input.agent !== undefined ? { agent: input.agent } : {}),
+    ...(input.auto !== undefined ? { auto: input.auto } : {}),
+    enroll: input.enroll,
+    spawnFn: mesh.spawnFn,
+  });
+  if (worker.status === "failed") {
+    // The child never ran: no worktree to clean, just the row and its log.
+    deleteWorker(mesh.db, worker.id);
+    removeWorkerLog(mesh.dataDir, worker.id);
+    return `error: worker ${worker.id} failed to start`;
+  }
+  return JSON.stringify(
+    {
+      worker_id: worker.id,
+      workspace,
+      pid: worker.pid,
+      mailbox: input.enroll.name,
     },
     null,
     2,

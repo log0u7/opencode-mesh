@@ -5,6 +5,34 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.25.0] - 2026-11-24
+
+### Changed
+
+- The enrolled spawn births a workspace COLLEAGUE by default: an opencode
+  session in the fleet workspace (`spawnWorkspace` option, default
+  `~/projets/fleet`, per host), with no project dependency. The child keeps
+  the enrolled behavior (mesh tools, self-enroll header, logs, session
+  capture, exit tracking, `spawnMax` quota), but no worktree is created and
+  no project machinery runs — the structural
+  `Worktree.SourceDirectoryNotFoundError` is dead by construction. A missing
+  workspace directory refuses the spawn with the remedy: "spawn workspace
+  <path> does not exist — create it or set spawnWorkspace".
+- The project worktree machinery (the 0.23.0/0.24.x path, including the
+  0.24.7 refresh-and-retry and the 0.24.8 retarget) is now OPT-IN: pass
+  `project=<repo path>` to birth the child in a project worktree, for code
+  tasks in a repo. The plain headless worker (no `name`) is unchanged and
+  keeps its worktree.
+- Distant spawn (`node=<paired peer>`) follows the same split: without
+  `project=` the signed payload is the spec alone (the exact legacy
+  signature — old parents verify on new peers) and the peer births the
+  colleague in ITS OWN fleet workspace; with `project=` the parent's
+  projectID is signed along (0.24.8 semantics) and the peer keeps the
+  worktree machinery. A workspace colleague's registry row carries the
+  `workspace` branch sentinel: `mesh_worker_remove` deletes the row and reaps
+  the pools but never hands the shared workspace directory to the worktree
+  API. New option: `spawnWorkspace` (default `~/projets/fleet`).
+
 ## [0.24.8] - 2026-11-24
 
 ### Fixed

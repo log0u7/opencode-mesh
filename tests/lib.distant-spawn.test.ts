@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -74,6 +74,7 @@ async function startNode(
     acceptSpawn?: boolean;
     quotaPeer?: number;
     spawnWorktreeBase?: string;
+    spawnWorkspace?: string;
     omitDistantSpawn?: boolean;
     worktreeClient?: WorktreeClient;
     worktreeDomain?: WorktreeDomain;
@@ -124,6 +125,9 @@ async function startNode(
             ...(options.spawnWorktreeBase !== undefined
               ? { spawnWorktreeBase: options.spawnWorktreeBase }
               : {}),
+            ...(options.spawnWorkspace !== undefined
+              ? { spawnWorkspace: options.spawnWorkspace }
+              : {}),
             privateKey: identity.private_key,
             worktreeClient,
             spawnFn,
@@ -141,7 +145,7 @@ function tools(
   identity: NodeIdentity,
   db: MeshDb,
   worktreeClient: WorktreeClient,
-  options: { projectID?: string } = {},
+  options: { projectID?: string; spawnWorkspace?: string } = {},
 ) {
   const specs = new Map<string, ToolSpec>(
     buildToolSpecs({
@@ -154,10 +158,19 @@ function tools(
       worktreeClient,
       spawnFn: fakeSpawnFn(),
       ...(options.projectID !== undefined ? { projectID: options.projectID } : {}),
+      ...(options.spawnWorkspace !== undefined ? { spawnWorkspace: options.spawnWorkspace } : {}),
     }).map((s) => [s.name, s]),
   );
   return (name: string, args: Record<string, unknown> = {}, sessionID = "s-a"): Promise<string> =>
     specs.get(name)!.execute(args, { sessionID });
+}
+
+// A fleet workspace directory that EXISTS on the test host (the default
+// ~/projets/fleet may not): spawns without a project= opt-in need it.
+function mkWorkspace(): string {
+  const path = join(dir, "fleet");
+  mkdirSync(path, { recursive: true });
+  return path;
 }
 
 function pairBoth(a: Node, b: Node, token: string): void {
@@ -180,6 +193,10 @@ function pairBoth(a: Node, b: Node, token: string): void {
 }
 
 const SPEC = { task: "implement the parser", name: "parser", role: "worker", pools: ["team:x"] };
+
+// The parent's opencode project id, signed ONLY on a project opt-in (0.25.0):
+// a git remote hash, stable across hosts.
+const PARENT_PROJECT = "30ad8aadfbe7ebd4fdfc884f4fe00cf447d7b079";
 
 describe("distant spawn wire (0.24.0)", () => {
   it("signs and rebuilds the canonical payload deterministically", () => {
@@ -253,18 +270,21 @@ describe("spawn nonce persistence (0.24.1)", () => {
 });
 
 describe("distant spawn e2e: two TLS nodes (0.24.0)", () => {
-  it("mesh_spawn(node=B) births an enrolled child on B and the ack DM returns", async () => {
+  it("mesh_spawn(node=B, project=…) births an enrolled child in a worktree on B and the ack DM returns", async () => {
     const a = await startNode("a");
-    const b = await startNode("b");
+    const b = await startNode("b", { spawnWorkspace: mkWorkspace() });
     pairBoth(a, b, "tAB");
     registerMailbox(a.db, { name: "parent-box", session_id: "s-a", now: Date.now() });
 
-    const call = tools(a.identity, a.db, fakeWorktreeClient());
+    // Project opt-in: the parent signs its projectID and the peer keeps the
+    // 0.23.0/0.24.x worktree machinery.
+    const call = tools(a.identity, a.db, fakeWorktreeClient(), { projectID: PARENT_PROJECT });
     const out = await call("mesh_spawn", {
       task: SPEC.task,
       name: SPEC.name,
       role: SPEC.role,
       pools: SPEC.pools,
+      project: "/repo",
       node: "host-b",
     });
     const result = JSON.parse(out) as {
@@ -336,10 +356,11 @@ describe("distant spawn e2e: two TLS nodes (0.24.0)", () => {
       },
     });
     pairBoth(a, b, "tF1");
-    const call = tools(a.identity, a.db, fakeWorktreeClient());
+    const call = tools(a.identity, a.db, fakeWorktreeClient(), { projectID: PARENT_PROJECT });
     const out = await call("mesh_spawn", {
       task: SPEC.task,
       name: SPEC.name,
+      project: "/repo",
       node: "host-b",
     });
     expect(out).toBe("error: spawn failed: Error (no message)");
@@ -371,8 +392,13 @@ describe("distant spawn e2e: two TLS nodes (0.24.0)", () => {
       },
     });
     pairBoth(a, b, "tF2");
-    const call = tools(a.identity, a.db, fakeWorktreeClient());
-    const out = await call("mesh_spawn", { task: SPEC.task, name: SPEC.name, node: "host-b" });
+    const call = tools(a.identity, a.db, fakeWorktreeClient(), { projectID: PARENT_PROJECT });
+    const out = await call("mesh_spawn", {
+      task: SPEC.task,
+      name: SPEC.name,
+      project: "/repo",
+      node: "host-b",
+    });
     expect(out).toBe("error: spawn failed: worktree API error: worktree create failed");
     expect(listWorkers(b.db)).toHaveLength(0);
     a.server.server.close();
@@ -395,8 +421,13 @@ describe("distant spawn e2e: two TLS nodes (0.24.0)", () => {
       },
     });
     pairBoth(a, b, "tF3");
-    const call = tools(a.identity, a.db, fakeWorktreeClient());
-    const out = await call("mesh_spawn", { task: SPEC.task, name: SPEC.name, node: "host-b" });
+    const call = tools(a.identity, a.db, fakeWorktreeClient(), { projectID: PARENT_PROJECT });
+    const out = await call("mesh_spawn", {
+      task: SPEC.task,
+      name: SPEC.name,
+      project: "/repo",
+      node: "host-b",
+    });
     expect(out).toBe("error: spawn failed: unknown error (no message)");
     expect(listWorkers(b.db)).toHaveLength(0);
     a.server.server.close();
@@ -428,7 +459,7 @@ describe("distant spawn e2e: two TLS nodes (0.24.0)", () => {
   it("logs exactly one server line per successful POST /spawn (0.24.5)", async () => {
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     const a = await startNode("a-log");
-    const b = await startNode("b-log");
+    const b = await startNode("b-log", { spawnWorkspace: mkWorkspace() });
     pairBoth(a, b, "tLog");
     const call = tools(a.identity, a.db, fakeWorktreeClient());
     await call("mesh_spawn", { task: SPEC.task, name: SPEC.name, node: "host-b" });
@@ -476,7 +507,7 @@ describe("distant spawn e2e: two TLS nodes (0.24.0)", () => {
     const a = await startNode("a4");
     // Quota raised here: this test exercises replay/staleness, the quota test
     // runs on its own node.
-    const b = await startNode("b4", { quotaPeer: 10 });
+    const b = await startNode("b4", { quotaPeer: 10, spawnWorkspace: mkWorkspace() });
     pairBoth(a, b, "tAB");
     const first = await postSpawn({
       url: `https://127.0.0.1:${b.port}`,
@@ -632,9 +663,9 @@ describe("distant spawn e2e: two TLS nodes (0.24.0)", () => {
 
   it("applies the per-peer quota and leaves local spawns uncounted", async () => {
     const a = await startNode("a5");
-    const b = await startNode("b5", { quotaPeer: 2 });
+    const b = await startNode("b5", { quotaPeer: 2, spawnWorkspace: mkWorkspace() });
     pairBoth(a, b, "tAB");
-    const call = tools(a.identity, a.db, fakeWorktreeClient());
+    const call = tools(a.identity, a.db, fakeWorktreeClient(), { spawnWorkspace: mkWorkspace() });
     const first = await call("mesh_spawn", { task: "t1", name: "kid-one", node: "host-b" });
     expect(JSON.parse(first).worker_id).toBeTruthy();
     const second = await call("mesh_spawn", { task: "t2", name: "kid-two", node: "host-b" });
@@ -654,7 +685,7 @@ describe("distant spawn e2e: two TLS nodes (0.24.0)", () => {
 
   it("leaves the local spawn path unchanged (no node argument)", async () => {
     const a = await startNode("a6", { omitDistantSpawn: true });
-    const call = tools(a.identity, a.db, fakeWorktreeClient());
+    const call = tools(a.identity, a.db, fakeWorktreeClient(), { spawnWorkspace: mkWorkspace() });
     const out = await call("mesh_spawn", { task: "plain work", name: "local-only" });
     const result = JSON.parse(out) as { worker_id: string; mailbox: string };
     expect(result.mailbox).toBe("local-only");
@@ -746,12 +777,13 @@ describe("distant spawn source directory (0.24.7)", () => {
     const source = sourceWorktreeClient("recovers");
     const b = await startNode("b-s1", { worktreeClient: source.client });
     pairBoth(a, b, "tS1");
-    const call = tools(a.identity, a.db, fakeWorktreeClient());
+    const call = tools(a.identity, a.db, fakeWorktreeClient(), { projectID: PARENT_PROJECT });
     const out = await call("mesh_spawn", {
       task: SPEC.task,
       name: SPEC.name,
       role: SPEC.role,
       pools: SPEC.pools,
+      project: "/repo",
       node: "host-b",
     });
     expect(JSON.parse(out).worker_id).toBeTruthy();
@@ -769,8 +801,13 @@ describe("distant spawn source directory (0.24.7)", () => {
     const source = sourceWorktreeClient("broken");
     const b = await startNode("b-s2", { worktreeClient: source.client });
     pairBoth(a, b, "tS2");
-    const call = tools(a.identity, a.db, fakeWorktreeClient());
-    const out = await call("mesh_spawn", { task: SPEC.task, name: SPEC.name, node: "host-b" });
+    const call = tools(a.identity, a.db, fakeWorktreeClient(), { projectID: PARENT_PROJECT });
+    const out = await call("mesh_spawn", {
+      task: SPEC.task,
+      name: SPEC.name,
+      project: "/repo",
+      node: "host-b",
+    });
     expect(out).toBe(
       "error: spawn refused: no source directory on peer — open the peer's opencode in its project once (worktree discovery registers the source)",
     );
@@ -789,8 +826,13 @@ describe("distant spawn source directory (0.24.7)", () => {
       spawnWorktreeBase: "/srv/spawns",
     });
     pairBoth(a, b, "tS3");
-    const call = tools(a.identity, a.db, fakeWorktreeClient());
-    const out = await call("mesh_spawn", { task: SPEC.task, name: SPEC.name, node: "host-b" });
+    const call = tools(a.identity, a.db, fakeWorktreeClient(), { projectID: PARENT_PROJECT });
+    const out = await call("mesh_spawn", {
+      task: SPEC.task,
+      name: SPEC.name,
+      project: "/repo",
+      node: "host-b",
+    });
     expect(JSON.parse(out).worker_id).toBeTruthy();
     // The destination override reached the host worktree API on BOTH attempts
     // (the first dies on the missing source, the retry succeeds).
@@ -812,8 +854,8 @@ describe("distant spawn project retarget (0.24.8)", () => {
   // own projectID into the request, and the peer retargets the worktree
   // create to THAT project — the same repo the parent spawned from, which the
   // peer's opencode has registered (a git project id derives from the git
-  // remote, so it matches across hosts).
-  const PARENT_PROJECT = "30ad8aadfbe7ebd4fdfc884f4fe00cf447d7b079";
+  // remote, so it matches across hosts). Since 0.25.0 that signature is
+  // OPT-IN: it rides along only when the caller passes project=<repo>.
 
   function domainMock(mode: "ok" | "missing-project"): {
     domain: WorktreeDomain;
@@ -872,7 +914,12 @@ describe("distant spawn project retarget (0.24.8)", () => {
     });
     pairBoth(a, b, "tR1");
     const call = tools(a.identity, a.db, fakeWorktreeClient(), { projectID: PARENT_PROJECT });
-    const out = await call("mesh_spawn", { task: SPEC.task, name: SPEC.name, node: "host-b" });
+    const out = await call("mesh_spawn", {
+      task: SPEC.task,
+      name: SPEC.name,
+      project: "/repo",
+      node: "host-b",
+    });
     expect(JSON.parse(out).worker_id).toBeTruthy();
     expect(retarget.calls).toHaveLength(1);
     expect(retarget.calls[0]?.projectID).toBe(PARENT_PROJECT);
@@ -882,19 +929,38 @@ describe("distant spawn project retarget (0.24.8)", () => {
     b.server.server.close();
   });
 
-  it("keeps the receiver's own project when the request carries none", async () => {
+  it("births a workspace colleague on the peer when the request names no project (0.25.0)", async () => {
     const a = await startNode("a-r2");
     const retarget = domainMock("ok");
+    const creates: number[] = [];
+    const countingClient: WorktreeClient = {
+      worktree: {
+        create: async (parameters) => {
+          creates.push(1);
+          return fakeWorktreeClient().worktree.create(parameters);
+        },
+        remove: async () => ({ data: true }),
+      },
+    };
     const b = await startNode("b-r2", {
-      worktreeClient: fakeWorktreeClient(),
+      worktreeClient: countingClient,
       worktreeDomain: retarget.domain,
+      spawnWorkspace: mkWorkspace(),
     });
     pairBoth(a, b, "tR2");
-    const call = tools(a.identity, a.db, fakeWorktreeClient());
+    // The parent has a projectID but passes NO project=: the retarget is
+    // opt-in, the payload is the spec alone, and the peer births its default
+    // workspace colleague — no worktree machinery runs.
+    const call = tools(a.identity, a.db, fakeWorktreeClient(), { projectID: PARENT_PROJECT });
     const out = await call("mesh_spawn", { task: SPEC.task, name: SPEC.name, node: "host-b" });
     expect(JSON.parse(out).worker_id).toBeTruthy();
     expect(retarget.calls).toHaveLength(0);
-    expect(listWorkers(b.db)).toHaveLength(1);
+    expect(creates).toHaveLength(0);
+    const workers = listWorkers(b.db);
+    expect(workers).toHaveLength(1);
+    expect(workers[0]?.worktree_path).toBe(join(dir, "fleet"));
+    expect(workers[0]?.branch).toBe("workspace");
+    expect(workers[0]?.spawned_by).toBe(a.identity.node_id);
     a.server.server.close();
     b.server.server.close();
   });
@@ -908,10 +974,59 @@ describe("distant spawn project retarget (0.24.8)", () => {
     });
     pairBoth(a, b, "tR3");
     const call = tools(a.identity, a.db, fakeWorktreeClient(), { projectID: PARENT_PROJECT });
-    const out = await call("mesh_spawn", { task: SPEC.task, name: SPEC.name, node: "host-b" });
+    const out = await call("mesh_spawn", {
+      task: SPEC.task,
+      name: SPEC.name,
+      project: "/repo",
+      node: "host-b",
+    });
     expect(out).toBe(
       "error: spawn refused: the spawned project is not registered on this peer — open the peer's opencode in that project once, then retry",
     );
+    expect(listWorkers(b.db)).toHaveLength(0);
+    a.server.server.close();
+    b.server.server.close();
+  });
+});
+
+describe("distant spawn workspace colleague (0.25.0)", () => {
+  // The redesigned default: a request that names no project births a
+  // COLLEAGUE on the peer — an opencode session in the PEER's fleet
+  // workspace, no worktree, no project dependency. The peer's own
+  // spawnWorkspace option decides where.
+  it("births the colleague in the PEER's workspace through the signed request", async () => {
+    const a = await startNode("a-w1");
+    const b = await startNode("b-w1", { spawnWorkspace: mkWorkspace() });
+    pairBoth(a, b, "tW1");
+    const call = tools(a.identity, a.db, fakeWorktreeClient());
+    const out = await call("mesh_spawn", {
+      task: SPEC.task,
+      name: SPEC.name,
+      role: SPEC.role,
+      pools: SPEC.pools,
+      node: "host-b",
+    });
+    expect(JSON.parse(out).worker_id).toBeTruthy();
+    const workers = listWorkers(b.db);
+    expect(workers).toHaveLength(1);
+    expect(workers[0]?.worktree_path).toBe(join(dir, "fleet"));
+    expect(workers[0]?.branch).toBe("workspace");
+    expect(workers[0]?.mailbox).toBe(SPEC.name);
+    expect(workers[0]?.spawned_by).toBe(a.identity.node_id);
+    expect(workers[0]?.status).toBe("running");
+    a.server.server.close();
+    b.server.server.close();
+  });
+
+  it("answers the parent with the explicit missing-workspace refusal", async () => {
+    const a = await startNode("a-w2");
+    // The peer has NO spawnWorkspace configured: the default ~/projets/fleet
+    // does not exist on the test host.
+    const b = await startNode("b-w2");
+    pairBoth(a, b, "tW2");
+    const call = tools(a.identity, a.db, fakeWorktreeClient());
+    const out = await call("mesh_spawn", { task: SPEC.task, name: SPEC.name, node: "host-b" });
+    expect(out).toContain("does not exist — create it or set spawnWorkspace");
     expect(listWorkers(b.db)).toHaveLength(0);
     a.server.server.close();
     b.server.server.close();
