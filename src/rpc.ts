@@ -232,14 +232,16 @@ export function formatMeshSidebarExpanded(
 }
 
 /** Collapsed: ONE line, conditional. Mail pending: the attention state replaces
- * the inventory (`Mesh ● N unread`, nothing else stacked). Quiet: the fleet
+ * the inventory (`▶ Mesh ● N unread`, nothing else stacked). Quiet: the fleet
  * inventory only, counters in the muted value tone (like the expanded line's
- * unread segment, the attention drops at 0). */
+ * unread segment, the attention drops at 0). The first segment carries the
+ * toggle glyph (`▶ Mesh`, bold clickable — the expanded header is `▼ Mesh`),
+ * restored in 0.24.2 after 0.23.3 dropped it from the conditional lines. */
 export function formatMeshSidebarCollapsed(s: MeshSnapshot): SidebarSegment[] {
   const unread = totalUnread(s);
   if (unread > 0) {
     return [
-      { text: "Mesh", tone: "entity" },
+      { text: "▶ Mesh", tone: "entity" },
       { text: " ● ", tone: "alert" },
       { text: `${unread} unread`, tone: "qualifier" },
     ];
@@ -250,7 +252,7 @@ export function formatMeshSidebarCollapsed(s: MeshSnapshot): SidebarSegment[] {
     [Object.keys(s.pools).length, "pools"],
     [hosts, "hosts"],
   ];
-  const line: SidebarSegment[] = [{ text: "Mesh", tone: "entity" }];
+  const line: SidebarSegment[] = [{ text: "▶ Mesh", tone: "entity" }];
   for (const [count, label] of counts) {
     line.push({ text: " · ", tone: "value" }, { text: `${count} ${label}`, tone: "value" });
   }

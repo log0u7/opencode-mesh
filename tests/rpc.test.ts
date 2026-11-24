@@ -320,9 +320,17 @@ describe("formatMeshSidebarExpanded (v4)", () => {
 });
 
 describe("formatMeshSidebarCollapsed (v4)", () => {
+  it("carries the toggle: ▶ collapsed, ▼ expanded (restored in 0.24.2)", () => {
+    const quiet = snapshot();
+    quiet.hats = quiet.hats.map((h) => ({ ...h, unread: 0 }));
+    expect(formatMeshSidebarCollapsed(quiet)[0]).toEqual({ text: "▶ Mesh", tone: "entity" });
+    expect(formatMeshSidebarCollapsed(snapshot())[0]).toEqual({ text: "▶ Mesh", tone: "entity" });
+    expect(renderLine(formatMeshSidebarExpanded(snapshot())[0])).toMatch(/^▼ Mesh/);
+  });
+
   it("shows only the attention line when mail is pending (no counters stacked)", () => {
     expect(formatMeshSidebarCollapsed(snapshot())).toEqual([
-      { text: "Mesh", tone: "entity" },
+      { text: "▶ Mesh", tone: "entity" },
       { text: " ● ", tone: "alert" },
       { text: "3 unread", tone: "qualifier" },
     ]);
@@ -333,7 +341,7 @@ describe("formatMeshSidebarCollapsed (v4)", () => {
     s.peers = [];
     s.hats = s.hats.map((h) => ({ ...h, unread: 0 }));
     expect(formatMeshSidebarCollapsed(s)).toEqual([
-      { text: "Mesh", tone: "entity" },
+      { text: "▶ Mesh", tone: "entity" },
       { text: " · ", tone: "value" },
       { text: "4 agents", tone: "value" },
       { text: " · ", tone: "value" },
