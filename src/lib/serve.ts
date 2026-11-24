@@ -14,6 +14,7 @@ import {
   createDbSpawnReplayStore,
   parseSpawnRequest,
   runDistantSpawn,
+  spawnCause,
   verifySpawnRequest,
   type SpawnReplayStore,
 } from "./distant-spawn.js";
@@ -366,6 +367,7 @@ async function handle(
     // inside a 5 min window and its nonce must be unseen.
     const body = await readBody(req);
     if ("error" in body) {
+      console.error("[mesh] spawn: refused malformed request body");
       json(res, body.error === "too_large" ? 413 : 400, {
         error: body.error === "too_large" ? "body too large" : "malformed request body",
       });
@@ -373,66 +375,92 @@ async function handle(
     }
     const parsed = parseSpawnRequest(body.body);
     if (!parsed) {
+      console.error("[mesh] spawn: refused invalid spawn request");
       json(res, 400, { error: "invalid spawn request" });
       return;
     }
+    // One server-side line per POST /spawn (the 0.24.5 lesson): the mesh
+    // server used to log NOTHING between nonce validation and worker
+    // creation, so a live failure left no trace on the peer at all.
+    const spawnLog = (outcome: string): void => {
+      console.error(`[mesh] spawn from ${parsed.from} (name=${parsed.spec.name}): ${outcome}`);
+    };
     const peer = authenticate(db, req, parsed.from, parsed.proof);
     if (!peer || parsed.from !== peer.node_id) {
+      spawnLog("refused: unauthorized");
       json(res, 401, { error: "unauthorized" });
       return;
     }
     const distant = options.distantSpawn;
     // Deny-by-default: the operator opts in with acceptSpawn.
     if (!distant || distant.acceptSpawn !== true) {
+      spawnLog("refused: acceptSpawn disabled");
       json(res, 403, { error: "spawn refused: acceptSpawn disabled" });
       return;
     }
     if (options.dataDir === undefined) {
+      spawnLog("refused: spawn storage not configured");
       json(res, 503, { error: "spawn storage not configured" });
       return;
     }
     const peerRow = findPeerById(db, parsed.from);
     const verifyError = verifySpawnRequest(peerRow, parsed, Date.now());
     if (verifyError !== null) {
+      spawnLog(`refused: ${verifyError}`);
       json(res, 403, { error: verifyError });
       return;
     }
-    if (!spawnReplay.claim(parsed.from, parsed.nonce, Date.now())) {
-      json(res, 403, { error: "spawn refused: replayed nonce" });
-      return;
-    }
-    const quota = distant.quotaPeer ?? DEFAULT_SPAWN_QUOTA_PEER;
-    if (countRunningSpawnedByPeer(db, parsed.from) >= quota) {
-      json(res, 403, { error: `spawn refused: spawn quota reached (${quota})` });
-      return;
-    }
-    const dsDeps = {
-      db,
-      dataDir: options.dataDir,
-      identity: {
-        node_id: options.self.node_id,
+    try {
+      if (!spawnReplay.claim(parsed.from, parsed.nonce, Date.now())) {
+        spawnLog("refused: replayed nonce");
+        json(res, 403, { error: "spawn refused: replayed nonce" });
+        return;
+      }
+      const quota = distant.quotaPeer ?? DEFAULT_SPAWN_QUOTA_PEER;
+      if (countRunningSpawnedByPeer(db, parsed.from) >= quota) {
+        spawnLog(`refused: spawn quota reached (${quota})`);
+        json(res, 403, { error: `spawn refused: spawn quota reached (${quota})` });
+        return;
+      }
+      const dsDeps = {
+        db,
+        dataDir: options.dataDir,
+        identity: {
+          node_id: options.self.node_id,
+          hostname: options.self.hostname,
+          public_key: options.self.pk,
+          private_key: distant.privateKey,
+        },
+        worktreeClient: distant.worktreeClient,
+        spawnFn: distant.spawnFn,
+      };
+      const result = await runDistantSpawn(dsDeps, parsed);
+      if (!result.ok) {
+        // A spec refusal is the caller's fault (403); a spawn failure is ours.
+        const refusal = result.error.startsWith("spawn refused:");
+        spawnLog(`${refusal ? "refused" : "failed"}: ${result.error}`);
+        json(res, refusal ? 403 : 500, { error: result.error });
+        return;
+      }
+      // Ack DM to the parent's mailbox (best effort, never blocks the verdict).
+      void ackSpawned(dsDeps, parsed, result.worker.id).catch(() => {});
+      spawnLog(`ok: worker ${result.worker.id}`);
+      json(res, 200, {
+        ok: true,
+        worker_id: result.worker.id,
         hostname: options.self.hostname,
-        public_key: options.self.pk,
-        private_key: distant.privateKey,
-      },
-      worktreeClient: distant.worktreeClient,
-      spawnFn: distant.spawnFn,
-    };
-    const result = await runDistantSpawn(dsDeps, parsed);
-    if (!result.ok) {
-      // A spec refusal is the caller's fault (403); a spawn failure is ours.
-      json(res, result.error.startsWith("spawn refused:") ? 403 : 500, { error: result.error });
+        name: parsed.spec.name,
+      });
+      return;
+    } catch (cause) {
+      // From the claimed nonce onward a silent failure would leave the parent
+      // with an empty verdict and the peer without a trace (the 0.24.5 live
+      // failure). Answer 500 with the REAL cause, never an empty string.
+      const message = spawnCause(cause);
+      spawnLog(`failed: ${message}`);
+      json(res, 500, { error: `spawn failed: ${message}` });
       return;
     }
-    // Ack DM to the parent's mailbox (best effort, never blocks the verdict).
-    void ackSpawned(dsDeps, parsed, result.worker.id).catch(() => {});
-    json(res, 200, {
-      ok: true,
-      worker_id: result.worker.id,
-      hostname: options.self.hostname,
-      name: parsed.spec.name,
-    });
-    return;
   }
 
   if (req.method === "POST" && url.pathname === "/pair-code") {

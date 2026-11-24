@@ -309,14 +309,15 @@ export async function postSpawn(target: {
       return { kind: "refused", status: response.status, error: "unparseable peer response" };
     }
   }
-  let error = `peer answered ${response.status}`;
+  let error = `spawn failed: ${response.status}`;
   try {
     const parsed = JSON.parse(response.body) as { error?: unknown };
     if (typeof parsed.error === "string" && parsed.error.length > 0) {
       error = parsed.error;
     }
   } catch {
-    // Keep the fallback message.
+    // Keep the fallback: an unreadable body leaves at least the status code
+    // instead of a bare message (the 0.24.5 lesson).
   }
   return { kind: "refused", status: response.status, error };
 }

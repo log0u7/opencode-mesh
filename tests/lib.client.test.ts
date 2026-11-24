@@ -46,6 +46,42 @@ describe("sendMail result mapping", () => {
   });
 });
 
+describe("postSpawn verdict mapping (0.24.5)", () => {
+  it("surfaces spawn failed: <status> when the peer body is unreadable", async () => {
+    const { postSpawn } = await import("../src/lib/client.js");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response("<html>bad gateway</html>", { status: 502 })),
+    );
+    const result = await postSpawn({ url: "http://127.0.0.1:1", token: "t", body: "{}" });
+    expect(result).toEqual({ kind: "refused", status: 502, error: "spawn failed: 502" });
+    vi.unstubAllGlobals();
+  });
+
+  it("surfaces the peer's error field verbatim", async () => {
+    const { postSpawn } = await import("../src/lib/client.js");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({ error: "spawn failed: the worker process did not start" }),
+            {
+              status: 500,
+            },
+          ),
+      ),
+    );
+    const result = await postSpawn({ url: "http://127.0.0.1:1", token: "t", body: "{}" });
+    expect(result).toEqual({
+      kind: "refused",
+      status: 500,
+      error: "spawn failed: the worker process did not start",
+    });
+    vi.unstubAllGlobals();
+  });
+});
+
 describe("sendMail server error mapping", () => {
   it("maps 500 responses to error via stubbed fetch", async () => {
     const fetchStub = vi.fn(async () => new Response("boom", { status: 500 }));

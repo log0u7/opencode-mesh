@@ -139,6 +139,28 @@ describe("runWorker argv", () => {
     db.close();
   });
 
+  it("resolves the child to the running binary, not a PATH lookup", async () => {
+    const db = openMeshDb(":memory:");
+    const fake = fakeSpawn((proc) => proc.emitExit(0));
+    // A service-launched peer can have a PATH without `opencode`: the plugin
+    // runs inside opencode, so execPath IS the binary (0.24.5). Bare JS
+    // runtimes (this test runner) keep the PATH fallback.
+    const realExecPath = process.execPath;
+    process.execPath = "/usr/local/bin/opencode";
+    try {
+      await runWorker(db, dir, {
+        task: "t",
+        worktree_path: "/data/wt/task",
+        branch: "opencode/task",
+        spawnFn: fake.spawnFn,
+      });
+      expect(fake.argv[0]).toBe("/usr/local/bin/opencode");
+    } finally {
+      process.execPath = realExecPath;
+      db.close();
+    }
+  });
+
   it("adds model and agent flags when provided, and honours auto=false", async () => {
     const db = openMeshDb(":memory:");
     const fake = fakeSpawn((proc) => proc.emitExit(0));
