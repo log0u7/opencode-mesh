@@ -104,10 +104,36 @@ export function peerLabel(peer: { node_id: string; hostname: string; address?: s
 /** Expanded sidebar (v4, quota-style): segment lines, tone per segment. Line 0
  * is the clickable bold header carrying the session's primary identity (the
  * first hat); extra hats render as muted "also" lines. No blank lines: an
- * inapplicable line is omitted entirely (unread at 0, no peers). Pools sort by
- * the session's unread in them (desc, then alpha) and cap at six rows; peers
- * come last, one per line, same cap. */
-export function formatMeshSidebarExpanded(s: MeshSnapshot): SidebarSegment[][] {
+ * inapplicable line is omitted entirely (unread at 0, no peers). Only the
+ * pools the asking session belongs to are listed (a pool qualifies when at
+ * least one of the session's hats is one of its members), sorted by the
+ * session's unread in them (desc, then alpha) and capped at six rows; peers
+ * come last, one per line, same cap. `icons: false` swaps the ambiguous-width
+ * glyphs (☰ ⌂ ⇄) for lowercase dim labels (pools, fleet, peers): the fallback
+ * for terminals that draw those glyphs double-cell and glue the next
+ * character. Glyph segments carry TWO trailing spaces: the first absorbs the
+ * extra cell when the terminal draws the glyph wide, the second stays as the
+ * visible gap. */
+export function formatMeshSidebarExpanded(
+  s: MeshSnapshot,
+  opts?: { icons?: boolean },
+): SidebarSegment[][] {
+  const icons = opts?.icons !== false;
+  const poolMark: SidebarSegment = icons
+    ? { text: "  ☰  ", tone: "qualifier" }
+    : { text: "  pools ", tone: "value" };
+  const poolOverflowMark: SidebarSegment = icons
+    ? { text: "  ☰ …  ", tone: "qualifier" }
+    : { text: "  pools ", tone: "value" };
+  const fleetMark: SidebarSegment = icons
+    ? { text: "  ⌂  ", tone: "qualifier" }
+    : { text: "  fleet ", tone: "value" };
+  const peerMark: SidebarSegment = icons
+    ? { text: "  ⇄  ", tone: "qualifier" }
+    : { text: "  peers ", tone: "value" };
+  const peerOverflowMark: SidebarSegment = icons
+    ? { text: "  ⇄ …  ", tone: "qualifier" }
+    : { text: "  peers ", tone: "value" };
   const primary = s.hats[0];
   const header: SidebarSegment[] = [{ text: "▼ Mesh", tone: "entity" }];
   if (primary) {
@@ -128,30 +154,33 @@ export function formatMeshSidebarExpanded(s: MeshSnapshot): SidebarSegment[][] {
     lines.push([{ text: "  no mailbox — mesh_register", tone: "value" }]);
   }
   const scores = poolUnread(s);
+  // A pool lists only when one of the asking session's hats is a member of it:
+  // the panel is the session's view, not the host's roster.
+  const mine = new Set(s.hats.map((h) => h.name));
   const pools = Object.keys(s.pools)
+    .filter((pool) => (s.pools[pool] ?? []).some((member) => mine.has(member)))
     .map((pool) => ({
       pool,
       members: s.pools[pool]?.length ?? 0,
       unread: scores.get(pool) ?? 0,
     }))
-    .filter((row) => row.members > 0)
     .sort((a, b) => b.unread - a.unread || (a.pool < b.pool ? -1 : a.pool > b.pool ? 1 : 0));
   for (const row of pools.slice(0, ROWS_PER_GROUP)) {
     lines.push([
-      { text: "  ☰ ", tone: "qualifier" },
+      poolMark,
       { text: row.pool, tone: "entity" },
       { text: ` (${row.members})`, tone: "value" },
     ]);
   }
   if (pools.length > ROWS_PER_GROUP) {
     lines.push([
-      { text: "  ☰ … ", tone: "qualifier" },
+      poolOverflowMark,
       { text: `+${pools.length - ROWS_PER_GROUP} more`, tone: "value" },
     ]);
   }
   const hosts = 1 + s.peers.length;
   lines.push([
-    { text: "  ⌂ ", tone: "qualifier" },
+    fleetMark,
     { text: `${s.mailboxes.length}`, tone: "qualifier" },
     { text: " agents", tone: "value" },
     { text: " · ", tone: "value" },
@@ -162,14 +191,11 @@ export function formatMeshSidebarExpanded(s: MeshSnapshot): SidebarSegment[][] {
     { text: " hosts", tone: "value" },
   ]);
   for (const peer of s.peers.slice(0, ROWS_PER_GROUP)) {
-    lines.push([
-      { text: "  ⇄ ", tone: "qualifier" },
-      { text: peerLabel(peer), tone: "qualifier" },
-    ]);
+    lines.push([peerMark, { text: peerLabel(peer), tone: "qualifier" }]);
   }
   if (s.peers.length > ROWS_PER_GROUP) {
     lines.push([
-      { text: "  ⇄ … ", tone: "qualifier" },
+      peerOverflowMark,
       { text: `+${s.peers.length - ROWS_PER_GROUP} more`, tone: "value" },
     ]);
   }

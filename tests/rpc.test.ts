@@ -102,22 +102,12 @@ describe("formatMeshSidebarExpanded (v4)", () => {
         { text: "3 unread", tone: "qualifier" },
       ],
       [
-        { text: "  ☰ ", tone: "qualifier" },
+        { text: "  ☰  ", tone: "qualifier" },
         { text: "team:purser", tone: "entity" },
         { text: " (1)", tone: "value" },
       ],
       [
-        { text: "  ☰ ", tone: "qualifier" },
-        { text: "team:foreman", tone: "entity" },
-        { text: " (1)", tone: "value" },
-      ],
-      [
-        { text: "  ☰ ", tone: "qualifier" },
-        { text: "team:infra", tone: "entity" },
-        { text: " (2)", tone: "value" },
-      ],
-      [
-        { text: "  ⌂ ", tone: "qualifier" },
+        { text: "  ⌂  ", tone: "qualifier" },
         { text: "4", tone: "qualifier" },
         { text: " agents", tone: "value" },
         { text: " · ", tone: "value" },
@@ -128,37 +118,64 @@ describe("formatMeshSidebarExpanded (v4)", () => {
         { text: " hosts", tone: "value" },
       ],
       [
-        { text: "  ⇄ ", tone: "qualifier" },
+        { text: "  ⇄  ", tone: "qualifier" },
         { text: "desktop", tone: "qualifier" },
       ],
     ]);
   });
 
-  it("omits the unread line at 0, drops locks entirely, sorts pools alpha then", () => {
+  it("lists ONLY the pools the asking session belongs to (purser is in one pool: one ☰ row, never other sessions' pools)", () => {
+    const s = snapshot();
+    s.hats = [{ name: "purser", role: "lead", unread: 0 }];
+    s.pools = {
+      "team:purser": ["purser"],
+      "other:a": ["6admin"],
+      "other:b": ["k8s-oci"],
+      "other:c": ["theforeman"],
+      "other:d": ["6admin", "k8s-oci"],
+      "other:e": ["theforeman"],
+      "other:f": ["6admin"],
+    };
+    const lines = formatMeshSidebarExpanded(s);
+    const poolLines = lines.filter((l) => renderLine(l).startsWith("  ☰  "));
+    expect(poolLines).toHaveLength(1);
+    expect(renderLine(poolLines[0])).toBe("  ☰  team:purser (1)");
+    expect(lines.some((l) => renderLine(l).includes("other:"))).toBe(false);
+  });
+
+  it("omits the unread line at 0, drops locks entirely, sorts my pools alpha then", () => {
     const s = snapshot();
     s.hats = s.hats.map((h) => ({ ...h, unread: 0 }));
+    s.pools = {
+      "team:zz": ["purser"],
+      "team:aa": ["purser", "k8s-oci"],
+      "team:foreman": ["theforeman"],
+    };
     const lines = formatMeshSidebarExpanded(s);
-    expect(lines).toHaveLength(7); // header + also + 3 pools + counters + peer
+    expect(lines).toHaveLength(6); // header + also + 2 of my pools + counters + peer
     expect(renderLine(lines[0])).toBe("▼ Mesh — purser (lead)");
     expect(renderLine(lines[1])).toBe("  also orchestrator");
     expect(lines.some((l) => renderLine(l).includes("unread"))).toBe(false);
     expect(lines.some((l) => renderLine(l).includes("lock"))).toBe(false);
-    expect(renderLine(lines[2])).toBe("  ☰ team:foreman (1)");
-    expect(renderLine(lines[3])).toBe("  ☰ team:infra (2)");
-    expect(renderLine(lines[4])).toBe("  ☰ team:purser (1)");
-    expect(renderLine(lines[5])).toBe("  ⌂ 4 agents · 3 pools · 2 hosts");
-    expect(renderLine(lines[6])).toBe("  ⇄ desktop");
+    expect(renderLine(lines[2])).toBe("  ☰  team:aa (2)");
+    expect(renderLine(lines[3])).toBe("  ☰  team:zz (1)");
+    expect(renderLine(lines[4])).toBe("  ⌂  4 agents · 3 pools · 2 hosts");
+    expect(renderLine(lines[5])).toBe("  ⇄  desktop");
+    expect(lines.some((l) => renderLine(l).includes("team:foreman"))).toBe(false);
   });
 
-  it("sorts pools by the session's unread in them, descending, then alpha", () => {
+  it("sorts my pools by the session's unread in them, descending, then alpha", () => {
     const s = snapshot();
-    // orchestrator's unread must attribute to its pools once the mailbox exists
+    // orchestrator joins team:infra (roster membership) and its mailbox scores
+    // the pool's unread
     s.mailboxes.push({ name: "orchestrator", role: null, pools: ["team:infra"], age_s: 30 });
+    s.pools["team:infra"] = ["6admin", "k8s-oci", "orchestrator"];
     const lines = formatMeshSidebarExpanded(s);
-    // purser 2 (team:purser), orchestrator 1 (team:infra), team:foreman 0
-    expect(renderLine(lines[3])).toBe("  ☰ team:purser (1)");
-    expect(renderLine(lines[4])).toBe("  ☰ team:infra (2)");
-    expect(renderLine(lines[5])).toBe("  ☰ team:foreman (1)");
+    // my pools: team:purser (purser's unread 2), team:infra (orchestrator's 1)
+    expect(renderLine(lines[3])).toBe("  ☰  team:purser (1)");
+    expect(renderLine(lines[4])).toBe("  ☰  team:infra (3)");
+    expect(lines).toHaveLength(7); // header + also + unread + 2 pools + counters + peer
+    expect(lines.some((l) => renderLine(l).includes("team:foreman"))).toBe(false);
   });
 
   it("renders the primary identity without a role and extra hats with theirs", () => {
@@ -180,50 +197,83 @@ describe("formatMeshSidebarExpanded (v4)", () => {
     expect(renderLine(lines[1])).toBe("  no mailbox — mesh_register");
   });
 
-  it("skips empty pools and caps pools and peers at six rows plus an overflow line", () => {
+  it("skips empty pools and caps my pools and peers at six rows plus an overflow line", () => {
     const s = snapshot();
-    s.hats = [];
     s.pools = {
-      p1: ["a"],
-      p2: ["a"],
-      p3: ["a"],
-      p4: ["a"],
-      p5: ["a"],
+      p1: ["purser"],
+      p2: ["purser"],
+      p3: ["purser"],
+      p4: ["purser"],
+      p5: ["purser"],
       p6: [],
-      p7: ["a"],
-      p8: ["a"],
+      p7: ["purser"],
+      p8: ["purser"],
     };
     const lines = formatMeshSidebarExpanded(s);
-    const poolLines = lines.filter((l) => renderLine(l).startsWith("  ☰ "));
-    expect(poolLines).toHaveLength(7); // 6 rows + overflow
-    expect(renderLine(poolLines[5])).toBe("  ☰ p7 (1)");
-    expect(poolLines[6]).toEqual([
-      { text: "  ☰ … ", tone: "qualifier" },
+    const poolLines = lines.filter((l) => renderLine(l).startsWith("  ☰  "));
+    expect(poolLines).toHaveLength(6); // rows only; the overflow line has no double space
+    expect(renderLine(poolLines[5])).toBe("  ☰  p7 (1)");
+    const overflow = lines.find((l) => renderLine(l).startsWith("  ☰ …"));
+    expect(overflow).toEqual([
+      { text: "  ☰ …  ", tone: "qualifier" },
       { text: "+1 more", tone: "value" },
     ]);
-    expect(poolLines.some((l) => renderLine(l).includes("p6"))).toBe(false);
+    expect(lines.some((l) => renderLine(l).includes("p6"))).toBe(false);
     s.peers = Array.from({ length: 7 }, (_, i) => ({ node_id: `n${i}`, hostname: `host${i}` }));
     const lines2 = formatMeshSidebarExpanded(s);
-    const peerLines = lines2.filter((l) => renderLine(l).startsWith("  ⇄ "));
-    expect(peerLines).toHaveLength(7);
-    expect(renderLine(peerLines[5])).toBe("  ⇄ host5");
-    expect(renderLine(peerLines[6])).toBe("  ⇄ … +1 more");
+    const peerLines = lines2.filter((l) => renderLine(l).startsWith("  ⇄  "));
+    expect(peerLines).toHaveLength(6);
+    expect(renderLine(peerLines[5])).toBe("  ⇄  host5");
+    expect(renderLine(lines2[lines2.length - 1])).toBe("  ⇄ …  +1 more");
+  });
+
+  it("swaps the glyphs for lowercase dim labels when icons=false", () => {
+    const lines = formatMeshSidebarExpanded(snapshot(), { icons: false });
+    const rendered = lines.map(renderLine).join("\n");
+    expect(rendered).not.toContain("☰");
+    expect(rendered).not.toContain("⌂");
+    expect(rendered).not.toContain("⇄");
+    expect(renderLine(lines[3])).toBe("  pools team:purser (1)");
+    expect(renderLine(lines[4])).toBe("  fleet 4 agents · 3 pools · 2 hosts");
+    expect(renderLine(lines[5])).toBe("  peers desktop");
+    expect(lines[3]?.[0]).toEqual({ text: "  pools ", tone: "value" });
+    expect(lines[4]?.[0]).toEqual({ text: "  fleet ", tone: "value" });
+    expect(lines[5]?.[0]).toEqual({ text: "  peers ", tone: "value" });
+  });
+
+  it("icons=false overflow lines drop the ellipsis glyph too", () => {
+    const s = snapshot();
+    s.pools = {
+      p1: ["purser"],
+      p2: ["purser"],
+      p3: ["purser"],
+      p4: ["purser"],
+      p5: ["purser"],
+      p6: ["purser"],
+      p7: ["purser"],
+      p8: ["purser"],
+    };
+    const lines = formatMeshSidebarExpanded(s, { icons: false });
+    const poolLines = lines.filter((l) => renderLine(l).startsWith("  pools "));
+    expect(poolLines).toHaveLength(7); // 6 rows + overflow
+    expect(renderLine(poolLines[6])).toBe("  pools +2 more");
+    expect(lines.map(renderLine).join("\n")).not.toContain("…");
   });
 
   it("labels a manual peer by short node id", () => {
     const s = snapshot();
     s.peers = [{ node_id: "12345678abcdef90", hostname: "manual" }];
     const lines = formatMeshSidebarExpanded(s);
-    expect(renderLine(lines[lines.length - 1])).toBe("  ⇄ 12345678");
+    expect(renderLine(lines[lines.length - 1])).toBe("  ⇄  12345678");
   });
 
   it("omits the peer rows entirely when no peer is paired", () => {
     const s = snapshot();
     s.peers = [];
     const lines = formatMeshSidebarExpanded(s);
-    expect(lines).toHaveLength(7); // header + also + unread + 3 pools + counters
+    expect(lines).toHaveLength(5); // header + also + unread + my pool + counters
     expect(lines.some((l) => renderLine(l).includes("⇄"))).toBe(false);
-    expect(renderLine(lines[lines.length - 1])).toBe("  ⌂ 4 agents · 3 pools · 1 hosts");
+    expect(renderLine(lines[lines.length - 1])).toBe("  ⌂  4 agents · 3 pools · 1 hosts");
   });
 });
 

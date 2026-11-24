@@ -40,6 +40,7 @@ On OpenCode 2.x hosts the key is `plugins` and each entry is an object with
 | `wakePools` | `boolean` | `false` | Token economy: only DIRECT mail wakes the session. Pool broadcasts arrive through the fanout and are read on natural turns or via `mesh_journal`; since 0.17.0 the sender can flag a single broadcast `wake: true` to wake its members (Slack model); `true` restores wake-on-any-unread (0.15 behavior). |
 | `providers` | `object` | all enabled | Per-provider toggles for the address providers: `{ "tailscale": true, "netbird": true, "zerotier": true }`. A disabled provider is never invoked; an absent CLI contributes an empty list anyway. |
 | `addresses` | `string[]` | `[]` | Static overlay IPs of tunnels without a CLI (WireGuard, IPsec, any SSL VPN this instance manages), advertised in `mesh_status` `tailnet_addresses` alongside provider-discovered IPs. |
+| `icons` | `boolean` | `true` | Render the sidebar glyphs (☰ ⌂ ⇄). `false` swaps them for lowercase dim text labels (`pools`, `fleet`, `peers`): the fallback for terminals that draw ambiguous-width glyphs double-cell and glue the next character. |
 
 Multi-host pools (0.10.0) add no options: `"bind": "lan"` on every node,
 `mesh_pair()` on one host and `mesh_pair(code="...", address="host:port")` on
