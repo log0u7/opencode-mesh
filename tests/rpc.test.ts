@@ -94,12 +94,15 @@ describe("formatMeshSidebarExpanded (v4)", () => {
         { text: "▼ Mesh", tone: "entity" },
         { text: ": ", tone: "value" },
         { text: "purser", tone: "entity" },
-        { text: " (lead)", tone: "value" },
       ],
       [{ text: "  also orchestrator", tone: "value" }],
       [
         { text: "  ● ", tone: "alert" },
         { text: "3 unread", tone: "qualifier" },
+      ],
+      [
+        { text: "  ≔  ", tone: "qualifier" },
+        { text: "lead", tone: "value" },
       ],
       [
         { text: "  ≡  ", tone: "qualifier" },
@@ -152,15 +155,16 @@ describe("formatMeshSidebarExpanded (v4)", () => {
       "team:foreman": ["theforeman"],
     };
     const lines = formatMeshSidebarExpanded(s);
-    expect(lines).toHaveLength(6); // header + also + 2 of my pools + counters + peer
-    expect(renderLine(lines[0])).toBe("▼ Mesh: purser (lead)");
+    expect(lines).toHaveLength(7); // header + also + ≔ + 2 of my pools + counters + peer
+    expect(renderLine(lines[0])).toBe("▼ Mesh: purser");
     expect(renderLine(lines[1])).toBe("  also orchestrator");
+    expect(renderLine(lines[2])).toBe("  ≔  lead");
     expect(lines.some((l) => renderLine(l).includes("unread"))).toBe(false);
     expect(lines.some((l) => renderLine(l).includes("lock"))).toBe(false);
-    expect(renderLine(lines[2])).toBe("  ≡  team:aa (2)");
-    expect(renderLine(lines[3])).toBe("  ≡  team:zz (1)");
-    expect(renderLine(lines[4])).toBe("  ⌂  4 agents · 3 pools · 2 hosts");
-    expect(renderLine(lines[5])).toBe("  ⇄  desktop");
+    expect(renderLine(lines[3])).toBe("  ≡  team:aa (2)");
+    expect(renderLine(lines[4])).toBe("  ≡  team:zz (1)");
+    expect(renderLine(lines[5])).toBe("  ⌂  4 agents · 3 pools · 2 hosts");
+    expect(renderLine(lines[6])).toBe("  ⇄  desktop");
     expect(lines.some((l) => renderLine(l).includes("team:foreman"))).toBe(false);
   });
 
@@ -172,13 +176,14 @@ describe("formatMeshSidebarExpanded (v4)", () => {
     s.pools["team:infra"] = ["6admin", "k8s-oci", "orchestrator"];
     const lines = formatMeshSidebarExpanded(s);
     // my pools: team:purser (purser's unread 2), team:infra (orchestrator's 1)
-    expect(renderLine(lines[3])).toBe("  ≡  team:purser (1)");
-    expect(renderLine(lines[4])).toBe("  ≡  team:infra (3)");
-    expect(lines).toHaveLength(7); // header + also + unread + 2 pools + counters + peer
+    expect(renderLine(lines[3])).toBe("  ≔  lead");
+    expect(renderLine(lines[4])).toBe("  ≡  team:purser (1)");
+    expect(renderLine(lines[5])).toBe("  ≡  team:infra (3)");
+    expect(lines).toHaveLength(8); // header + also + unread + ≔ + 2 pools + counters + peer
     expect(lines.some((l) => renderLine(l).includes("team:foreman"))).toBe(false);
   });
 
-  it("renders the primary identity without a role and extra hats with theirs", () => {
+  it("moves every hat role into ≔ lines: primary out of the header, extras out of the also line", () => {
     const s = snapshot();
     s.hats = [
       { name: "orchestrator", role: null, unread: 0 },
@@ -186,7 +191,43 @@ describe("formatMeshSidebarExpanded (v4)", () => {
     ];
     const lines = formatMeshSidebarExpanded(s);
     expect(renderLine(lines[0])).toBe("▼ Mesh: orchestrator");
-    expect(renderLine(lines[1])).toBe("  also blogger (editor)");
+    expect(renderLine(lines[1])).toBe("  also blogger");
+    expect(renderLine(lines[2])).toBe("  ≔  editor");
+  });
+
+  it("renders one ≔ line per hat that declares a role, after unread and in enrollment order", () => {
+    const s = snapshot();
+    s.hats = [
+      { name: "orchestrator", role: "housekeeper (upstream opencode)", unread: 2 },
+      { name: "blogger", role: "editor", unread: 0 },
+      { name: "purser", role: null, unread: 0 },
+    ];
+    const rendered = formatMeshSidebarExpanded(s).map(renderLine);
+    const unreadAt = rendered.findIndex((l) => l.includes("unread"));
+    const roleAt = rendered.findIndex((l) => l.startsWith("  ≔  "));
+    expect(unreadAt).toBeGreaterThan(-1);
+    expect(unreadAt).toBeLessThan(roleAt); // the role line comes after the unread line
+    expect(rendered.filter((l) => l.startsWith("  ≔  "))).toEqual([
+      "  ≔  housekeeper (upstream…",
+      "  ≔  editor",
+    ]);
+  });
+
+  it("truncates a long role at the last word boundary that fits the panel width, never mid-word", () => {
+    const s = snapshot();
+    s.hats = [{ name: "opencode", role: "housekeeper (upstream opencode)", unread: 0 }];
+    const rendered = formatMeshSidebarExpanded(s).map(renderLine);
+    const roleLine = rendered.find((l) => l.startsWith("  ≔  "));
+    expect(roleLine).toBe("  ≔  housekeeper (upstream…"); // cut between two words + …
+    expect(roleLine?.length).toBeLessThanOrEqual(32); // default panel width
+  });
+
+  it("leaves a short role whole and honors the width option", () => {
+    const s = snapshot();
+    s.hats = [{ name: "purser", role: "lead (produit purser)", unread: 0 }];
+    expect(formatMeshSidebarExpanded(s).map(renderLine)).toContain("  ≔  lead (produit purser)");
+    // width 14 → 9 chars of role after the ≔ mark: cuts at the last space
+    expect(formatMeshSidebarExpanded(s, { width: 14 }).map(renderLine)).toContain("  ≔  lead…");
   });
 
   it("shows the register hint and no identity when the session has no hat", () => {
@@ -233,12 +274,13 @@ describe("formatMeshSidebarExpanded (v4)", () => {
     expect(rendered).not.toContain("≡");
     expect(rendered).not.toContain("⌂");
     expect(rendered).not.toContain("⇄");
-    expect(renderLine(lines[3])).toBe("  pools team:purser (1)");
-    expect(renderLine(lines[4])).toBe("  fleet 4 agents · 3 pools · 2 hosts");
-    expect(renderLine(lines[5])).toBe("  peers desktop");
-    expect(lines[3]?.[0]).toEqual({ text: "  pools ", tone: "value" });
-    expect(lines[4]?.[0]).toEqual({ text: "  fleet ", tone: "value" });
-    expect(lines[5]?.[0]).toEqual({ text: "  peers ", tone: "value" });
+    expect(renderLine(lines[3])).toBe("  ≔  lead");
+    expect(renderLine(lines[4])).toBe("  pools team:purser (1)");
+    expect(renderLine(lines[5])).toBe("  fleet 4 agents · 3 pools · 2 hosts");
+    expect(renderLine(lines[6])).toBe("  peers desktop");
+    expect(lines[4]?.[0]).toEqual({ text: "  pools ", tone: "value" });
+    expect(lines[5]?.[0]).toEqual({ text: "  fleet ", tone: "value" });
+    expect(lines[6]?.[0]).toEqual({ text: "  peers ", tone: "value" });
   });
 
   it("icons=false overflow lines drop the ellipsis glyph too", () => {
@@ -271,7 +313,7 @@ describe("formatMeshSidebarExpanded (v4)", () => {
     const s = snapshot();
     s.peers = [];
     const lines = formatMeshSidebarExpanded(s);
-    expect(lines).toHaveLength(5); // header + also + unread + my pool + counters
+    expect(lines).toHaveLength(6); // header + also + unread + ≔ + my pool + counters
     expect(lines.some((l) => renderLine(l).includes("⇄"))).toBe(false);
     expect(renderLine(lines[lines.length - 1])).toBe("  ⌂  4 agents · 3 pools · 1 hosts");
   });

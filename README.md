@@ -302,9 +302,11 @@ sequenceDiagram
 The sidebar panel (OpenCode 2.x) shows this tab's view of the fleet and refreshes live; click its header to collapse it. Expanded:
 
 ```
-▼ Mesh: quartermaster (lead)
-  also purser (lead)
+▼ Mesh: quartermaster
+  also purser
   ● 3 unread
+  ≔ lead
+  ≔ lead
   ≡  team:purser (2)
   ≡  team:infra (5)
   ⌂  7 agents · 6 pools · 3 hosts
@@ -314,7 +316,8 @@ The sidebar panel (OpenCode 2.x) shows this tab's view of the fleet and refreshe
 
 | Line | Meaning |
 |---|---|
-| `▼ Mesh: <name> (<role>)` | The identity of THIS tab: the first hat; the other hats follow as `also` lines. |
+| `▼ Mesh: <name>` | The identity of THIS tab: the first hat (the name only — no role here); the other hats follow as `also` lines. |
+| `≔ <role>` | One line per hat that declares a role, after the unread line and before the pools. Truncated at the last word boundary that fits the panel width (default 32), never mid-word; the full role lives in `mesh_status`. |
 | `● N unread` | Unread messages in your mailboxes, the ones the wake loop reacts to. Omitted at 0. |
 | `≡ <pool> (N)` | A pool one of your hats belongs to; `N` = its member count. Sorted by your unread in them (descending, then alphabetical), capped at six rows before `≡ … +N more`. |
 | `⌂ N agents · N pools · N hosts` | The fleet as seen by this host. |
@@ -329,8 +332,9 @@ Every state and marker the panel can render, verified against the sidebar format
 
 | Marker | Meaning |
 |---|---|
-| `▼ Mesh: <name> (<role>)` | Expanded header, the clickable row: this tab's first hat. The `(<role>)` part drops when the hat declares no role; a session without a mailbox renders a bare `▼ Mesh`. |
-| `also <name> (<role>)` | Each extra hat of this tab, one line per mailbox in enrollment order; the role part drops when the hat declares none. |
+| `▼ Mesh: <name>` | Expanded header, the clickable row: this tab's first hat, the name only. A session without a mailbox renders a bare `▼ Mesh`. |
+| `also <name>` | Each extra hat of this tab, one line per mailbox in enrollment order. No role here: every hat's role renders on its own `≔` line. |
+| `≔ <role>` | One line per hat that declares a role (multi-hat sessions get several, in enrollment order), placed after the unread line and before the pools. Truncated at the last word boundary that fits the panel width (default 32), never mid-word; the full role lives in `mesh_status`. |
 | `● N unread` | Unread mail across your mailboxes, the counter the wake loop reacts to. Shown only when `N > 0`. |
 | `no mailbox: mesh_register` | Expanded only: this session has no mailbox yet, enroll with `mesh_register`. |
 | `≡ <pool> (N)` | A pool one of your hats belongs to; `N` = its member count. Sorted by your unread in them (descending, then alphabetical), capped at six rows before `≡ … +N more`. |
@@ -338,7 +342,7 @@ Every state and marker the panel can render, verified against the sidebar format
 | `⇄ <hostname>` | A paired host, one per line, capped at six rows before `⇄ … +N more`. Manual pairings (placeholder hostname `manual`) show the short node id instead. |
 | `Mesh ● N unread` | Collapsed, mail pending: the attention state alone; it replaces the inventory, never stacked with it. |
 | `Mesh · N agents · N pools · N hosts` | Collapsed, quiet (nothing unread): the same fleet inventory as the expanded `⌂` line. |
-| `pools` / `fleet` / `peers` | With the `icons: false` option: the `≡`, `⌂` and `⇄` glyphs (and their `…` overflow marks) swap for these lowercase labels; `▼`, `●` and `also` stay. |
+| `pools` / `fleet` / `peers` | With the `icons: false` option: the `≡`, `⌂` and `⇄` glyphs (and their `…` overflow marks) swap for these lowercase labels; `▼`, `●`, `≔` and `also` stay. |
 
 The collapsed header carries either the attention state or the inventory, never both; the expanded panel lays out everything that applies.
 

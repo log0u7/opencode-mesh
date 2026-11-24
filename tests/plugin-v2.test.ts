@@ -462,6 +462,9 @@ describe("opencode-mesh v2 setup", () => {
     expect(MESH_GUIDANCE).toContain("team-wide announcements go to the POOL as one post");
     expect(MESH_GUIDANCE).toContain("never as individual DMs — a DM wakes its recipient");
     expect(MESH_GUIDANCE).toContain("DM = only what must be seen NOW by ONE mailbox");
+    expect(MESH_GUIDANCE).toContain("role: keep it 1-3 words");
+    expect(MESH_GUIDANCE).toContain("the panel truncates at word boundary");
+    expect(MESH_GUIDANCE).toContain("the full role lives in mesh_status");
 
     await cleanup?.();
   });

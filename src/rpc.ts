@@ -101,9 +101,23 @@ export function peerLabel(peer: { node_id: string; hostname: string; address?: s
   return peer.address !== undefined ? `${id}@${peer.address}` : id;
 }
 
+/** Role lines truncate at the last word boundary that fits the budget (panel
+ * width minus the ≔ mark): never mid-word — the 0.23.4 complaint. A single
+ * word longer than the whole budget has no boundary to cut at: hard cut. */
+function truncateAtWord(text: string, budget: number): string {
+  if (text.length <= budget) return text;
+  const cut = text.slice(0, budget);
+  const space = cut.lastIndexOf(" ");
+  return (space > 0 ? cut.slice(0, space) : cut) + "…";
+}
+
 /** Expanded sidebar (v4, quota-style): segment lines, tone per segment. Line 0
  * is the clickable bold header carrying the session's primary identity (the
- * first hat); extra hats render as muted "also" lines. No blank lines: an
+ * first hat, name only); extra hats render as muted "also" lines. Each hat
+ * that declares a role gets its own `≔ <role>` line (0.23.4), placed after
+ * the unread line and before the pools, truncated at the last word boundary
+ * that fits the panel width (`width`, default 32), never mid-word; the
+ * full role lives in mesh_status. No blank lines: an
  * inapplicable line is omitted entirely (unread at 0, no peers). Only the
  * pools the asking session belongs to are listed (a pool qualifies when at
  * least one of the session's hats is one of its members), sorted by the
@@ -116,9 +130,12 @@ export function peerLabel(peer: { node_id: string; hostname: string; address?: s
  * visible gap. */
 export function formatMeshSidebarExpanded(
   s: MeshSnapshot,
-  opts?: { icons?: boolean },
+  opts?: { icons?: boolean; width?: number },
 ): SidebarSegment[][] {
   const icons = opts?.icons !== false;
+  // Panel width for the role-line truncation: the sidebar column the TUI draws
+  // in; the formatter can't measure it, so the caller passes it (default 32).
+  const width = opts?.width ?? 32;
   const poolMark: SidebarSegment = icons
     ? { text: "  ≡  ", tone: "qualifier" }
     : { text: "  pools ", tone: "value" };
@@ -134,15 +151,17 @@ export function formatMeshSidebarExpanded(
   const peerOverflowMark: SidebarSegment = icons
     ? { text: "  ⇄ …  ", tone: "qualifier" }
     : { text: "  peers ", tone: "value" };
+  // The ≔ role mark rides the proven ≡ block (narrow math glyph, two trailing
+  // spaces, the first absorbing a wide-cell draw); no icons:false label swap.
+  const roleMark: SidebarSegment = { text: "  ≔  ", tone: "qualifier" };
   const primary = s.hats[0];
   const header: SidebarSegment[] = [{ text: "▼ Mesh", tone: "entity" }];
   if (primary) {
     header.push({ text: ": ", tone: "value" }, { text: primary.name, tone: "entity" });
-    if (primary.role) header.push({ text: ` (${primary.role})`, tone: "value" });
   }
   const lines: SidebarSegment[][] = [header];
   for (const hat of s.hats.slice(1)) {
-    lines.push([{ text: `  also ${hat.name}${hat.role ? ` (${hat.role})` : ""}`, tone: "value" }]);
+    lines.push([{ text: `  also ${hat.name}`, tone: "value" }]);
   }
   const unread = totalUnread(s);
   if (unread > 0) {
@@ -152,6 +171,16 @@ export function formatMeshSidebarExpanded(
     ]);
   } else if (s.hats.length === 0) {
     lines.push([{ text: "  no mailbox: mesh_register", tone: "value" }]);
+  }
+  // The role leaves the header (0.23.4): one ≔ line per hat that declares a
+  // role, after the unread line and before the pools, truncated at the word
+  // boundary that fits the panel width, never mid-word.
+  for (const hat of s.hats) {
+    if (!hat.role) continue;
+    lines.push([
+      roleMark,
+      { text: truncateAtWord(hat.role, width - roleMark.text.length), tone: "value" },
+    ]);
   }
   const scores = poolUnread(s);
   // A pool lists only when one of the asking session's hats is a member of it:
