@@ -249,7 +249,7 @@ Workers run `opencode run --dir <worktree> --format json` headless with `--auto`
 
 ### TUI
 
-The plugin ships a TUI part (auto-loaded by OpenCode): a toast on load, a `/mesh` slash command, and a sidebar slot. Slash commands and the mesh tools remain the primary interface.
+The plugin ships a TUI part (auto-loaded by OpenCode): a toast on load, a `/mesh` slash command, and a sidebar slot. Slash commands and the mesh tools remain the primary interface. The sidebar shows this tab's view of the fleet: legend at [TUI panel](#tui-panel).
 
 ### Security model
 
@@ -288,6 +288,32 @@ sequenceDiagram
     A-->>B: counter_offer (B binds it automatically)
     Note over A,B: Pairing complete: per-peer bearer tokens on both sides
 ```
+
+## TUI panel
+
+The sidebar panel (OpenCode 2.x) shows this tab's view of the fleet and refreshes live; click its header to collapse it. Expanded:
+
+```
+▼ Mesh — quartermaster (lead)
+  also purser (lead)
+  ● 3 unread
+  ☰  team:purser (2)
+  ☰  team:infra (5)
+  ⌂  7 agents · 6 pools · 3 hosts
+  ⇄  ricinus-communis
+  ⇄  gpu3080
+```
+
+| Line | Meaning |
+|---|---|
+| `▼ Mesh — <name> (<role>)` | The identity of THIS tab: the first hat; the other hats follow as `also` lines. |
+| `● N unread` | Unread messages in your mailboxes, the ones the wake loop reacts to. Omitted at 0. |
+| `☰ <pool> (N)` | A pool one of your hats belongs to; `N` = its member count. Sorted by your unread in them (descending, then alphabetical), capped at six rows before `☰ … +N more`. |
+| `⌂ N agents · N pools · N hosts` | The fleet as seen by this host. |
+| `⇄ <hostname>` | A paired host, one per line (TLS-pinned); capped at six rows before `⇄ … +N more`. |
+| `▶ Mesh ● N unread · N agents · N pools · N hosts` | Collapsed: the same counters on one line (the unread segment drops at 0). |
+
+The glyphs are single-width Unicode characters (DejaVu renders them correctly); the `icons: false` plugin option swaps them for the text labels `pools`, `fleet` and `peers`, for terminals that draw them double-cell.
 
 ## Development
 
