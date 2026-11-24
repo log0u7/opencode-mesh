@@ -5,6 +5,27 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.22.0] - 2026-11-24
+
+### Changed
+
+- **TUI sidebar v4 — quota-style 3-tier emphasis** (design frozen with the PO,
+  same grammar as memory 0.20.4): every line is a list of tone segments the
+  renderer maps to the theme (entity = text + bold, qualifier = text, value =
+  textMuted, alert = the theme's attention color), theme-aware,
+  `wrapMode="none"` everywhere (hard truncation), icon set ● ☰ ⌂ ⇄, zero blank
+  lines (an inapplicable line is omitted). Expanded: the hats line is replaced
+  by identity in the header — `▼ Mesh — name (role)` from the session's first
+  hat, extra hats as muted `also name (role)` lines; one unread line (omitted
+  at 0, alert-colored glyph); pools one per line as `☰ pool (members)`, sorted
+  by the session's unread in them (descending, then alpha), capped at six rows
+  plus `☰ … +N more`; one counters line `⌂ agents · pools · hosts`; peers last,
+  one per line `⇄ host`, same cap. Locks and per-member presence left the
+  panel (PO decision). Collapsed keeps one line with the four counters
+  (`Mesh ● N unread · N agents · N pools · N hosts`) in the same tone grammar.
+  The formatter returns `SidebarSegment[]`, pinned by tests; the host renderer
+  applies the tones.
+
 ## [0.21.0] - 2026-11-24
 
 ### Added

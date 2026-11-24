@@ -3,8 +3,8 @@ import { Rpc } from "@opencode/plugin/rpc";
 import type { HostCapa } from "./lib/capa.js";
 
 // The TUI sidebar reads one compact snapshot per tick over RPC. The pure helpers
-// (snapshotFromMesh, formatMeshSidebar) are testable without a renderer; the
-// definition itself carries the wire schema.
+// (snapshotFromMesh, the v4 sidebar formatters) are testable without a
+// renderer; the definition itself carries the wire schema.
 
 export type MailboxInfo = {
   name: string;
@@ -59,37 +59,37 @@ export function snapshotFromMesh(data: SnapshotInput): MeshSnapshot {
   };
 }
 
-// Presence thresholds: fresh under 2 minutes, warm under 15.
-export const PRESENCE_FRESH_S = 120;
-export const PRESENCE_WARM_S = 900;
+// Tone tiers of the quota-style sidebar grammar, mapped to the theme in
+// tui.tsx: entity = text + bold, qualifier = text, value = textMuted, alert =
+// the theme's attention color (warning/error, text when it exposes none).
+export type SidebarTone = "entity" | "qualifier" | "value" | "alert";
 
-export function presenceMark(age_s: number): string {
-  if (age_s <= PRESENCE_FRESH_S) return "●";
-  if (age_s <= PRESENCE_WARM_S) return "○";
-  return "";
+export type SidebarSegment = { text: string; tone: SidebarTone };
+
+/** Pool and peer groups cap at 6 rows before a "+N more" overflow line. */
+const ROWS_PER_GROUP = 6;
+
+/** Total unread across the session's hats. */
+function totalUnread(s: MeshSnapshot): number {
+  return s.hats.reduce((sum, h) => sum + h.unread, 0);
 }
 
-export function formatAge(age_s: number): string {
-  if (age_s < 60) return `${age_s}s`;
-  return `${Math.floor(age_s / 60)}m`;
-}
-
-function formatMember(m: MailboxInfo): string {
-  const mark = presenceMark(m.age_s);
-  const age = formatAge(m.age_s);
-  return mark ? `${mark} ${m.name} ${age}` : `${m.name} ${age}`;
-}
-
-function formatPoolLine(pool: string, members: string[], byName: Map<string, MailboxInfo>): string {
-  const parts: string[] = [];
-  for (const name of members.slice(0, 4)) {
-    const box = byName.get(name);
-    parts.push(box ? formatMember(box) : name);
+/** Per-pool unread: the snapshot only carries unread for the asking session's
+ * own hats, so a pool scores the unread of the hats member of it (matched
+ * through the mailbox list). Frozen design: pools sort by unread descending,
+ * then alphabetically. */
+function poolUnread(s: MeshSnapshot): Map<string, number> {
+  const byName = new Map(s.mailboxes.map((m) => [m.name, m]));
+  const scores = new Map<string, number>();
+  for (const hat of s.hats) {
+    if (hat.unread <= 0) continue;
+    const box = byName.get(hat.name);
+    if (!box) continue;
+    for (const pool of box.pools) {
+      scores.set(pool, (scores.get(pool) ?? 0) + hat.unread);
+    }
   }
-  if (members.length > 4) {
-    parts.push(`+${members.length - 4}`);
-  }
-  return `${pool}: ${parts.join(" · ")}`;
+  return scores;
 }
 
 /** Manual pairings all carry the placeholder hostname "manual": label them by
@@ -101,52 +101,103 @@ export function peerLabel(peer: { node_id: string; hostname: string; address?: s
   return peer.address !== undefined ? `${id}@${peer.address}` : id;
 }
 
-/** Sidebar lines: the session's hats (unread first), one line per pool, peers, locks. */
-export function formatMeshLines(s: MeshSnapshot): string[] {
-  const lines: string[] = [];
-  if (s.hats.length > 0) {
-    const totalUnread = s.hats.reduce((sum, h) => sum + h.unread, 0);
-    const rendered = s.hats.map((h) => {
-      const role = h.role ? ` (${h.role})` : "";
-      const unread = h.unread > 0 ? ` ● ${h.unread}` : "";
-      return `${h.name}${role}${unread}`;
-    });
-    const prefix = totalUnread > 0 ? ` ● ${totalUnread} unread —` : "";
-    lines.push(`hats:${prefix} ${rendered.join(" · ")}`);
-  } else {
-    lines.push("no mailbox — mesh_register");
+/** Expanded sidebar (v4, quota-style): segment lines, tone per segment. Line 0
+ * is the clickable bold header carrying the session's primary identity (the
+ * first hat); extra hats render as muted "also" lines. No blank lines: an
+ * inapplicable line is omitted entirely (unread at 0, no peers). Pools sort by
+ * the session's unread in them (desc, then alpha) and cap at six rows; peers
+ * come last, one per line, same cap. */
+export function formatMeshSidebarExpanded(s: MeshSnapshot): SidebarSegment[][] {
+  const primary = s.hats[0];
+  const header: SidebarSegment[] = [{ text: "▼ Mesh", tone: "entity" }];
+  if (primary) {
+    header.push({ text: " — ", tone: "value" }, { text: primary.name, tone: "entity" });
+    if (primary.role) header.push({ text: ` (${primary.role})`, tone: "value" });
   }
-  const byName = new Map(s.mailboxes.map((m) => [m.name, m]));
-  for (const [pool, members] of Object.entries(s.pools)) {
-    if (members.length === 0) continue;
-    lines.push(formatPoolLine(pool, members, byName));
+  const lines: SidebarSegment[][] = [header];
+  for (const hat of s.hats.slice(1)) {
+    lines.push([{ text: `  also ${hat.name}${hat.role ? ` (${hat.role})` : ""}`, tone: "value" }]);
   }
-  if (s.peers.length === 0) {
-    lines.push("no paired peers");
-  } else {
-    for (const peer of s.peers) {
-      lines.push(`↔ ${peerLabel(peer)}`);
-    }
+  const unread = totalUnread(s);
+  if (unread > 0) {
+    lines.push([
+      { text: "  ● ", tone: "alert" },
+      { text: `${unread} unread`, tone: "qualifier" },
+    ]);
+  } else if (s.hats.length === 0) {
+    lines.push([{ text: "  no mailbox — mesh_register", tone: "value" }]);
   }
-  if (s.active_locks > 0) {
-    lines.push(`${s.active_locks} active lock(s)`);
+  const scores = poolUnread(s);
+  const pools = Object.keys(s.pools)
+    .map((pool) => ({
+      pool,
+      members: s.pools[pool]?.length ?? 0,
+      unread: scores.get(pool) ?? 0,
+    }))
+    .filter((row) => row.members > 0)
+    .sort((a, b) => b.unread - a.unread || (a.pool < b.pool ? -1 : a.pool > b.pool ? 1 : 0));
+  for (const row of pools.slice(0, ROWS_PER_GROUP)) {
+    lines.push([
+      { text: "  ☰ ", tone: "qualifier" },
+      { text: row.pool, tone: "entity" },
+      { text: ` (${row.members})`, tone: "value" },
+    ]);
+  }
+  if (pools.length > ROWS_PER_GROUP) {
+    lines.push([
+      { text: "  ☰ … ", tone: "qualifier" },
+      { text: `+${pools.length - ROWS_PER_GROUP} more`, tone: "value" },
+    ]);
+  }
+  const hosts = 1 + s.peers.length;
+  lines.push([
+    { text: "  ⌂ ", tone: "qualifier" },
+    { text: `${s.mailboxes.length}`, tone: "qualifier" },
+    { text: " agents", tone: "value" },
+    { text: " · ", tone: "value" },
+    { text: `${Object.keys(s.pools).length}`, tone: "qualifier" },
+    { text: " pools", tone: "value" },
+    { text: " · ", tone: "value" },
+    { text: `${hosts}`, tone: "qualifier" },
+    { text: " hosts", tone: "value" },
+  ]);
+  for (const peer of s.peers.slice(0, ROWS_PER_GROUP)) {
+    lines.push([
+      { text: "  ⇄ ", tone: "qualifier" },
+      { text: peerLabel(peer), tone: "qualifier" },
+    ]);
+  }
+  if (s.peers.length > ROWS_PER_GROUP) {
+    lines.push([
+      { text: "  ⇄ … ", tone: "qualifier" },
+      { text: `+${s.peers.length - ROWS_PER_GROUP} more`, tone: "value" },
+    ]);
   }
   return lines;
 }
 
-/** Collapsed: two lines. Line 1 is the toggle line — the TUI renders the
- * ▶/▼ prefix itself, so this returns `Mesh` plus the unread marker only.
- * Line 2 carries the counts (agents, pools, hosts). */
-export function formatMeshSidebar(s: MeshSnapshot, collapsed: boolean): string[] {
-  if (!collapsed) {
-    return formatMeshLines(s);
+/** Collapsed: ONE line, the four counters, same tone grammar. The unread
+ * segment is omitted at 0 (like the expanded line). */
+export function formatMeshSidebarCollapsed(s: MeshSnapshot): SidebarSegment[] {
+  const line: SidebarSegment[] = [{ text: "▶ Mesh", tone: "entity" }];
+  const unread = totalUnread(s);
+  if (unread > 0) {
+    line.push({ text: " ● ", tone: "alert" }, { text: `${unread} unread`, tone: "qualifier" });
   }
-  const unread = s.hats.reduce((sum, h) => sum + h.unread, 0);
   const hosts = 1 + s.peers.length;
-  return [
-    unread > 0 ? `Mesh ● ${unread} unread` : "Mesh",
-    `${s.mailboxes.length} agents · ${Object.keys(s.pools).length} pools · ${hosts} hôte${hosts > 1 ? "s" : ""}`,
+  const counts: Array<[number, string]> = [
+    [s.mailboxes.length, "agents"],
+    [Object.keys(s.pools).length, "pools"],
+    [hosts, "hosts"],
   ];
+  for (const [count, label] of counts) {
+    line.push(
+      { text: " · ", tone: "value" },
+      { text: `${count}`, tone: "qualifier" },
+      { text: ` ${label}`, tone: "value" },
+    );
+  }
+  return line;
 }
 
 export const MeshRpc = Rpc.define({
