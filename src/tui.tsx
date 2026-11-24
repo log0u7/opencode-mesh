@@ -94,6 +94,10 @@ export default Plugin.define({
   id: "@log0u7/opencode-mesh.tui",
   setup(context: Context) {
     const theme = context.theme;
+    // Sidebar glyphs default on; `icons: false` swaps them for lowercase text
+    // labels, the fallback for terminals that draw ambiguous-width glyphs
+    // double-cell and glue the next character (see rpc.ts).
+    const icons = context.options?.icons !== false;
     context.ui.toast.show({ message: "opencode-mesh loaded", variant: "info", duration: 2000 });
 
     // Durable collapse state when the host allows it (scoped plugin ids hit a
@@ -183,7 +187,7 @@ export default Plugin.define({
             </box>
           );
         }
-        return sidebarBody(theme, formatMeshSidebarExpanded(snap), toggleCollapsed);
+        return sidebarBody(theme, formatMeshSidebarExpanded(snap, { icons }), toggleCollapsed);
       },
     });
 

@@ -42,6 +42,11 @@ export type PluginOptions = {
   /** Static addresses of tunnels without a CLI (WireGuard/IPsec/any VPN this
    * instance manages), advertised alongside the provider-discovered IPs. */
   addresses?: string[];
+  /** Render the sidebar glyphs (☰ ⌂ ⇄); default true. false swaps them for
+   * lowercase dim text labels (pools, fleet, peers), the fallback for
+   * terminals that draw ambiguous-width glyphs double-cell and glue the next
+   * character. */
+  icons?: boolean;
   worktreeClient?: WorktreeClient;
   spawnFn?: SpawnFn;
 };
@@ -183,6 +188,12 @@ export function parseOptions(raw: PluginOptions | undefined): PluginOptions {
       throw new Error("opencode-mesh: options.addresses must be an array of non-empty strings");
     }
     options.addresses = raw.addresses;
+  }
+  if (raw.icons !== undefined) {
+    if (typeof raw.icons !== "boolean") {
+      throw new Error("opencode-mesh: options.icons must be a boolean");
+    }
+    options.icons = raw.icons;
   }
   // Opaque collaborators are passed through untouched: the plugin cannot
   // validate a client or spawn function beyond its nominal type.

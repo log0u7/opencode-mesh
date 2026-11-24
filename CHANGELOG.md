@@ -5,6 +5,27 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.22.1] - 2026-11-24
+
+### Fixed
+
+- **Sidebar pools filtered to the asking session's pools**: the expanded panel
+  listed every pool on the host (seen live: 7 pools for a session member of a
+  single one). The `☰` section now lists only the pools containing at least
+  one of the asking session's hats (the `pools.memberNames` × session hats
+  intersection); sorting (unread desc, then alpha), the cap of six rows and
+  the `☰ … +N more` overflow are unchanged, and other sessions' pools never
+  appear.
+- **Glyph spacing doubled**: the panel glyphs (☰ ⌂ ⇄, and the `…` of the
+  overflow lines) are ambiguous-width: a terminal that draws them double-cell
+  glued the next character (seen live as a parasite after `☰`). Each glyph
+  segment now carries two trailing spaces: the first absorbs the extra cell
+  when the glyph is drawn wide, the second stays as the visible gap.
+- **`icons` option** (`boolean`, default `true`): `false` swaps the glyphs for
+  lowercase dim text labels (`pools`, `fleet`, `peers`) while names and
+  counters stay: the fallback for terminals that handle ambiguous-width
+  glyphs badly.
+
 ## [0.22.0] - 2026-11-24
 
 ### Changed
