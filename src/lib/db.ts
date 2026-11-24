@@ -10,7 +10,7 @@ export type MeshDb = {
 
 // Bump when a schema change needs a migration step; the version anchors future
 // migrations that cannot be expressed as idempotent `CREATE ... IF NOT EXISTS`.
-const SCHEMA_VERSION = 12;
+const SCHEMA_VERSION = 13;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS peers (
@@ -83,6 +83,12 @@ CREATE TABLE IF NOT EXISTS workers (
   finished_at INTEGER,
   mailbox TEXT,
   spawned_by TEXT
+);
+-- v13: distant-spawn nonces are persisted (0.24.1): a receiver restart no
+-- longer re-opens the 5 min replay window.
+CREATE TABLE IF NOT EXISTS spawn_nonces (
+  nonce TEXT PRIMARY KEY,
+  ts INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_messages_status_created ON messages(status, created_at);
 CREATE INDEX IF NOT EXISTS idx_pending_tokens_created ON pending_tokens(created_at);

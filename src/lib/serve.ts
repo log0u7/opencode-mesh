@@ -11,7 +11,7 @@ import type { WorktreeClient } from "./worktree.js";
 import {
   DEFAULT_SPAWN_QUOTA_PEER,
   ackSpawned,
-  createSpawnReplayStore,
+  createDbSpawnReplayStore,
   parseSpawnRequest,
   runDistantSpawn,
   verifySpawnRequest,
@@ -115,9 +115,10 @@ export async function startMeshServer(options: MeshServerOptions): Promise<MeshS
       "startMeshServer: TLS is on by default; pass tlsMaterial (nodeTlsMaterial(dataDir)) or tls: false",
     );
   }
-  // One replay store per server: nonces claimed on this node never leak
-  // across servers in the same process (tests, multi-instance hosts).
-  const spawnReplay = createSpawnReplayStore();
+  // One replay store per server, persisted in the mesh db: a claimed nonce
+  // stays claimed across a restart (0.24.1), so the 5 min replay window never
+  // re-opens, and nonces never leak across servers in the same process.
+  const spawnReplay = createDbSpawnReplayStore(options.db);
   const handler = (req: IncomingMessage, res: ServerResponse): void => {
     handle(options, req, res, spawnReplay).catch((error: unknown) => {
       // Any uncaught throw in a route answers 500 JSON: an unhandled
@@ -419,7 +420,8 @@ async function handle(
     };
     const result = await runDistantSpawn(dsDeps, parsed);
     if (!result.ok) {
-      json(res, 500, { error: result.error });
+      // A spec refusal is the caller's fault (403); a spawn failure is ours.
+      json(res, result.error.startsWith("spawn refused:") ? 403 : 500, { error: result.error });
       return;
     }
     // Ack DM to the parent's mailbox (best effort, never blocks the verdict).

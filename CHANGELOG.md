@@ -5,6 +5,23 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.24.3] - 2026-11-24
+
+### Fixed
+
+- Spawn anti-replay nonces are persisted in the mesh db (`spawn_nonces`, schema
+  v13, purged on insert): a receiver restart no longer re-opens the 5 min
+  replay window for a captured request.
+- The distant-spawn spec is validated receiver-side beyond `name`: `role`
+  (non-empty, max 64 chars, no control characters) and `pools` (max 8, each
+  non-empty and max 64 chars) now get an explicit 403 refusal: both feed the
+  child's enroll header, so a newline could inject a fake instruction line.
+  The parent's `mesh_spawn` runs the same validation before sending.
+- The receiver-canonicalized payload contract is documented in
+  `docs/PROTOCOL.md`: extra parent keys and empty pool strings alter the
+  rebuilt payload and fail the signature by design; send exactly
+  `{task, name, role, pools}`. A test pins the 403.
+
 ## [0.24.2] - 2026-11-24
 
 ### Fixed
