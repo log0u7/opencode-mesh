@@ -13,11 +13,17 @@ type WorktreeCallOptions = { signal?: AbortSignal };
 export type WorktreeClient = {
   worktree: {
     create(
-      parameters: { worktreeCreateInput?: { name?: string } },
+      parameters: { worktreeCreateInput?: { name?: string; directory?: string } },
       options?: WorktreeCallOptions,
     ): Promise<unknown>;
     remove(
       parameters: { worktreeRemoveInput: { directory: string } },
+      options?: WorktreeCallOptions,
+    ): Promise<unknown>;
+    /** Optional discovery refresh (v2 in-process domain only: the 1.x REST
+     * client has no such endpoint). */
+    refresh?(
+      input: { worktreeRefreshInput?: { projectID?: string } },
       options?: WorktreeCallOptions,
     ): Promise<unknown>;
   };
@@ -27,8 +33,16 @@ export type WorktreeClient = {
 // (@opencode/client WorktreeApi): flat, project-scoped inputs and a
 // directory-only result, unlike the 1.x REST envelope.
 export type WorktreeDomain = {
-  create(input: { projectID: string; name?: string }): Promise<{ directory: string }>;
+  create(input: {
+    projectID: string;
+    name?: string;
+    /** Destination base for the worktree (spawnWorktreeBase). */
+    directory?: string;
+  }): Promise<{ directory: string }>;
   remove(input: { projectID: string; directory: string; force: boolean }): Promise<void>;
+  /** Discovery refresh: registers the project's source directory in the
+   * host's worktree table. Optional: tests and exotic hosts may omit it. */
+  refresh?(input: { projectID: string }): Promise<unknown>;
 };
 
 // Worktree setup/teardown shells out to git; a hung git process must not pin a
@@ -86,14 +100,37 @@ function unwrap<T>(envelope: unknown, fallback: string): T {
 
 export async function createWorkerWorktree(
   client: WorktreeClient,
-  input: { name?: string },
+  input: { name?: string; directory?: string },
 ): Promise<WorktreeInfo> {
-  const envelope = await client.worktree.create(
-    {
-      worktreeCreateInput: input.name !== undefined ? { name: input.name } : {},
-    },
-    callOptions(),
-  );
+  const createInput = {
+    ...(input.name !== undefined ? { name: input.name } : {}),
+    ...(input.directory !== undefined ? { directory: input.directory } : {}),
+  };
+  const attempt = (): Promise<unknown> =>
+    client.worktree.create({ worktreeCreateInput: createInput }, callOptions());
+  let envelope: unknown;
+  try {
+    envelope = await attempt();
+  } catch (error) {
+    if (!isSourceDirectoryError(error)) {
+      throw error;
+    }
+    // First sighting (the 0.24.7 live bug): a headless host (`opencode
+    // serve`) never browses worktrees, so its worktree table holds no row for
+    // the project's source directory and the tagged error
+    // Worktree.SourceDirectoryNotFoundError ships with no message. One
+    // discovery refresh registers the source (row.worktree + existing
+    // checkouts); the same create then succeeds. Best effort: a failing
+    // refresh keeps the original failure path.
+    await client.worktree.refresh
+      ?.call(client.worktree, { worktreeRefreshInput: {} }, callOptions())
+      .catch(() => undefined);
+    try {
+      envelope = await attempt();
+    } catch (retryError) {
+      throw isSourceDirectoryError(retryError) ? sourceDirectoryFailure() : retryError;
+    }
+  }
   const info = unwrap<WorktreeInfo>(envelope, "worktree create failed");
   if (
     typeof info !== "object" ||
@@ -104,6 +141,33 @@ export async function createWorkerWorktree(
     throw new Error("worktree API error: worktree create failed (response had no directory)");
   }
   return info;
+}
+
+// The host's project source is missing or unregistered even after discovery:
+// an explicit, greppable message instead of the bare tagged error (whose
+// empty message reached the parent as "…NotFoundError (no message)").
+function sourceDirectoryFailure(): Error {
+  const error = new Error(
+    "worktree create failed: no source directory registered on this host — open the project once so worktree discovery registers it",
+  );
+  error.name = "Worktree.SourceDirectoryNotFoundError";
+  return error;
+}
+
+// OpenCode 2.x throws this as an Effect tagged error: `_tag` set, message
+// EMPTY (the 0.24.7 live sighting). The 1.x REST path serializes the cause
+// into the message instead. All three surfaces are checked so the detection
+// survives both host generations and the translated error above.
+export function isSourceDirectoryError(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+  const tag = (error as { _tag?: string })._tag ?? "";
+  return (
+    tag.includes("SourceDirectoryNotFound") ||
+    error.name.includes("SourceDirectoryNotFound") ||
+    error.message.includes("SourceDirectoryNotFound")
+  );
 }
 
 export async function removeWorkerWorktree(
@@ -127,16 +191,31 @@ export async function removeWorkerWorktree(
 // written against (see issue #29). Wrap it back into the same WorktreeClient
 // shape so both host generations share one code path.
 export function v2WorktreeDomainClient(domain: WorktreeDomain, projectID: string): WorktreeClient {
+  // Fake host contexts in tests may omit the worktree domain entirely; the
+  // refresh capability is probed lazily so constructing the client stays safe.
+  const discovery = domain?.refresh;
   return {
     worktree: {
       create: async (parameters) => {
         const name = parameters.worktreeCreateInput?.name;
+        const directory = parameters.worktreeCreateInput?.directory;
         const info = await domain.create({
           projectID,
           ...(name !== undefined ? { name } : {}),
+          ...(directory !== undefined ? { directory } : {}),
         });
         return { data: info };
       },
+      // Discovery refresh (0.24.7): the domain is project-scoped, so the
+      // wrapper injects its own projectID whatever the caller passes.
+      ...(discovery !== undefined
+        ? {
+            refresh: async () => {
+              await discovery({ projectID });
+              return { data: true };
+            },
+          }
+        : {}),
       // The domain resolves void on success (it throws otherwise); surface that
       // as the v1 boolean so removeWorkerWorktree sees a successful removal.
       remove: async (parameters) => {

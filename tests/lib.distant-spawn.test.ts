@@ -73,6 +73,7 @@ async function startNode(
   options: {
     acceptSpawn?: boolean;
     quotaPeer?: number;
+    spawnWorktreeBase?: string;
     omitDistantSpawn?: boolean;
     worktreeClient?: WorktreeClient;
     breakReplay?: boolean;
@@ -119,6 +120,9 @@ async function startNode(
           distantSpawn: {
             acceptSpawn: options.acceptSpawn ?? true,
             ...(options.quotaPeer !== undefined ? { quotaPeer: options.quotaPeer } : {}),
+            ...(options.spawnWorktreeBase !== undefined
+              ? { spawnWorktreeBase: options.spawnWorktreeBase }
+              : {}),
             privateKey: identity.private_key,
             worktreeClient,
             spawnFn,
@@ -678,6 +682,113 @@ describe("distant spawn e2e: two TLS nodes (0.24.0)", () => {
     expect(out).toBe(
       `error: peer ${b.identity.node_id} is TLS but has no pinned key — re-pair with mesh_pair`,
     );
+    a.server.server.close();
+    b.server.server.close();
+  });
+});
+
+// The live 0.24.7 failure: a headless peer (`opencode serve`) holds no
+// worktree-discovery row for its project, and the worktree create died with
+// the bare tagged error Worktree.SourceDirectoryNotFoundError, whose EMPTY
+// message reached the parent as "…NotFoundError (no message)". The fix: one
+// discovery refresh registers the peer's source, the create is retried, and
+// a peer with no valid source at all answers an explicit refusal.
+describe("distant spawn source directory (0.24.7)", () => {
+  // The Effect tagged-error shape: _tag set, message EMPTY.
+  function taggedSourceError(): Error {
+    const error = new Error("");
+    (error as unknown as { _tag: string })._tag = "Worktree.SourceDirectoryNotFoundError";
+    error.name = "Worktree.SourceDirectoryNotFoundError";
+    return error;
+  }
+
+  function sourceWorktreeClient(mode: "recovers" | "broken"): {
+    client: WorktreeClient;
+    created: Array<{ name?: string; directory?: string }>;
+  } {
+    let discovered = false;
+    const created: Array<{ name?: string; directory?: string }> = [];
+    const client: WorktreeClient = {
+      worktree: {
+        create: async (parameters) => {
+          created.push({ ...parameters.worktreeCreateInput });
+          if (mode === "broken" || !discovered) {
+            throw taggedSourceError();
+          }
+          const name = parameters.worktreeCreateInput?.name;
+          return { data: { name, directory: `/tmp/wt-${name ?? "x"}` } };
+        },
+        remove: async () => ({ data: true }),
+        refresh: async () => {
+          if (mode === "broken") {
+            throw new Error("discovery failed: source gone");
+          }
+          discovered = true;
+          return { data: true };
+        },
+      },
+    };
+    return { client, created };
+  }
+
+  it("registers the peer source via one discovery refresh and births the child", async () => {
+    const a = await startNode("a-s1");
+    const source = sourceWorktreeClient("recovers");
+    const b = await startNode("b-s1", { worktreeClient: source.client });
+    pairBoth(a, b, "tS1");
+    const call = tools(a.identity, a.db, fakeWorktreeClient());
+    const out = await call("mesh_spawn", {
+      task: SPEC.task,
+      name: SPEC.name,
+      role: SPEC.role,
+      pools: SPEC.pools,
+      node: "host-b",
+    });
+    expect(JSON.parse(out).worker_id).toBeTruthy();
+    const workers = listWorkers(b.db);
+    expect(workers).toHaveLength(1);
+    expect(workers[0]?.status).toBe("running");
+    expect(workers[0]?.worktree_path).toBe("/tmp/wt-parser");
+    expect(workers[0]?.spawned_by).toBe(a.identity.node_id);
+    a.server.server.close();
+    b.server.server.close();
+  });
+
+  it("refuses with an explicit message when the peer has no source directory", async () => {
+    const a = await startNode("a-s2");
+    const source = sourceWorktreeClient("broken");
+    const b = await startNode("b-s2", { worktreeClient: source.client });
+    pairBoth(a, b, "tS2");
+    const call = tools(a.identity, a.db, fakeWorktreeClient());
+    const out = await call("mesh_spawn", { task: SPEC.task, name: SPEC.name, node: "host-b" });
+    expect(out).toBe(
+      "error: spawn refused: no source directory on peer — open the peer's opencode in its project once (worktree discovery registers the source)",
+    );
+    expect(listWorkers(b.db)).toHaveLength(0);
+    // The broken mode keeps failing after discovery: the create ran twice.
+    expect(source.created).toHaveLength(2);
+    a.server.server.close();
+    b.server.server.close();
+  });
+
+  it("honors spawnWorktreeBase as the destination base of the child worktree", async () => {
+    const a = await startNode("a-s3");
+    const source = sourceWorktreeClient("recovers");
+    const b = await startNode("b-s3", {
+      worktreeClient: source.client,
+      spawnWorktreeBase: "/srv/spawns",
+    });
+    pairBoth(a, b, "tS3");
+    const call = tools(a.identity, a.db, fakeWorktreeClient());
+    const out = await call("mesh_spawn", { task: SPEC.task, name: SPEC.name, node: "host-b" });
+    expect(JSON.parse(out).worker_id).toBeTruthy();
+    // The destination override reached the host worktree API on BOTH attempts
+    // (the first dies on the missing source, the retry succeeds).
+    expect(source.created).toHaveLength(2);
+    expect(source.created.every((c) => c.directory === "/srv/spawns" && c.name === SPEC.name)).toBe(
+      true,
+    );
+    expect(listWorkers(b.db)[0]?.worktree_path).toBe("/tmp/wt-parser");
     a.server.server.close();
     b.server.server.close();
   });

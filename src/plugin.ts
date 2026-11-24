@@ -140,6 +140,9 @@ export const MeshPlugin: Plugin = async (input, rawOptions?: PluginOptions) => {
     distantSpawn: {
       acceptSpawn: options.acceptSpawn === true,
       ...(options.spawnQuotaPeer !== undefined ? { quotaPeer: options.spawnQuotaPeer } : {}),
+      ...(options.spawnWorktreeBase !== undefined
+        ? { spawnWorktreeBase: options.spawnWorktreeBase }
+        : {}),
       privateKey: identity.private_key,
       worktreeClient,
       spawnFn,
