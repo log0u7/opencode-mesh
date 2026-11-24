@@ -154,43 +154,57 @@ export function verifySpawnRequest(
   return null;
 }
 
-// Anti-replay, half 2: a bounded store of (from, nonce) pairs already
-// accepted. Claimed AFTER the signature verifies, so an attacker cannot burn
-// a victim's nonce with garbage signatures. Bounded like the pairing-code
-// throttle: stale entries are pruned, and the cap evicts the oldest.
+// Anti-replay, half 2: claimed (from, nonce) pairs live in the mesh db
+// (spawn_nonces, v13), so a receiver restart no longer re-opens the 5 min
+// replay window. Claimed AFTER the signature verifies, so an attacker cannot
+// burn a victim's nonce with garbage signatures. Stale rows are purged at
+// every claim; the nonce is a UUID minted by the parent and the signature
+// binds it to `from`, so the nonce alone keys the table.
 export type SpawnReplayStore = {
   claim(from: string, nonce: string, now: number): boolean;
 };
 
-export function createSpawnReplayStore(cap = 10_000): SpawnReplayStore {
-  const seen = new Map<string, number>();
+export function createDbSpawnReplayStore(db: MeshDb): SpawnReplayStore {
   return {
-    claim(from: string, nonce: string, now: number): boolean {
-      for (const [key, at] of seen) {
-        if (now - at > SPAWN_REQUEST_TTL_MS) {
-          seen.delete(key);
-        }
-      }
-      const key = `${from}:${nonce}`;
-      if (seen.has(key)) {
+    claim(_from: string, nonce: string, now: number): boolean {
+      db.conn.run("DELETE FROM spawn_nonces WHERE ts <= ?", [now - SPAWN_REQUEST_TTL_MS]);
+      if (db.conn.get("SELECT nonce FROM spawn_nonces WHERE nonce = ?", [nonce]) !== null) {
         return false;
       }
-      if (seen.size >= cap) {
-        const oldest = seen.keys().next().value;
-        if (oldest !== undefined) seen.delete(oldest);
-      }
-      seen.set(key, now);
+      db.conn.run("INSERT INTO spawn_nonces (nonce, ts) VALUES (?, ?)", [nonce, now]);
       return true;
     },
   };
 }
 
-// The enrolled-spawn name and task are re-validated on the receiver: the spec
-// feeds the enroll header and names a worktree, so it must satisfy the same
-// rules the parent's mesh_spawn applies.
-export function validateSpawnSpec(spec: Pick<SpawnSpec, "name">): string | null {
+// The enrolled-spawn spec is re-validated on the receiver: it feeds the enroll
+// header (mesh_register/mesh_join lines) and names a worktree, so it must
+// satisfy the same rules the parent's mesh_spawn applies. Both sides run this
+// before any worktree work. Control characters are refused outright: the role
+// and the pools are interpolated line-by-line into the enroll header.
+const hasControlChar = (s: string): boolean =>
+  [...s].some((c) => c.charCodeAt(0) < 0x20 || c.charCodeAt(0) === 0x7f);
+
+export function validateSpawnSpec(spec: Pick<SpawnSpec, "name" | "role" | "pools">): string | null {
   if (!/^[A-Za-z0-9._-]{1,64}$/.test(spec.name)) {
     return "spawn refused: invalid name (1-64 chars of letters, digits, . _ -)";
+  }
+  if (
+    typeof spec.role !== "string" ||
+    spec.role.length === 0 ||
+    spec.role.length > 64 ||
+    hasControlChar(spec.role)
+  ) {
+    return "spawn refused: invalid role (non-empty, max 64 chars, no control characters)";
+  }
+  if (
+    !Array.isArray(spec.pools) ||
+    spec.pools.length > 8 ||
+    !spec.pools.every(
+      (p) => typeof p === "string" && p.length > 0 && p.length <= 64 && !hasControlChar(p),
+    )
+  ) {
+    return "spawn refused: invalid pools (max 8, each non-empty, max 64 chars, no control characters)";
   }
   return null;
 }

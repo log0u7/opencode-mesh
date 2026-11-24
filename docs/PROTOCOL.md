@@ -138,8 +138,12 @@ then an Ed25519 signature (`sig`, base64) over the canonical payload
 `opencode-mesh-spawn:<from>:<nonce>:<ts>:<JSON spec>` — the receiver rebuilds
 it from its own parse and verifies it against the key it PINNED for `from`
 (a peer row without a pinned key is refused: no TOFU on a token-authenticated
-channel). Replay defense is two-fold: `ts` must sit inside a 5 minute window
-and the `(from, nonce)` pair must be unseen. Reception is deny-by-default: the
+channel). The signed payload is the RECEIVER-CANONICALIZED spec: extra parent
+keys and empty pool strings alter the rebuilt payload and fail the signature
+by design; send exactly `{task, name, role, pools}`. Replay defense is
+two-fold: `ts` must sit inside a 5 minute window and the nonce must be unseen
+(claimed nonces are persisted in the mesh db, so a receiver restart does not
+re-open the window). Reception is deny-by-default: the
 operator opts in with `acceptSpawn` (default `false`), and `spawnQuotaPeer`
 (default 2) caps how many enrolled workers ONE requesting peer may keep
 running here. On acceptance the node executes its own local enrolled-spawn
@@ -159,8 +163,9 @@ Status codes:
   node id.
 - `403`: `/spawn` refused with an explicit message: `acceptSpawn disabled`
   (the default), the requesting peer has no pinned key, a stale request
-  (outside the 5 min window), an invalid signature, a replayed nonce, or the
-  per-peer spawn quota reached.
+  (outside the 5 min window), an invalid signature, a replayed nonce, an
+  invalid spec (`name`, `role`, or `pools` out of bounds; the spec feeds the
+  enroll header), or the per-peer spawn quota reached.
 - `404`: unknown route, or an unknown/expired pairing code on `/pair-code`.
   `/lock`, `/locks`, `/unlock`, `/announce` are
   deliberately absent: locks are local-only and never part of the wire protocol
