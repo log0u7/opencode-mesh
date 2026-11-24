@@ -278,38 +278,26 @@ describe("formatMeshSidebarExpanded (v4)", () => {
 });
 
 describe("formatMeshSidebarCollapsed (v4)", () => {
-  it("renders one line with the four counters in the tone grammar", () => {
+  it("shows only the attention line when mail is pending (no counters stacked)", () => {
     expect(formatMeshSidebarCollapsed(snapshot())).toEqual([
-      { text: "▶ Mesh", tone: "entity" },
+      { text: "Mesh", tone: "entity" },
       { text: " ● ", tone: "alert" },
       { text: "3 unread", tone: "qualifier" },
-      { text: " · ", tone: "value" },
-      { text: "4", tone: "qualifier" },
-      { text: " agents", tone: "value" },
-      { text: " · ", tone: "value" },
-      { text: "3", tone: "qualifier" },
-      { text: " pools", tone: "value" },
-      { text: " · ", tone: "value" },
-      { text: "2", tone: "qualifier" },
-      { text: " hosts", tone: "value" },
     ]);
   });
 
-  it("counts hosts as self plus paired peers only, and drops the unread segment at 0", () => {
+  it("shows the full inventory when quiet: Mesh bold, counters muted, hosts = self + paired peers", () => {
     const s = snapshot();
     s.peers = [];
     s.hats = s.hats.map((h) => ({ ...h, unread: 0 }));
     expect(formatMeshSidebarCollapsed(s)).toEqual([
-      { text: "▶ Mesh", tone: "entity" },
+      { text: "Mesh", tone: "entity" },
       { text: " · ", tone: "value" },
-      { text: "4", tone: "qualifier" },
-      { text: " agents", tone: "value" },
+      { text: "4 agents", tone: "value" },
       { text: " · ", tone: "value" },
-      { text: "3", tone: "qualifier" },
-      { text: " pools", tone: "value" },
+      { text: "3 pools", tone: "value" },
       { text: " · ", tone: "value" },
-      { text: "1", tone: "qualifier" },
-      { text: " hosts", tone: "value" },
+      { text: "1 hosts", tone: "value" },
     ]);
   });
 });

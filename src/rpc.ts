@@ -202,13 +202,18 @@ export function formatMeshSidebarExpanded(
   return lines;
 }
 
-/** Collapsed: ONE line, the four counters, same tone grammar. The unread
- * segment is omitted at 0 (like the expanded line). */
+/** Collapsed: ONE line, conditional. Mail pending: the attention state replaces
+ * the inventory (`Mesh ● N unread`, nothing else stacked). Quiet: the fleet
+ * inventory only, counters in the muted value tone (like the expanded line's
+ * unread segment, the attention drops at 0). */
 export function formatMeshSidebarCollapsed(s: MeshSnapshot): SidebarSegment[] {
-  const line: SidebarSegment[] = [{ text: "▶ Mesh", tone: "entity" }];
   const unread = totalUnread(s);
   if (unread > 0) {
-    line.push({ text: " ● ", tone: "alert" }, { text: `${unread} unread`, tone: "qualifier" });
+    return [
+      { text: "Mesh", tone: "entity" },
+      { text: " ● ", tone: "alert" },
+      { text: `${unread} unread`, tone: "qualifier" },
+    ];
   }
   const hosts = 1 + s.peers.length;
   const counts: Array<[number, string]> = [
@@ -216,12 +221,9 @@ export function formatMeshSidebarCollapsed(s: MeshSnapshot): SidebarSegment[] {
     [Object.keys(s.pools).length, "pools"],
     [hosts, "hosts"],
   ];
+  const line: SidebarSegment[] = [{ text: "Mesh", tone: "entity" }];
   for (const [count, label] of counts) {
-    line.push(
-      { text: " · ", tone: "value" },
-      { text: `${count}`, tone: "qualifier" },
-      { text: ` ${label}`, tone: "value" },
-    );
+    line.push({ text: " · ", tone: "value" }, { text: `${count} ${label}`, tone: "value" });
   }
   return line;
 }

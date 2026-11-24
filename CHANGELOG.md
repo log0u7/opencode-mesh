@@ -5,6 +5,16 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.23.3] - 2026-11-24
+
+### Changed
+
+- **Collapsed sidebar shows one conditional line**: the attention state when
+  mail is pending (`Mesh ● N unread`), the inventory only when quiet
+  (`Mesh · N agents · N pools · N hosts`) - never both stacked. The `Mesh`
+  label is bold (entity tone), the counters muted (value tone), and the `▶`
+  glyph drops: the header row stays clickable. README panel legend follows.
+
 ## [0.23.2] - 2026-11-24
 
 ### Fixed
