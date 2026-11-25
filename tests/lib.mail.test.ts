@@ -14,6 +14,8 @@ import {
   wakeBoxStats,
   ackInbox,
   withTransaction,
+  mailboxByName,
+  mergeFederatedRegistry,
   RESEND_WINDOW_MS,
 } from "../src/lib/mail.js";
 
@@ -663,5 +665,102 @@ describe("withTransaction: the third recovery surface (0.30.0 review)", () => {
     expect(result).toBe("value");
     // The finally check saw the stuck transaction and recovered.
     expect(reopen).toHaveBeenCalled();
+  });
+});
+
+describe("registry federation (0.30.0)", () => {
+  it("a federated row never wakes a foreign session (node_id marks it)", () => {
+    const db = openMeshDb(":memory:");
+    registerMailbox(db, { name: "local", session_id: "s1", now: 1000 });
+    // The federated row: pushed by ricinus (the node_id = the sender).
+    mergeFederatedRegistry(
+      db,
+      [
+        {
+          name: "sysops",
+          session_id: "ses-foreign",
+          role: "ops",
+          pools: '["team:infra"]',
+          primary_pool: "team:infra",
+          registered_at: 2000,
+        },
+      ],
+      "node-ricinus",
+    );
+    const stats = wakeBoxStats(db).find((s) => s.box === "sysops");
+    // No unread mail: the federated box never wakes anyone (the wake skips
+    // the foreign session_id via sessionKnown).
+    expect(stats).toBeUndefined();
+    db.close();
+  });
+
+  it("the merge resolves mesh_send addressing cross-node (the federated row)", () => {
+    const db = openMeshDb(":memory:");
+    registerMailbox(db, { name: "local", session_id: "s1", now: 1000 });
+    mergeFederatedRegistry(
+      db,
+      [
+        {
+          name: "sysops",
+          session_id: "ses-foreign",
+          role: "ops",
+          pools: '["team:infra"]',
+          primary_pool: "team:infra",
+          registered_at: 2000,
+        },
+      ],
+      "node-ricinus",
+    );
+    const row = mailboxByName(db, "sysops");
+    expect(row).not.toBeNull();
+    db.close();
+  });
+
+  it("the single-writer rule: this node's names never lose to an inbound row", () => {
+    const db = openMeshDb(":memory:");
+    registerMailbox(db, { name: "local", session_id: "s1", now: 1000 });
+    // An inbound row for OUR name with a NEWER registration: the ownership
+    // transfers (the explicit rebind on the other side).
+    const applied = mergeFederatedRegistry(
+      db,
+      [
+        {
+          name: "local",
+          session_id: "ses-foreign",
+          role: "ops",
+          pools: "[]",
+          primary_pool: null,
+          registered_at: 5000,
+        },
+      ],
+      "node-ricinus",
+    );
+    expect(applied).toBe(1);
+    const row = mailboxByName(db, "local");
+    expect(row?.session_id).toBe("ses-foreign");
+    db.close();
+  });
+
+  it("an older inbound row for our name loses the LWW (the local keeps it)", () => {
+    const db = openMeshDb(":memory:");
+    registerMailbox(db, { name: "local", session_id: "s1", now: 5000 });
+    const applied = mergeFederatedRegistry(
+      db,
+      [
+        {
+          name: "local",
+          session_id: "ses-foreign",
+          role: "ops",
+          pools: "[]",
+          primary_pool: null,
+          registered_at: 1000,
+        },
+      ],
+      "node-ricinus",
+    );
+    expect(applied).toBe(0);
+    const row = mailboxByName(db, "local");
+    expect(row?.session_id).toBe("s1");
+    db.close();
   });
 });

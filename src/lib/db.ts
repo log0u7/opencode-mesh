@@ -15,7 +15,7 @@ export type MeshDb = {
 
 // Bump when a schema change needs a migration step; the version anchors future
 // migrations that cannot be expressed as idempotent `CREATE ... IF NOT EXISTS`.
-const SCHEMA_VERSION = 14;
+const SCHEMA_VERSION = 16;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS peers (
@@ -145,6 +145,20 @@ function migrate(conn: SqliteConn): void {
     .map((row) => row.name);
   if (!mailboxColumns.includes("bind_key")) {
     conn.exec("ALTER TABLE mailboxes ADD COLUMN bind_key TEXT");
+  }
+  // v15: mailboxes.node_id — the registry federation (0.30.0): NULL = this
+  // node owns the box; a node id = a FEDERATED row (the remote registry
+  // pushed at its rebind). Federated boxes resolve mesh_send addressing
+  // cross-node but are never woken (their session_id is foreign).
+  if (!mailboxColumns.includes("node_id")) {
+    conn.exec("ALTER TABLE mailboxes ADD COLUMN node_id TEXT");
+  }
+  // v16: mailboxes.registered_at — the LWW version for the federation merge
+  // (the ownership conflict resolves on (registered_at, node_id); NULL =
+  // unknown age, backfilled from created_at so existing rows keep their age).
+  if (!mailboxColumns.includes("registered_at")) {
+    conn.exec("ALTER TABLE mailboxes ADD COLUMN registered_at INTEGER");
+    conn.exec("UPDATE mailboxes SET registered_at = created_at WHERE registered_at IS NULL");
   }
   // v5: messages.origin_id (cross-host broadcast dedup).
   if (!messageColumns.includes("origin_id")) {

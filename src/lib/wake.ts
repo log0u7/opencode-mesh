@@ -158,8 +158,17 @@ function escalateBox(
   escalated: Map<string, number>,
 ): void {
   if (escalated.has(box)) return;
+  // The orchestrator mailbox resolves first: absent at escalation time =
+  // the skip is LOGGED and the flag stays unset (a late-registered orq
+  // learns of this starvation period on the next cycle boundary).
+  if (!mailboxByName(db, ESCALATE_TO)) {
+    pluginWarn(
+      storeLogDir(db.path),
+      `escalation skipped: no '${ESCALATE_TO}' mailbox on this node — the box '${box}' stays starved silently`,
+    );
+    return;
+  }
   escalated.set(box, cycles);
-  if (!mailboxByName(db, ESCALATE_TO)) return;
   deliverMessage(db, {
     from: "mesh-wake",
     to_box: ESCALATE_TO,
@@ -256,9 +265,12 @@ export function startWakeLoop(options: WakeOptions): WakeHandle {
           continue;
         }
         lastUnread.set(box.name, unread);
-        // Drained since the last prompt → the fatigue counter resets.
+        // Drained since the last prompt → the fatigue counter resets AND the
+        // escalation re-arms (the contract: one alert per starvation period,
+        // and a drain ended it — the next starvation re-alerts orq).
         if (unread < previous) {
           undrained.delete(box.name);
+          escalated.delete(box.name);
         }
         const cycles = undrained.get(box.name) ?? 0;
         // Fatigue guard: prompted MAX times, never drained, count unchanged

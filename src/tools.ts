@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import { basename } from "node:path";
 import { randomUUID } from "node:crypto";
-import { postPairCode, postSpawn, sendMail } from "./lib/client.js";
+import { postPairCode, postRegistrySync, postSpawn, sendMail } from "./lib/client.js";
 import { buildSpawnRequest, validateSpawnSpec, type SpawnSpec } from "./lib/distant-spawn.js";
 import type { MeshDb } from "./lib/db.js";
 import type { Fanout } from "./lib/fanout.js";
@@ -15,6 +15,7 @@ import {
   leavePool,
   listMailboxes,
   mailboxesBySession,
+  localRegistryRows,
   mailboxByName,
   mailboxBySession,
   poolExists,
@@ -156,6 +157,27 @@ function sessionID(context: ToolContext): string {
     : "";
 }
 
+/** The registry federation push (0.30.0): the local mailbox rows travel to
+ * every paired peer (best-effort — a failed push retries at the next
+ * rebind). The counterpart lives at POST /registry-sync on each peer. */
+function pushRegistryToPeers(db: MeshDb, identity: NodeIdentity): void {
+  const rows = localRegistryRows(db);
+  if (rows.length === 0) return;
+  for (const peer of listPeers(db)) {
+    const conn = resolvePeerTarget(db, peer.node_id);
+    if (conn === null) continue;
+    void postRegistrySync({
+      url: conn.url,
+      ...(conn.tls ? { tls: true } : {}),
+      ...(conn.pk !== null ? { pk: conn.pk } : {}),
+      token: peer.token ?? "",
+      from: identity.node_id,
+      proof: pairingProof(identity, peer.token ?? ""),
+      registry: rows,
+    }).catch(() => {});
+  }
+}
+
 export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
   const {
     db,
@@ -282,6 +304,7 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
               addresses: [counter.address ?? candidate.url.replace(/^https?:\/\//, "")],
               public_key: counter.pk,
             });
+            pushRegistryToPeers(db, identity);
             return [
               `pairé des deux côtés avec ${peerLabelShort(counter.node_id, counter.hostname)}`,
               `peer fingerprint: ${keyFingerprint(counter.pk)} (TOFU pinning: check this fingerprint if you're paranoid)`,
@@ -310,6 +333,7 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
             hostname: identity.hostname,
             address: `${serverAddress}:${port}`,
           });
+          pushRegistryToPeers(db, identity);
           return [
             `pairé avec ${peerLabelShort(parsed.node_id, parsed.hostname)}. Contre-offre pour l'autre côté: mesh_pair(offer="${counter}")`,
             `peer fingerprint: ${keyFingerprint(parsed.pk)} (TOFU pinning: check this fingerprint if you're paranoid)`,
@@ -385,6 +409,7 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
         // A declared primary that the box has not joined yet is joined here:
         // one call settles the box, the role and the primary group (idempotent).
         if (primary.length > 0) joinPool(db, name, primary);
+        pushRegistryToPeers(db, identity);
         return `mailbox ${name} registered for this session`;
       },
     },
@@ -439,6 +464,7 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
               via: [],
               ...(wake ? { wake: true } : {}),
             });
+            pushRegistryToPeers(db, identity);
             return JSON.stringify(
               { id: origin, recipients: [], forwarded: forwardedOnly },
               null,
@@ -446,6 +472,45 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
             );
           }
           if (!result.ok) {
+            // The federated resolution (0.30.0): an unknown LOCAL box with a
+            // FEDERATED registry row (node_id = the owning peer) routes the
+            // DM to that peer — the same contract as peer + to, resolved by
+            // name. The peer resolves its own box at arrival.
+            if (result.error === "unknown_mailbox") {
+              const federated = db.conn.get<{
+                node_id: string;
+                name: string;
+              }>("SELECT node_id, name FROM mailboxes WHERE name = ? AND node_id IS NOT NULL", [
+                to,
+              ]);
+              if (federated) {
+                const target = findSendablePeer(db, federated.node_id);
+                if (target) {
+                  const conn = resolvePeerTarget(db, target.node_id);
+                  if (conn && !(conn.tls && conn.pk === null)) {
+                    const sent = await sendMail({
+                      url: conn.url,
+                      ...(conn.tls ? { tls: true } : {}),
+                      ...(conn.pk !== null ? { pk: conn.pk } : {}),
+                      token: target.token ?? "",
+                      from: identity.node_id,
+                      subject: String(args.subject),
+                      body: String(args.body),
+                      to: federated.name,
+                      ...(from_box !== null ? { from_box } : {}),
+                      ...(typeof args.reply_to === "string" && args.reply_to.length > 0
+                        ? { reply_to: args.reply_to }
+                        : {}),
+                      proof: pairingProof(identity, target.token ?? ""),
+                    });
+                    if (sent === "unreachable") {
+                      mesh.rebrowse?.();
+                    }
+                    return `sent to ${target.node_id}: ${sent}`;
+                  }
+                }
+              }
+            }
             return result.error === "unknown_mailbox"
               ? `error: unknown mailbox/pool ${to}`
               : `error: broadcast ${to} has no recipients`;
@@ -642,6 +707,7 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
         }
         const pool = String(args.pool);
         joinPool(db, box.name, pool);
+        pushRegistryToPeers(db, identity);
         return `joined ${pool}`;
       },
     },

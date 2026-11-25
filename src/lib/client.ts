@@ -469,3 +469,55 @@ function pinCheck(pk: string | undefined): (cert: PeerCertificate) => Error | nu
     return null;
   };
 }
+
+/** The registry federation push (0.30.0): POST the sender's LOCAL mailbox
+ * rows to a paired peer's /registry-sync endpoint (the same TLS + token +
+ * proof machinery as /mail). Returns "ok" or the transport failure string —
+ * the caller treats a failure as non-fatal (the next rebind retries). */
+export async function postRegistrySync(target: {
+  url: string;
+  token: string;
+  from: string;
+  proof: string;
+  tls?: boolean;
+  pk?: string;
+  registry: Array<{
+    name: string;
+    session_id: string;
+    role: string | null;
+    pools: string;
+    primary_pool: string | null;
+    registered_at: number;
+  }>;
+}): Promise<SendResult> {
+  const headers = {
+    "content-type": "application/json",
+    authorization: `Bearer ${target.token}`,
+    "x-mesh-sender": target.from,
+    "x-mesh-proof": target.proof,
+  };
+  const body = JSON.stringify({ from: target.from, registry: target.registry });
+  try {
+    const response = isTls(target)
+      ? await tlsRequest({
+          url: `${target.url}/registry-sync`,
+          ...(target.pk !== undefined ? { pk: target.pk } : {}),
+          method: "POST",
+          headers,
+          body,
+          timeoutMs: 5000,
+        })
+      : await plainRequest(`${target.url}/registry-sync`, {
+          method: "POST",
+          headers,
+          body,
+          timeoutMs: 5000,
+        });
+    if (response.status === 200) {
+      return "ok";
+    }
+    return response.status === 401 ? "unauthorized" : "error";
+  } catch {
+    return "unreachable";
+  }
+}

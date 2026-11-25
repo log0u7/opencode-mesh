@@ -151,19 +151,22 @@ export function registerMailbox(db: MeshDb, input: RegisterMailboxInput): Mailbo
   // A re-register without a primary keeps the declared one (identity trait,
   // same lifetime as bind_key).
   db.conn.run(
-    `INSERT INTO mailboxes (name, session_id, role, pools, bind_key, primary_pool, last_seen, created_at)
-     VALUES (?, ?, ?, '[]', ?, ?, ?, ?)
+    `INSERT INTO mailboxes (name, session_id, role, pools, bind_key, primary_pool, last_seen, created_at, registered_at)
+     VALUES (?, ?, ?, '[]', ?, ?, ?, ?, ?)
      ON CONFLICT(name) DO UPDATE SET session_id = excluded.session_id,
        role = excluded.role,
        bind_key = COALESCE(excluded.bind_key, mailboxes.bind_key),
        primary_pool = COALESCE(excluded.primary_pool, mailboxes.primary_pool),
-       last_seen = excluded.last_seen`,
+       last_seen = excluded.last_seen,
+       registered_at = excluded.registered_at,
+       node_id = NULL`,
     [
       input.name,
       input.session_id,
       input.role ?? null,
       input.bind_key ?? null,
       input.primary_pool ?? null,
+      input.now,
       input.now,
       input.now,
     ],
@@ -690,4 +693,95 @@ function rowToMessage(row: MessageRow): MailMessage {
     status: row.status === "read" ? "read" : "unread",
     created_at: row.created_at,
   };
+}
+
+// ---- registry federation (0.30.0) ----
+
+export type FederatedRegistryRow = {
+  name: string;
+  session_id: string;
+  role: string | null;
+  pools: string;
+  primary_pool: string | null;
+  registered_at: number;
+};
+
+/**
+ * The federation merge (the LWW single-writer design): an inbound row for a
+ * name this node owns locally resolves the ownership by (registered_at,
+ * node_id) — the newer registration wins the NAME (an explicit rebind on the
+ * other side transfers it); an inbound row for a name this node does not own
+ * upserts as FEDERATED (node_id = the sender). Federated boxes resolve
+ * mesh_send addressing cross-node but are never woken (their session_id is
+ * foreign — sessionKnown false in the wake loop). The sender's own rows are
+ * authoritative for its names: the merge is idempotent per row.
+ */
+export function mergeFederatedRegistry(
+  db: MeshDb,
+  rows: FederatedRegistryRow[],
+  senderNodeId: string,
+): number {
+  let applied = 0;
+  for (const row of rows) {
+    if (!/^[A-Za-z0-9._-]{1,64}$/.test(row.name)) continue;
+    const local = db.conn.get<{ node_id: string | null; registered_at: number | null }>(
+      "SELECT node_id, registered_at FROM mailboxes WHERE name = ?",
+      [row.name],
+    );
+    if (local) {
+      if (local.node_id === null || local.node_id === "") {
+        // This node owns the name: the inbound wins only on a strictly newer
+        // registration (the explicit rebind on the other side transferred it).
+        const localAt = local.registered_at ?? 0;
+        if (row.registered_at <= localAt) continue;
+      } else if (local.node_id !== senderNodeId) {
+        // A federated row owned by a THIRD node: the sender must be the owner
+        // to update it — the third-party re-broadcast never overwrites.
+        continue;
+      } else if ((local.registered_at ?? 0) >= row.registered_at) {
+        continue;
+      }
+      db.conn.run(
+        `UPDATE mailboxes SET session_id = ?, role = ?, pools = ?, primary_pool = ?,
+         registered_at = ?, last_seen = ?, bind_key = NULL, node_id = ? WHERE name = ?`,
+        [
+          row.session_id,
+          row.role,
+          row.pools,
+          row.primary_pool,
+          row.registered_at,
+          Date.now(),
+          senderNodeId,
+          row.name,
+        ],
+      );
+    } else {
+      db.conn.run(
+        `INSERT INTO mailboxes (name, session_id, role, pools, bind_key, primary_pool, last_seen, created_at, registered_at, node_id)
+         VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)`,
+        [
+          row.name,
+          row.session_id,
+          row.role,
+          row.pools,
+          row.primary_pool,
+          Date.now(),
+          Date.now(),
+          row.registered_at,
+          senderNodeId,
+        ],
+      );
+    }
+    applied += 1;
+  }
+  return applied;
+}
+
+/** The local registry rows this node owns (for the /registry-sync push). */
+export function localRegistryRows(db: MeshDb): FederatedRegistryRow[] {
+  return db.conn
+    .all<FederatedRegistryRow>(
+      "SELECT name, session_id, role, pools, primary_pool, registered_at FROM mailboxes WHERE node_id IS NULL",
+    )
+    .map((r) => ({ ...r, registered_at: r.registered_at ?? Date.now() }));
 }
