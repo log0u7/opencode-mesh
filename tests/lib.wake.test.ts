@@ -4,6 +4,7 @@ import { openMeshDb } from "../src/lib/db.js";
 import { deliverMessage, joinPool, registerMailbox, unreadBoxCount } from "../src/lib/mail.js";
 import {
   startWakeLoop,
+  createExecutionTracker,
   DEFAULT_WAKE_INTERVAL_MS,
   DEFAULT_WAKE_COOLDOWN_MS,
 } from "../src/lib/wake.js";
@@ -18,6 +19,79 @@ function setup(hostSessions: string[]) {
   const sessionKnown = vi.fn((sessionID: string) => live.has(sessionID));
   return { db, prompt, prompts, sessionKnown };
 }
+
+describe("createExecutionTracker (the host's real session-status events)", () => {
+  const status = (sessionID: string, type: string) => ({
+    type: "session.status",
+    properties: { sessionID, status: { type } },
+  });
+
+  it("tracks busy and clears on idle (the v2 wire shape: properties.sessionID)", () => {
+    const t = createExecutionTracker();
+    t.observe(status("s1", "busy"));
+    expect(t.isRunning("s1")).toBe(true);
+    t.observe(status("s1", "idle"));
+    expect(t.isRunning("s1")).toBe(false);
+  });
+
+  it("treats retry as running", () => {
+    const t = createExecutionTracker();
+    t.observe({
+      type: "session.status",
+      properties: { sessionID: "s1", status: { type: "retry", attempt: 2, message: "x", next: 1 } },
+    });
+    expect(t.isRunning("s1")).toBe(true);
+  });
+
+  it("clears on session.idle", () => {
+    const t = createExecutionTracker();
+    t.observe(status("s1", "busy"));
+    t.observe({ type: "session.idle", properties: { sessionID: "s1" } });
+    expect(t.isRunning("s1")).toBe(false);
+  });
+
+  it("also honors the legacy session.execution.* names (older hosts, data path)", () => {
+    const t = createExecutionTracker();
+    t.observe({ type: "session.execution.started", data: { sessionID: "s1" } });
+    expect(t.isRunning("s1")).toBe(true);
+    t.observe({ type: "session.execution.succeeded", data: { sessionID: "s1" } });
+    expect(t.isRunning("s1")).toBe(false);
+    t.observe({ type: "session.execution.failed", data: { sessionID: "s1" } });
+    expect(t.isRunning("s1")).toBe(false);
+    t.observe({ type: "session.execution.interrupted", data: { sessionID: "s1" } });
+    expect(t.isRunning("s1")).toBe(false);
+  });
+
+  it("ignores a session.status whose status.type is not a string", () => {
+    const t = createExecutionTracker();
+    t.observe({ type: "session.status", properties: { sessionID: "s1", status: { type: 3 } } });
+    expect(t.isRunning("s1")).toBe(false);
+  });
+
+  it("rejects an empty-string sessionID", () => {
+    const t = createExecutionTracker();
+    t.observe({ type: "session.idle", properties: { sessionID: "" } });
+    t.observe({ type: "session.idle", properties: {} });
+    expect(t.isRunning("")).toBe(false);
+  });
+
+  it("prefers properties.sessionID over data.sessionID", () => {
+    const t = createExecutionTracker();
+    t.observe({
+      type: "session.status",
+      properties: { sessionID: "props", status: { type: "busy" } },
+      data: { sessionID: "data" },
+    });
+    expect(t.isRunning("props")).toBe(true);
+    expect(t.isRunning("data")).toBe(false);
+  });
+
+  it("tolerates unknown event shapes", () => {
+    const t = createExecutionTracker();
+    expect(() => t.observe({ type: "mystery" })).not.toThrow();
+    expect(() => t.observe({})).not.toThrow();
+  });
+});
 
 describe("wake loop", () => {
   it("uses the documented defaults", () => {

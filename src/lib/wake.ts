@@ -1,6 +1,54 @@
 import type { MeshDb } from "./db.js";
 import { listMailboxes, unreadBoxCount, wakeBoxStats } from "./mail.js";
 
+// The host's mid-turn signal (opencode v2 wire shape): session.status carries
+// { sessionID, status: { type: "busy" | "retry" | "idle" } } under
+// `properties`. The guard originally listened for session.execution.* with
+// data.sessionID — event names the v2 bus never emits, so the mid-turn skip
+// was silently off: the wake loop queued prompts into running sessions whose
+// turns drained the mail before the queued prompt fired — the phantom-unread
+// class (1-5 flashes per turn, empty inbox, zero pending in the DB, always
+// the same already-read thread). 0.27.1 tracks the real events; the legacy
+// names stay honored for older hosts.
+export type HostEvent = {
+  type?: unknown;
+  properties?: { sessionID?: unknown; status?: { type?: unknown; [key: string]: unknown } };
+  data?: { sessionID?: unknown };
+};
+
+const RUNNING_START = new Set([
+  "session.status:busy",
+  "session.status:retry",
+  "session.execution.started",
+]);
+const RUNNING_END = new Set([
+  "session.status:idle",
+  "session.idle",
+  "session.execution.succeeded",
+  "session.execution.failed",
+  "session.execution.interrupted",
+]);
+
+export function createExecutionTracker(backing = new Set<string>()) {
+  return {
+    /** Feed every host event; unknown shapes are ignored. */
+    observe(event: HostEvent): void {
+      const type = typeof event?.type === "string" ? event.type : "";
+      const sessionID = event.properties?.sessionID ?? event.data?.sessionID;
+      if (typeof sessionID !== "string" || sessionID.length === 0) return;
+      const signal =
+        type === "session.status" && typeof event.properties?.status?.type === "string"
+          ? `session.status:${event.properties.status.type}`
+          : type;
+      if (RUNNING_START.has(signal)) backing.add(sessionID);
+      else if (RUNNING_END.has(signal)) backing.delete(sessionID);
+    },
+    isRunning(sessionID: string): boolean {
+      return backing.has(sessionID);
+    },
+  };
+}
+
 // Wake loop: polls every registered mailbox in the shared local database and,
 // when unread mail appears in a box whose session lives on THIS host, injects
 // a prompt into that session via the host's session.prompt API (OpenCode 2.x:

@@ -24,7 +24,7 @@ export type HostCapa = {
   gpu?: GpuInfo;
   /** mesh_workers rows still `running`. */
   workersInFlight: number;
-  /** Sessions mid-turn (the plugin-v2 `running` set from session.execution.*). */
+  /** Sessions mid-turn (the plugin-v2 `running` set from session.status/session.idle). */
   sessionsRunning: number;
 };
 
