@@ -1,19 +1,18 @@
 import type { MeshDb } from "./db.js";
 import { listMailboxes, unreadBoxCount, wakeBoxStats } from "./mail.js";
 
-// The host's mid-turn signal (opencode v2 wire shape): session.status carries
-// { sessionID, status: { type: "busy" | "retry" | "idle" } } under
-// `properties`. The guard originally listened for session.execution.* with
-// data.sessionID — event names the v2 bus never emits, so the mid-turn skip
-// was silently off: the wake loop queued prompts into running sessions whose
-// turns drained the mail before the queued prompt fired — the phantom-unread
-// class (1-5 flashes per turn, empty inbox, zero pending in the DB, always
-// the same already-read thread). 0.27.1 tracks the real events; the legacy
-// names stay honored for older hosts.
+// The host's mid-turn signal. The live wire (opencode v2, generated client
+// types) carries BOTH families under `data`: session.execution.* (durable
+// event-store events) with data.sessionID, and session.status with
+// data.sessionID + data.status.type busy/retry/idle. 0.27.1 trusted a stale
+// SDK generation that showed `properties` instead of `data` for
+// session.status — the tracker keyed on a path the bus never sends, so the
+// guard stayed off and the phantom-unread class relapsed. 0.27.3 reads data
+// first (the real wire), properties second (older SDK gens).
 export type HostEvent = {
   type?: unknown;
+  data?: { sessionID?: unknown; status?: { type?: unknown; [key: string]: unknown } };
   properties?: { sessionID?: unknown; status?: { type?: unknown; [key: string]: unknown } };
-  data?: { sessionID?: unknown };
 };
 
 const RUNNING_START = new Set([
@@ -34,11 +33,12 @@ export function createExecutionTracker(backing = new Set<string>()) {
     /** Feed every host event; unknown shapes are ignored. */
     observe(event: HostEvent): void {
       const type = typeof event?.type === "string" ? event.type : "";
-      const sessionID = event.properties?.sessionID ?? event.data?.sessionID;
+      const sessionID = event.data?.sessionID ?? event.properties?.sessionID;
       if (typeof sessionID !== "string" || sessionID.length === 0) return;
+      const statusType = event.data?.status?.type ?? event.properties?.status?.type;
       const signal =
-        type === "session.status" && typeof event.properties?.status?.type === "string"
-          ? `session.status:${event.properties.status.type}`
+        type === "session.status" && typeof statusType === "string"
+          ? `session.status:${statusType}`
           : type;
       if (RUNNING_START.has(signal)) backing.add(sessionID);
       else if (RUNNING_END.has(signal)) backing.delete(sessionID);

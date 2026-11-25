@@ -26,7 +26,15 @@ describe("createExecutionTracker (the host's real session-status events)", () =>
     properties: { sessionID, status: { type } },
   });
 
-  it("tracks busy and clears on idle (the v2 wire shape: properties.sessionID)", () => {
+  it("tracks busy and clears on idle (the real wire shape: data.sessionID + data.status)", () => {
+    const t = createExecutionTracker();
+    t.observe({ type: "session.status", data: { sessionID: "s1", status: { type: "busy" } } });
+    expect(t.isRunning("s1")).toBe(true);
+    t.observe({ type: "session.status", data: { sessionID: "s1", status: { type: "idle" } } });
+    expect(t.isRunning("s1")).toBe(false);
+  });
+
+  it("tracks busy and clears on idle (legacy properties shape, older SDK gens)", () => {
     const t = createExecutionTracker();
     t.observe(status("s1", "busy"));
     expect(t.isRunning("s1")).toBe(true);
@@ -34,19 +42,19 @@ describe("createExecutionTracker (the host's real session-status events)", () =>
     expect(t.isRunning("s1")).toBe(false);
   });
 
-  it("treats retry as running", () => {
+  it("treats retry as running (data path)", () => {
     const t = createExecutionTracker();
     t.observe({
       type: "session.status",
-      properties: { sessionID: "s1", status: { type: "retry", attempt: 2, message: "x", next: 1 } },
+      data: { sessionID: "s1", status: { type: "retry", attempt: 2, message: "x", next: 1 } },
     });
     expect(t.isRunning("s1")).toBe(true);
   });
 
-  it("clears on session.idle", () => {
+  it("clears on session.idle (data path)", () => {
     const t = createExecutionTracker();
-    t.observe(status("s1", "busy"));
-    t.observe({ type: "session.idle", properties: { sessionID: "s1" } });
+    t.observe({ type: "session.status", data: { sessionID: "s1", status: { type: "busy" } } });
+    t.observe({ type: "session.idle", data: { sessionID: "s1" } });
     expect(t.isRunning("s1")).toBe(false);
   });
 
@@ -75,15 +83,15 @@ describe("createExecutionTracker (the host's real session-status events)", () =>
     expect(t.isRunning("")).toBe(false);
   });
 
-  it("prefers properties.sessionID over data.sessionID", () => {
+  it("prefers data.sessionID over properties.sessionID (the real wire wins)", () => {
     const t = createExecutionTracker();
     t.observe({
       type: "session.status",
+      data: { sessionID: "data", status: { type: "busy" } },
       properties: { sessionID: "props", status: { type: "busy" } },
-      data: { sessionID: "data" },
     });
-    expect(t.isRunning("props")).toBe(true);
-    expect(t.isRunning("data")).toBe(false);
+    expect(t.isRunning("data")).toBe(true);
+    expect(t.isRunning("props")).toBe(false);
   });
 
   it("tolerates unknown event shapes", () => {
