@@ -12,9 +12,9 @@ import {
 function setup(hostSessions: string[]) {
   const db = openMeshDb(":memory:");
   const live = new Set(hostSessions);
-  const prompts: Array<{ sessionID: string; text: string }> = [];
-  const prompt = vi.fn(async (sessionID: string, text: string) => {
-    prompts.push({ sessionID, text });
+  const prompts: Array<{ sessionID: string; text: string; messageID?: string | undefined }> = [];
+  const prompt = vi.fn(async (sessionID: string, text: string, messageID?: string) => {
+    prompts.push({ sessionID, text, messageID });
   });
   const sessionKnown = vi.fn((sessionID: string) => live.has(sessionID));
   return { db, prompt, prompts, sessionKnown };
@@ -114,6 +114,28 @@ describe("createExecutionTracker (the host's real session-status events)", () =>
     const t = createExecutionTracker();
     expect(() => t.observe({ type: "mystery" })).not.toThrow();
     expect(() => t.observe({})).not.toThrow();
+  });
+  it("passes a stable generated messageID to the prompt (the transport-retry idempotency key)", async () => {
+    const { db, prompt, sessionKnown } = setup(["s1"]);
+    registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
+    deliverMessage(db, { from: "n", to_box: "a", subject: "s", body: "b", created_at: 1000 });
+    const handle = startWakeLoop({
+      db,
+      prompt,
+      sessionKnown,
+      intervalMs: 50,
+      cooldownMs: 20,
+    });
+    await new Promise((r) => setTimeout(r, 150));
+    handle.stop();
+    expect(prompt).toHaveBeenCalledTimes(2);
+    const ids = prompt.mock.calls.map((c) => (c as unknown[])[2]);
+    for (const id of ids) {
+      expect(id).toMatch(/^msg_/);
+    }
+    // Each prompt gets its OWN id: the server reconciles per prompt, and two
+    // different prompts are two different messages.
+    expect(ids[0]).not.toBe(ids[1]);
   });
 });
 

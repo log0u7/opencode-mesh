@@ -5,6 +5,20 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.28.1] - 2026-11-25
+
+### Fixed
+
+- The wake prompt now carries an explicit `messageID` (generated `msg_` +
+  uuid per prompt). The transport can retry a `session.prompt` call — the
+  server honors an explicit id (`input.id ?? create`), so every retry now
+  reconciles to the same message ('existing', no new row) and no ghost turn
+  re-fires. Root-caused live: four re-deliveries of one queued prompt,
+  spaced 4 s apart (the transport-retry rhythm), each regenerating a fresh
+  server-side id because the caller sent none. The vendored SDK generation
+  omits `messageID` (stale gen) — the call site casts, the live host
+  `SessionPrompt` carries the field.
+
 ## [0.28.0] - 2026-11-25
 
 ### Fixed
