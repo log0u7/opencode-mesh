@@ -62,6 +62,30 @@ describe("createExecutionTracker (the host's real session-status events)", () =>
     expect(t.isRunning("s1")).toBe(false);
   });
 
+  it("ignores a session.status whose status.type is not a string", () => {
+    const t = createExecutionTracker();
+    t.observe({ type: "session.status", properties: { sessionID: "s1", status: { type: 3 } } });
+    expect(t.isRunning("s1")).toBe(false);
+  });
+
+  it("rejects an empty-string sessionID", () => {
+    const t = createExecutionTracker();
+    t.observe({ type: "session.idle", properties: { sessionID: "" } });
+    t.observe({ type: "session.idle", properties: {} });
+    expect(t.isRunning("")).toBe(false);
+  });
+
+  it("prefers properties.sessionID over data.sessionID", () => {
+    const t = createExecutionTracker();
+    t.observe({
+      type: "session.status",
+      properties: { sessionID: "props", status: { type: "busy" } },
+      data: { sessionID: "data" },
+    });
+    expect(t.isRunning("props")).toBe(true);
+    expect(t.isRunning("data")).toBe(false);
+  });
+
   it("tolerates unknown event shapes", () => {
     const t = createExecutionTracker();
     expect(() => t.observe({ type: "mystery" })).not.toThrow();
