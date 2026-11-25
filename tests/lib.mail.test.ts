@@ -12,7 +12,9 @@ import {
   unreadMessages,
   waitReplyRead,
   wakeBoxStats,
+  ackInbox,
   withTransaction,
+  RESEND_WINDOW_MS,
 } from "../src/lib/mail.js";
 
 /** The wake loop reads per-box stats in one grouped query; the gate tests
@@ -339,10 +341,15 @@ describe("content dedup at delivery (0.20.0 sender re-send defense)", () => {
     db.close();
   });
 
-  it("the same content 61 s later delivers again (window elapsed)", () => {
+  it("the same content after the window delivers again (window elapsed)", () => {
     const db = boxDb();
     const first = deliverMessage(db, { ...MAIL, to_box: "a", created_at: 1000 });
-    const second = deliverMessage(db, { ...MAIL, to_box: "a", created_at: 62000 });
+    // One millisecond past the (now 6h) window: a genuinely new delivery.
+    const second = deliverMessage(db, {
+      ...MAIL,
+      to_box: "a",
+      created_at: 1000 + RESEND_WINDOW_MS + 1,
+    });
     if (!first.ok || !second.ok) throw new Error("delivery failed");
 
     expect(second.id).not.toBe(first.id);
@@ -458,6 +465,137 @@ describe("wake gates (0.16.0 token economy)", () => {
     deliverMessage(db, { from: "n", to_box: "a", subject: "second", body: "b", created_at: 2000 });
     expect(statOf(db, "a")?.subject).toBe("first");
     expect(statOf(db, "a")?.unread).toBe(2);
+    db.close();
+  });
+});
+
+describe("resend dedup window (0.29.0: the minutes-apart re-send class)", () => {
+  it("collapses a re-send sent minutes apart (the 6admin-to-orq episode)", () => {
+    const db = openMeshDb(":memory:");
+    registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
+    const first = deliverMessage(db, {
+      from: "6admin",
+      to_box: "a",
+      subject: "rapport round",
+      body: "round terminé",
+      created_at: 1000,
+    });
+    // 2 minutes later: the 60s window is long dead; the extended window
+    // still recognizes the identical content.
+    const second = deliverMessage(db, {
+      from: "6admin",
+      to_box: "a",
+      subject: "rapport round",
+      body: "round terminé",
+      created_at: 1000 + 2 * 60_000,
+    });
+    if (!first.ok || !second.ok) throw new Error("delivery failed");
+    expect(second.id).toBe(first.id);
+    expect(second.recipients).toEqual([]);
+    expect(unreadBoxCount(db, "a")).toBe(1);
+    db.close();
+  });
+
+  it("still delivers a genuinely different mail inside the window", () => {
+    const db = openMeshDb(":memory:");
+    registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
+    deliverMessage(db, { from: "n", to_box: "a", subject: "s", body: "first", created_at: 1000 });
+    const second = deliverMessage(db, {
+      from: "n",
+      to_box: "a",
+      subject: "s",
+      body: "different body",
+      created_at: 2000,
+    });
+    expect(second.ok).toBe(true);
+    if (!second.ok) throw new Error("delivery failed");
+    expect(second.recipients).toEqual(["a"]);
+    expect(unreadBoxCount(db, "a")).toBe(2);
+    db.close();
+  });
+
+  it("delivers a re-send fresh when the original was already read (an active ping)", () => {
+    const db = openMeshDb(":memory:");
+    registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
+    const first = deliverMessage(db, {
+      from: "6admin",
+      to_box: "a",
+      subject: "rapport round",
+      body: "round terminé",
+      created_at: 1000,
+    });
+    if (!first.ok) throw new Error("delivery failed");
+    // The receiver acks the original (the drain), then the sender re-sends
+    // the identical content inside the window: an active ping, not a
+    // duplicate in an unread backlog.
+    ackInbox(
+      db,
+      db.conn.all<{ id: string }>("SELECT id FROM deliveries WHERE to_box = 'a'").map((r) => r.id),
+    );
+    const second = deliverMessage(db, {
+      from: "6admin",
+      to_box: "a",
+      subject: "rapport round",
+      body: "round terminé",
+      created_at: 2000,
+    });
+    expect(second.ok).toBe(true);
+    if (!second.ok) throw new Error("delivery failed");
+    expect(second.id).not.toBe(first.id);
+    expect(second.recipients).toEqual(["a"]);
+    expect(unreadBoxCount(db, "a")).toBe(1);
+    db.close();
+  });
+
+  it("keeps broadcast and DM keys separate (same content, different routing)", () => {
+    const db = openMeshDb(":memory:");
+    registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
+    joinPool(db, "a", "team:x");
+    const broadcast = deliverMessage(db, {
+      from: "n",
+      to_box: "team:x",
+      subject: "s",
+      body: "b",
+      created_at: 1000,
+    });
+    const dm = deliverMessage(db, {
+      from: "n",
+      to_box: "a",
+      subject: "s",
+      body: "b",
+      created_at: 2000,
+    });
+    expect(broadcast.ok).toBe(true);
+    expect(dm.ok).toBe(true);
+    if (!broadcast.ok || !dm.ok) throw new Error("delivery failed");
+    expect(dm.id).not.toBe(broadcast.id);
+    expect(dm.recipients).toEqual(["a"]);
+    db.close();
+  });
+
+  it("purges the expired hash rows on the next insert (the rolling window bound)", () => {
+    const db = openMeshDb(":memory:");
+    registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
+    deliverMessage(db, { from: "n", to_box: "a", subject: "s", body: "b", created_at: 1000 });
+    const rowsBefore = db.conn.get<{ n: number }>("SELECT COUNT(*) AS n FROM recent_mails")?.n;
+    expect(rowsBefore).toBe(1);
+    // The next insert purges the expired hashes (created_at > 1000 + 6h).
+    deliverMessage(db, {
+      from: "n",
+      to_box: "a",
+      subject: "later",
+      body: "b",
+      created_at: 1000 + RESEND_WINDOW_MS + 1,
+    });
+    const hashes = db.conn.all<{ hash: string }>(
+      "SELECT hash FROM recent_mails WHERE hash = (SELECT hash FROM recent_mails LIMIT 1)",
+    );
+    void hashes;
+    const stale = db.conn.get<{ n: number }>(
+      "SELECT COUNT(*) AS n FROM recent_mails WHERE ts <= ?",
+      [1000 + RESEND_WINDOW_MS + 1 - RESEND_WINDOW_MS],
+    );
+    expect(stale?.n).toBe(0);
     db.close();
   });
 });

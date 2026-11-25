@@ -75,7 +75,11 @@ export const MESSAGE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 // re-executes its sends after a local crash lands its duplicates within
 // seconds (seen live: the same DM twice, 14 s apart), while legitimate
 // identical content (daily reminders) repeats hours later and passes.
-export const RESEND_WINDOW_MS = 60_000;
+// 6h (0.29.0, was 60s): the minutes-apart re-send class (the 6admin-to-orq
+// episode: three identical DMs over 20 minutes, all delivered) dies here —
+// the burst retries were already covered, the interruption-resume class was
+// not. The rolling recent_mails purge bounds the rows.
+export const RESEND_WINDOW_MS = 6 * 60 * 60 * 1000;
 
 // Content key of the re-send defense. to_box stays in the key so a broadcast
 // to one box never swallows the same text to another, and reply_to so an
@@ -267,9 +271,27 @@ export function deliverMessage(db: MeshDb, input: DeliverInput): DeliverResult {
     [contentHash, created_at - RESEND_WINDOW_MS],
   );
   if (resent) {
-    // recipients: [] keeps callers from re-fanouting the duplicate (same
-    // contract as the origin_id dedup above).
-    return { ok: true, id: resent.message_id, recipients: [] };
+    // The dedup protects the UNREAD backlog (the re-send burst class): an
+    // identical re-send AFTER the original was read is an active ping —
+    // deliver it fresh (0.29.0 review). The original's read state lives on
+    // its deliveries (the DM's box, the broadcast's member boxes — the hash
+    // binds the POOL name, not the member) or the message row (the legacy
+    // global path has no deliveries).
+    const originalUnread =
+      input.to_box == null
+        ? db.conn.get<{ n: number }>(
+            "SELECT COUNT(*) AS n FROM messages WHERE id = ? AND status = 'unread'",
+            [resent.message_id],
+          )?.n
+        : db.conn.get<{ n: number }>(
+            "SELECT COUNT(*) AS n FROM deliveries WHERE message_id = ? AND status = 'unread'",
+            [resent.message_id],
+          )?.n;
+    if (originalUnread) {
+      // recipients: [] keeps callers from re-fanouting the duplicate (same
+      // contract as the origin_id dedup above).
+      return { ok: true, id: resent.message_id, recipients: [] };
+    }
   }
 
   // Resolve first: a legacy global mail or a failure never leaves a message row.
@@ -315,11 +337,11 @@ export function deliverMessage(db: MeshDb, input: DeliverInput): DeliverResult {
   // insert (rolling window, KISS), then insert. The freshness lookup above
   // uses the same cutoff, so a live hash is never overwritten here.
   db.conn.run("DELETE FROM recent_mails WHERE ts <= ?", [created_at - RESEND_WINDOW_MS]);
-  db.conn.run("INSERT INTO recent_mails (hash, ts, message_id) VALUES (?, ?, ?)", [
-    contentHash,
-    created_at,
-    id,
-  ]);
+  db.conn.run(
+    `INSERT INTO recent_mails (hash, ts, message_id) VALUES (?, ?, ?)
+     ON CONFLICT(hash) DO UPDATE SET ts = excluded.ts, message_id = excluded.message_id`,
+    [contentHash, created_at, id],
+  );
   return { ok: true, id, recipients };
 }
 

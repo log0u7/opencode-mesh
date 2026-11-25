@@ -5,6 +5,22 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.29.0] - 2026-11-25
+
+### Changed
+
+- The re-send dedup window widens from 60 s to 6 hours (0.20.0 covered the
+  burst retries; the minutes-apart class survived — seen live: three
+  identical DMs over twenty minutes, all delivered, reported by the receiver
+  as "never received" while they sat unread in its box). The rolling
+  recent_mails purge bounds the rows; a genuinely different mail inside the
+  window still delivers (the hash covers from + box + subject + body).
+
+- The inbox drain answers compact JSON (the pretty-print cost bytes on
+  every drain) and drops `delivery_id` from the agent view — an internal
+  key the agent never uses (mesh_wait matches on reply_to). The wire path
+  (POST /mail) keeps its shape.
+
 ## [0.28.2] - 2026-11-25
 
 ### Fixed
