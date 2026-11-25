@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+
 import type { MeshDb } from "./db.js";
 import { listMailboxes, unreadBoxCount, wakeBoxStats } from "./mail.js";
 
@@ -72,8 +74,13 @@ export type WakeOptions = {
    * count after the turn acked the mail (false positives). Optional: when
    * absent, every existing session is treated as idle. */
   sessionRunning?: (sessionID: string) => boolean;
-  /** Inject a prompt into a session (ctx.session.prompt). */
-  prompt: (sessionID: string, text: string) => Promise<unknown>;
+  /** Inject a prompt into a session (ctx.session.prompt). The third argument
+   * is a generated messageID: the host server honors an explicit id
+   * (input.id ?? create) and the transport can retry the call — with a
+   * stable id every retry reconciles to the same message ('existing') and no
+   * ghost turn re-fires (the 4s-spaced phantom deliveries, root-caused
+   * 2026-11-25). */
+  prompt: (sessionID: string, text: string, messageID: string) => Promise<unknown>;
   /** Poll interval in ms. 0 disables the loop. Default 5000. */
   intervalMs?: number;
   /** Minimum delay between two consecutive wake prompts per mailbox. Default 60000. */
@@ -253,6 +260,7 @@ export function startWakeLoop(options: WakeOptions): WakeHandle {
           await options.prompt(
             box.session_id,
             preview === "" ? `mesh: ${fresh} unread` : `mesh: ${fresh} unread — "${preview}"`,
+            `msg_${randomUUID()}`,
           );
         } catch (error) {
           // The prompt never queued: drop the gate so the next tick may retry.
