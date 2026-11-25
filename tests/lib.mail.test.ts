@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   ackMessages,
@@ -14,6 +14,8 @@ import {
   wakeBoxStats,
   ackInbox,
   withTransaction,
+  mailboxByName,
+  mergeFederatedRegistry,
   RESEND_WINDOW_MS,
 } from "../src/lib/mail.js";
 
@@ -60,15 +62,15 @@ describe("withTransaction (the txn hygiene the ghost hunt demanded)", () => {
     db.close();
   });
 
-  it("refuses to nest on a leaked outer transaction (loud, not silent)", () => {
+  it("refuses to nest on a leaked outer transaction (loud, and recovered)", () => {
     const db = openMeshDb(":memory:");
     db.conn.exec("BEGIN");
     expect(() => withTransaction(db, () => 1)).toThrow(/leaked|already open/i);
-    // The caller's own transaction is the caller's business: the guard threw
-    // before its own BEGIN, so it is still open — documented.
-    expect(db.conn.inTransaction()).toBe(true);
-    db.conn.exec("ROLLBACK");
+    // 0.30.0: the guard recovers the leak (the connection rebuilt in place)
+    // before throwing — the frozen-snapshot class dies with the error.
     expect(db.conn.inTransaction()).toBe(false);
+    // The connection is usable again: a clean transaction runs.
+    expect(withTransaction(db, () => "ok")).toBe("ok");
     db.close();
   });
 
@@ -596,6 +598,170 @@ describe("resend dedup window (0.29.0: the minutes-apart re-send class)", () => 
       [1000 + RESEND_WINDOW_MS + 1 - RESEND_WINDOW_MS],
     );
     expect(stale?.n).toBe(0);
+    db.close();
+  });
+});
+
+describe("withTransaction: the rollback-failure recovery (0.30.0)", () => {
+  it("reopens the connection when the ROLLBACK itself fails (the leak dies)", () => {
+    let leaked = false;
+    const conn = {
+      all: () => [],
+      get: () => null,
+      run: () => {},
+      exec: (sql: string) => {
+        if (sql === "ROLLBACK") {
+          // The rollback fails AND leaves the transaction open (the leak).
+          leaked = true;
+          throw new Error("rollback failed: connection mid-teardown");
+        }
+        if (sql === "BEGIN") {
+          if (leaked) throw new Error("transaction already open: the leak the reopen must clear");
+        }
+      },
+      inTransaction: () => leaked,
+      close: () => {},
+    };
+    const reopen = vi.fn(() => {
+      leaked = false;
+    });
+    const db = {
+      conn,
+      path: "/tmp/does-not-matter/mesh.db",
+      reopen,
+    } as unknown as Parameters<typeof withTransaction>[0];
+    expect(() =>
+      withTransaction(db, () => {
+        throw new Error("boom");
+      }),
+    ).toThrow("boom");
+    // The rollback failed, the txn state was unknown: the reopen ran (the
+    // leak cleared), the connection is usable again.
+    expect(db.reopen).toHaveBeenCalled();
+  });
+});
+
+describe("withTransaction: the third recovery surface (0.30.0 review)", () => {
+  it("recovers when the transaction is still open after a successful rollback path", () => {
+    // The engine-quirk class: the COMMIT ran, the ROLLBACK path never threw,
+    // yet inTransaction flips true after the call (the finally surface). The
+    // mock is sequence-aware: false at the entry guard, true at the finally.
+    const reopen = vi.fn(() => {});
+    let inTransactionCalls = 0;
+    const conn = {
+      all: () => [],
+      get: () => null,
+      run: () => {},
+      exec: () => {},
+      inTransaction: () => inTransactionCalls++ > 0,
+      close: () => {},
+    };
+    const db = {
+      conn,
+      path: "/tmp/does-not-matter/mesh.db",
+      reopen,
+    } as unknown as Parameters<typeof withTransaction>[0];
+    const result = withTransaction(db, () => "value");
+    expect(result).toBe("value");
+    // The finally check saw the stuck transaction and recovered.
+    expect(reopen).toHaveBeenCalled();
+  });
+});
+
+describe("registry federation (0.30.0)", () => {
+  it("a federated row never wakes a foreign session (node_id marks it)", () => {
+    const db = openMeshDb(":memory:");
+    registerMailbox(db, { name: "local", session_id: "s1", now: 1000 });
+    // The federated row: pushed by ricinus (the node_id = the sender).
+    mergeFederatedRegistry(
+      db,
+      [
+        {
+          name: "sysops",
+          session_id: "ses-foreign",
+          role: "ops",
+          pools: '["team:infra"]',
+          primary_pool: "team:infra",
+          registered_at: Date.now() - 1000,
+        },
+      ],
+      "node-ricinus",
+    );
+    const stats = wakeBoxStats(db).find((s) => s.box === "sysops");
+    // No unread mail: the federated box never wakes anyone (the wake skips
+    // the foreign session_id via sessionKnown).
+    expect(stats).toBeUndefined();
+    db.close();
+  });
+
+  it("the merge resolves mesh_send addressing cross-node (the federated row)", () => {
+    const db = openMeshDb(":memory:");
+    registerMailbox(db, { name: "local", session_id: "s1", now: 1000 });
+    mergeFederatedRegistry(
+      db,
+      [
+        {
+          name: "sysops",
+          session_id: "ses-foreign",
+          role: "ops",
+          pools: '["team:infra"]',
+          primary_pool: "team:infra",
+          registered_at: Date.now() - 1000,
+        },
+      ],
+      "node-ricinus",
+    );
+    const row = mailboxByName(db, "sysops");
+    expect(row).not.toBeNull();
+    db.close();
+  });
+
+  it("the single-writer rule: this node's names never lose to an inbound row", () => {
+    const db = openMeshDb(":memory:");
+    registerMailbox(db, { name: "local", session_id: "s1", now: 1000 });
+    // An inbound row for OUR name with a NEWER registration: the ownership
+    // transfers (the explicit rebind on the other side).
+    const applied = mergeFederatedRegistry(
+      db,
+      [
+        {
+          name: "local",
+          session_id: "ses-foreign",
+          role: "ops",
+          pools: "[]",
+          primary_pool: null,
+          // The strictly newer registration: the ownership transfers.
+          registered_at: Date.now() - 500,
+        },
+      ],
+      "node-ricinus",
+    );
+    expect(applied).toBe(1);
+    const row = mailboxByName(db, "local");
+    expect(row?.session_id).toBe("ses-foreign");
+    db.close();
+  });
+
+  it("an older inbound row for our name loses the LWW (the local keeps it)", () => {
+    const db = openMeshDb(":memory:");
+    registerMailbox(db, { name: "local", session_id: "s1", now: 5000 });
+    const applied = mergeFederatedRegistry(
+      db,
+      [
+        {
+          name: "local",
+          session_id: "ses-foreign",
+          role: "ops",
+          pools: "[]",
+          primary_pool: null,
+          registered_at: 1000,
+        },
+      ],
+      "node-ricinus",
+    );
+    expect(applied).toBe(0);
+    const row = mailboxByName(db, "local");
+    expect(row?.session_id).toBe("s1");
     db.close();
   });
 });

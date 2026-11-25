@@ -288,6 +288,7 @@ describe("presence and purge", () => {
     expect(boxes).toEqual([
       {
         name: "qm",
+        node_id: null,
         session_id: "s1",
         role: "manager",
         pools: ["team:x"],

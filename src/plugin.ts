@@ -15,7 +15,7 @@ import { reconcileWorkers } from "./lib/workers.js";
 import { startMeshServer } from "./lib/serve.js";
 import { nodeTlsMaterial } from "./lib/tls.js";
 import { startMemorySyncPusher } from "./lib/memory-sync.js";
-import { buildToolSpecs } from "./tools.js";
+import { buildToolSpecs, WORKER_TOOL_BLOCKLIST } from "./tools.js";
 import { createHostCapa } from "./lib/capa.js";
 
 export { defaultDataDir, parseOptions } from "./options.js";
@@ -84,14 +84,18 @@ export const MeshPlugin: Plugin = async (input, rawOptions?: PluginOptions) => {
           spawnFn: options.spawnFn ?? nodeSpawn,
           addressing: addressingOptions(options),
           ...(options.spawnMax !== undefined ? { spawnMax: options.spawnMax } : {}),
-        }).map((spec) => [
-          spec.name,
-          tool({
-            description: spec.description,
-            args: zodShape(spec),
-            execute: (args, context) => spec.execute(args as Record<string, unknown>, context),
-          }),
-        ]),
+        })
+          // The 0.30.0 worker surface: the v1 enrolled child drops the
+          // orchestration tools too (the same blocklist as the v2).
+          .filter((spec) => child !== "enrolled" || !WORKER_TOOL_BLOCKLIST.has(spec.name))
+          .map((spec) => [
+            spec.name,
+            tool({
+              description: spec.description,
+              args: zodShape(spec),
+              execute: (args, context) => spec.execute(args as Record<string, unknown>, context),
+            }),
+          ]),
       ),
     };
     return {

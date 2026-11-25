@@ -25,7 +25,9 @@ import {
   MESSAGE_TTL_MS,
   purgeExpired,
   receiveMessage,
+  mergeFederatedRegistry,
   unreadCount,
+  withTransaction,
 } from "./mail.js";
 import type { Fanout } from "./fanout.js";
 import { receiveMemorySync } from "./memory-sync.js";
@@ -278,6 +280,58 @@ async function handle(
       json(res, 200, { accepted });
     } catch {
       json(res, 500, { error: "memory-sync storage failed" });
+    }
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/registry-sync") {
+    // Registry federation (0.30.0): a paired peer pushes its LOCAL mailbox
+    // rows at rebind (mesh_register/mesh_join). Authentication runs through
+    // the same pairing machinery as /mail (the token + the proof headers);
+    // the authenticated peer's node id owns every row it pushes. The merge
+    // is the LWW single-writer: this node's own names never lose to an
+    // inbound row (the ownership transfers only through a strictly newer
+    // registration — an explicit rebind on the other side).
+    const body = await readBody(req, 256 * 1024);
+    if ("error" in body) {
+      json(res, body.error === "too_large" ? 413 : 400, {
+        error: body.error === "too_large" ? "body too large" : "malformed request body",
+      });
+      return;
+    }
+    const peer = authenticate(
+      db,
+      req,
+      typeof req.headers["x-mesh-sender"] === "string" ? req.headers["x-mesh-sender"] : null,
+      typeof req.headers["x-mesh-proof"] === "string" ? req.headers["x-mesh-proof"] : undefined,
+    );
+    if (!peer) {
+      json(res, 401, { error: "unauthorized" });
+      return;
+    }
+    let rows: unknown;
+    try {
+      const parsed = JSON.parse(body.body) as { registry?: unknown };
+      rows = parsed.registry;
+    } catch {
+      json(res, 400, { error: "malformed request body" });
+      return;
+    }
+    if (!Array.isArray(rows)) {
+      json(res, 400, { error: "registry must be an array" });
+      return;
+    }
+    try {
+      const applied = withTransaction(db, () =>
+        mergeFederatedRegistry(
+          db,
+          rows as Parameters<typeof mergeFederatedRegistry>[1],
+          peer.node_id,
+        ),
+      );
+      json(res, 200, { applied });
+    } catch {
+      json(res, 500, { error: "registry merge failed" });
     }
     return;
   }

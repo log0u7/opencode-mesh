@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import { basename } from "node:path";
 import { randomUUID } from "node:crypto";
-import { postPairCode, postSpawn, sendMail } from "./lib/client.js";
+import { postPairCode, postRegistrySync, postSpawn, sendMail } from "./lib/client.js";
 import { buildSpawnRequest, validateSpawnSpec, type SpawnSpec } from "./lib/distant-spawn.js";
 import type { MeshDb } from "./lib/db.js";
 import type { Fanout } from "./lib/fanout.js";
@@ -15,6 +15,7 @@ import {
   leavePool,
   listMailboxes,
   mailboxesBySession,
+  localRegistryRows,
   mailboxByName,
   mailboxBySession,
   poolExists,
@@ -156,6 +157,40 @@ function sessionID(context: ToolContext): string {
     : "";
 }
 
+/** The registry federation push (0.30.0): the local mailbox rows travel to
+ * every paired peer (best-effort — a failed push retries at the next
+ * rebind). The counterpart lives at POST /registry-sync on each peer. */
+function pushRegistryToPeers(db: MeshDb, identity: NodeIdentity): void {
+  const rows = localRegistryRows(db);
+  if (rows.length === 0) return;
+  for (const peer of listPeers(db)) {
+    const conn = resolvePeerTarget(db, peer.node_id);
+    if (conn === null) continue;
+    void postRegistrySync({
+      url: conn.url,
+      ...(conn.tls ? { tls: true } : {}),
+      ...(conn.pk !== null ? { pk: conn.pk } : {}),
+      token: peer.token ?? "",
+      from: identity.node_id,
+      proof: pairingProof(identity, peer.token ?? ""),
+      registry: rows,
+    }).catch(() => {});
+  }
+}
+
+/** The orchestration tools stay off a WORKER's surface (0.30.0): an enrolled
+ * child registers, drains, waits, replies and reads the journal — it does not
+ * spawn, pair, or manage workers (about 4k characters less on every request
+ * of every worker). Shared by the v1 and v2 plugin surfaces. */
+export const WORKER_TOOL_BLOCKLIST = new Set([
+  "mesh_spawn",
+  "mesh_pair",
+  "mesh_workers",
+  "mesh_worker_logs",
+  "mesh_worker_stop",
+  "mesh_worker_remove",
+]);
+
 export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
   const {
     db,
@@ -282,6 +317,7 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
               addresses: [counter.address ?? candidate.url.replace(/^https?:\/\//, "")],
               public_key: counter.pk,
             });
+            pushRegistryToPeers(db, identity);
             return [
               `pairé des deux côtés avec ${peerLabelShort(counter.node_id, counter.hostname)}`,
               `peer fingerprint: ${keyFingerprint(counter.pk)} (TOFU pinning: check this fingerprint if you're paranoid)`,
@@ -310,6 +346,7 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
             hostname: identity.hostname,
             address: `${serverAddress}:${port}`,
           });
+          pushRegistryToPeers(db, identity);
           return [
             `pairé avec ${peerLabelShort(parsed.node_id, parsed.hostname)}. Contre-offre pour l'autre côté: mesh_pair(offer="${counter}")`,
             `peer fingerprint: ${keyFingerprint(parsed.pk)} (TOFU pinning: check this fingerprint if you're paranoid)`,
@@ -385,6 +422,7 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
         // A declared primary that the box has not joined yet is joined here:
         // one call settles the box, the role and the primary group (idempotent).
         if (primary.length > 0) joinPool(db, name, primary);
+        pushRegistryToPeers(db, identity);
         return `mailbox ${name} registered for this session`;
       },
     },
@@ -439,6 +477,7 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
               via: [],
               ...(wake ? { wake: true } : {}),
             });
+            pushRegistryToPeers(db, identity);
             return JSON.stringify(
               { id: origin, recipients: [], forwarded: forwardedOnly },
               null,
@@ -446,6 +485,45 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
             );
           }
           if (!result.ok) {
+            // The federated resolution (0.30.0): an unknown LOCAL box with a
+            // FEDERATED registry row (node_id = the owning peer) routes the
+            // DM to that peer — the same contract as peer + to, resolved by
+            // name. The peer resolves its own box at arrival.
+            if (result.error === "unknown_mailbox") {
+              const federated = db.conn.get<{
+                node_id: string;
+                name: string;
+              }>("SELECT node_id, name FROM mailboxes WHERE name = ? AND node_id IS NOT NULL", [
+                to,
+              ]);
+              if (federated) {
+                const target = findSendablePeer(db, federated.node_id);
+                if (target) {
+                  const conn = resolvePeerTarget(db, target.node_id);
+                  if (conn && !(conn.tls && conn.pk === null)) {
+                    const sent = await sendMail({
+                      url: conn.url,
+                      ...(conn.tls ? { tls: true } : {}),
+                      ...(conn.pk !== null ? { pk: conn.pk } : {}),
+                      token: target.token ?? "",
+                      from: identity.node_id,
+                      subject: String(args.subject),
+                      body: String(args.body),
+                      to: federated.name,
+                      ...(from_box !== null ? { from_box } : {}),
+                      ...(typeof args.reply_to === "string" && args.reply_to.length > 0
+                        ? { reply_to: args.reply_to }
+                        : {}),
+                      proof: pairingProof(identity, target.token ?? ""),
+                    });
+                    if (sent === "unreachable") {
+                      mesh.rebrowse?.();
+                    }
+                    return `sent to ${target.node_id}: ${sent}`;
+                  }
+                }
+              }
+            }
             return result.error === "unknown_mailbox"
               ? `error: unknown mailbox/pool ${to}`
               : `error: broadcast ${to} has no recipients`;
@@ -642,6 +720,7 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
         }
         const pool = String(args.pool);
         joinPool(db, box.name, pool);
+        pushRegistryToPeers(db, identity);
         return `joined ${pool}`;
       },
     },
@@ -724,33 +803,28 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
     {
       name: "mesh_spawn",
       description:
-        "Run a task as a headless background worker. Three spawn modes: session (default — the child runs in this host's natural context), project (project=<dir> — the child runs in that existing directory, git or not; a non-git project is still a project), worktree (worktree=true + project=<dir> — the git isolation, opt-in). With name: births an ENROLLED fleet agent instead — the child keeps the mesh tools, self-enrolls (mesh_register/mesh_join) at its first turn and joins the pools. Name collisions hand the mailbox over: last binder wins. Refuses past the enrolled spawn quota (spawnMax, default 4 running). With node=<paired peer>: the enrolled agent is born ON THAT PEER instead — the request is signed with this node's key, the peer runs its own enrolled-spawn path (same three modes; project must exist there) and DMs back an ack; the worker lives on the peer's registry (reap it there), local spawnMax does not apply.",
+        "Run a task as a headless background worker. Modes: session (default, this host's context), project (project=<dir>, git or not), worktree (worktree=true + project=<dir>, git isolation). " +
+        "name= births an ENROLLED fleet agent: it keeps the mesh tools, self-enrolls on its first turn and joins pools; a name collision hands the mailbox over (last binder wins); refused past spawnMax (default 4 running). " +
+        "node=<paired peer> births the enrolled agent ON that peer: signed request, same modes (project must exist there), ack by DM; it lives in the peer's registry (reap it there) and local spawnMax does not apply.",
       fields: [
         str("task", "Task for the worker"),
         str(
           "name",
-          "Enrolled spawn: the child's mailbox name (letters, digits, . _ -; max 64); names the worktree/branch in worktree mode",
+          "Enrolled: mailbox name ([A-Za-z0-9._-], max 64); also names the worktree branch",
           false,
         ),
-        str("role", "Enrolled spawn: fleet role (default worker)", false),
-        strArr(
-          "pools",
-          "Enrolled spawn: pool ids to join; the first becomes the primary group",
-          false,
-        ),
-        str("node", "Paired peer (node id or hostname): spawn the enrolled agent THERE", false),
+        str("role", "Enrolled: fleet role (default worker)", false),
+        strArr("pools", "Enrolled: pools to join, first = primary", false),
+        str("node", "Paired peer (node id or hostname) to spawn on", false),
         str(
           "project",
-          "Spawn mode project: run the child in this directory (must exist on the target host; git or not). With worktree=true: the source repo for the worktree",
+          "Directory on the target host (git or not); with worktree=true, the source repo",
           false,
         ),
-        bool(
-          "worktree",
-          "Spawn mode worktree (requires project=): isolate the child in a git worktree",
-        ),
-        str("model", "Worker provider/model (local spawn only)", false),
-        str("agent", "Agent for the worker (local spawn only)", false),
-        bool("auto", "Grant all permissions (default true; local spawn only)"),
+        bool("worktree", "Isolate in a git worktree (requires project)"),
+        str("model", "provider/model (local only)", false),
+        str("agent", "Agent (local only)", false),
+        bool("auto", "Grant all permissions (default true, local only)"),
       ],
       execute: async (args, context) => {
         const name = typeof args.name === "string" && args.name.length > 0 ? args.name : undefined;

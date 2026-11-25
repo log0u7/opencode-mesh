@@ -5,6 +5,53 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.30.0] - 2026-11-25
+
+### Added
+
+- The registry federation: a paired peer pushes its LOCAL mailbox rows at
+  rebind (mesh_register/mesh_join) and at pairing completion (POST
+  /registry-sync, the pairing auth); the merge is the LWW single-writer per
+  name — the ownership conflict resolves on (registered_at, node_id), the
+  local names never lose except through a strictly newer registration, the
+  inbound registered_at is bounded ([-1h, +5 min skew]) and a LIVE local
+  session keeps its name (the two-orq fight resolves: each keeps its own).
+  The federated boxes are ADDRESSING-ONLY (never delivery targets, never
+  woken, excluded from the pools and the wake stats): a mesh_send to a
+  federated name without a peer routes to the owning peer. Each push is the
+  sender's full state (the stale federated rows die). The schema v15/v16
+  (mailboxes.node_id + registered_at, backfilled).
+- The wake resilience: the failed ticks back off exponentially (capped
+  5 min) instead of stopping the loop forever; the reminder backoff doubles
+  the mute TTL per cycle (10 -> 20 -> 40 -> 80 min cap); a box starved
+  through 3 mute cycles alerts the orchestrator mailbox (escalateTo,
+  default orq) once per starvation period; the operational warnings land
+  in plugin.log beside the store (console.warn is /dev/null under
+  serve --service).
+- The enrolled-worker surface drops the orchestration tools (mesh_spawn,
+  mesh_pair, mesh_worker_*): a worker registers, drains, waits, replies
+  and reads the journal — about 4k characters less on every request of
+  every worker (the v1 and v2 surfaces).
+- mesh_spawn's definition tightened (about 550 characters less per
+  request).
+
+### Fixed
+
+- The leaked-transaction recovery: a ROLLBACK that itself fails left the
+  transaction open (0.28.2 swallowed the failure silently) — the connection
+  read a frozen WAL snapshot forever and the wake loop re-prompted read
+  mail (seen live TWICE: the lock held on the mesh.db-shm read-mark byte
+  for hours, one real mail re-flashing six times). The connection now
+  rebuilds in place on every leaked-transaction surface (the guard, the
+  failed rollback, the post-call check) and the warn lands in a real
+  plugin log (`plugin.log` beside the store — console.warn is /dev/null
+  under `serve --service`). The wake loop probes with a noop transaction
+  every tick: a leak is detected and recovered within one poll interval.
+- `MeshDb` gains `path` and `reopen()`. The instance lives on — this is
+  NOT the rejected conn-level self-heal: it never reopens after an
+  explicit close, and it exists to keep this instance honest, not to
+  revive a disposed one.
+
 ## [0.29.2] - 2026-11-25
 
 ### Fixed

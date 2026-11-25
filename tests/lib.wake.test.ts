@@ -1,5 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 import { openMeshDb } from "../src/lib/db.js";
 import { deliverMessage, joinPool, registerMailbox, unreadBoxCount } from "../src/lib/mail.js";
 import {
@@ -174,7 +178,7 @@ describe("createExecutionTracker (the host's real session-status events)", () =>
 describe("wake collapse gate (at most one prompt in flight per session)", () => {
   it("does not queue a second prompt while the first is in flight", async () => {
     const { db, prompt, prompts, sessionKnown } = setup(["s1"]);
-    let running = false;
+    const running = false;
     registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
     deliverMessage(db, { from: "n", to_box: "a", subject: "s", body: "b", created_at: 1000 });
     const handle = startWakeLoop({
@@ -644,9 +648,10 @@ describe("wake guards (0.18.0)", () => {
 });
 
 describe("wake tick failures", () => {
-  it("logs each failed tick and stops the loop after MAX_TICK_FAILURES", async () => {
+  it("backs off on failed ticks instead of stopping — and warns to the plugin log", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const db = openMeshDb(":memory:");
+    const dir = mkdtempSync(join(tmpdir(), "wake-backoff-"));
+    const db = openMeshDb(join(dir, "mesh.db"));
     registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
     deliverMessage(db, { from: "n", to_box: "a", subject: "s", body: "b", created_at: 1000 });
     db.close(); // A hot-swapped orphan instance owns a closed database.
@@ -659,16 +664,19 @@ describe("wake tick failures", () => {
       cooldownMs: 0,
     });
     await vi.waitFor(() => {
-      expect(warn.mock.calls.some((c) => String(c[0]).includes("wake loop stopped"))).toBe(true);
+      const log = readFileSync(join(dir, "plugin.log"), "utf8");
+      expect(log).toContain("wake tick failed 5 times — backing off");
     });
     handle.stop();
 
-    const stopMessages = warn.mock.calls.filter((c) =>
-      String(c[0]).includes("wake loop stopped after 5 consecutive tick failures"),
-    );
-    expect(stopMessages).toHaveLength(1);
-    expect(warn.mock.calls.some((c) => String(c[0]).includes("wake tick failed (1/5)"))).toBe(true);
+    // The 0.30.0 contract: the loop NEVER stops (the 0.28.x hard stop
+    // starved every box forever) — the backoff warns land in the plugin
+    // log, not in /dev/null.
+    const log = readFileSync(join(dir, "plugin.log"), "utf8");
+    expect(log).not.toContain("wake loop stopped");
+    expect(log).toContain("backing off to");
     warn.mockRestore();
+    rmSync(dir, { recursive: true, force: true });
   });
 
   it("keeps polling when a failure is followed by success", async () => {
@@ -900,4 +908,95 @@ describe("phantom unread counter (0.24.6): the displayed count is the database's
     }
     db.close();
   });
+});
+
+describe("the wake loop: the transaction-leak probe (0.30.0)", () => {
+  it("detects and recovers a leaked BEGIN on the next tick", async () => {
+    const { db, prompt, sessionKnown } = setup(["s1"]);
+    registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
+    // Simulate the leak: a BEGIN left open on the connection.
+    db.conn.exec("BEGIN");
+    expect(db.conn.inTransaction()).toBe(true);
+    const handle = startWakeLoop({ db, prompt, sessionKnown, intervalMs: 20 });
+    await new Promise((r) => setTimeout(r, 100));
+    handle.stop();
+    // The probe ran the guard, hit the leak, reopened: the connection is
+    // clean and the loop kept working (no silent frozen view).
+    expect(db.conn.inTransaction()).toBe(false);
+  });
+});
+
+describe("the active escalation (0.30.0)", () => {
+  it("alerts orq once per starvation period after 3 mute cycles", async () => {
+    vi.useFakeTimers();
+    try {
+      const { db, prompt, sessionKnown } = setup(["s1"]);
+      registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
+      registerMailbox(db, { name: "orq", session_id: "s-orq", now: 1000 });
+      deliverMessage(db, { from: "n", to_box: "a", subject: "s", body: "b", created_at: 1000 });
+      const handle = startWakeLoop({
+        db,
+        prompt,
+        sessionKnown,
+        sessionRunning: () => false,
+        // One minute per tick: the mute cycles (minutes) advance in a few
+        // dozen ticks instead of tens of thousands.
+        intervalMs: 60_000,
+        cooldownMs: 0,
+      });
+      // The first window: 3 prompts exhaust the fatigue counter (the mute
+      // begins, cycle 0).
+      await vi.advanceTimersByTimeAsync(3 * 60_000);
+      // The mute TTL doubles per cycle: 10 min -> 20 -> 40 -> 80. The 4th
+      // expiry crosses ESCALATE_AFTER_MUTE_CYCLES (3): the alert fires once.
+      await vi.advanceTimersByTimeAsync(11 * 60_000);
+      await vi.advanceTimersByTimeAsync(21 * 60_000);
+      await vi.advanceTimersByTimeAsync(41 * 60_000);
+      await vi.advanceTimersByTimeAsync(81 * 60_000);
+      handle.stop();
+      const orqMail = db.conn.get<{ n: number }>(
+        "SELECT COUNT(*) AS n FROM deliveries WHERE to_box = 'orq' AND status = 'unread'",
+      );
+      expect(orqMail?.n).toBe(1);
+      // One alert per period: further mutes do not re-alert (the escalated
+      // flag clears only on a drain).
+      const orqAll = db.conn.get<{ n: number }>(
+        "SELECT COUNT(*) AS n FROM deliveries WHERE to_box = 'orq'",
+      );
+      expect(orqAll?.n).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  }, 30_000);
+
+  it("skips the escalation with a plugin.log warn when orq is absent", async () => {
+    vi.useFakeTimers();
+    try {
+      const dir = mkdtempSync(join(tmpdir(), "wake-escalate-"));
+      const db = openMeshDb(join(dir, "mesh.db"));
+      registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
+      // NO orq mailbox on this node: the escalation skips.
+      deliverMessage(db, { from: "n", to_box: "a", subject: "s", body: "b", created_at: 1000 });
+      const handle = startWakeLoop({
+        db,
+        prompt: async () => {},
+        sessionKnown: () => true,
+        sessionRunning: () => false,
+        intervalMs: 60_000,
+        cooldownMs: 0,
+      });
+      await vi.advanceTimersByTimeAsync(3 * 60_000);
+      await vi.advanceTimersByTimeAsync(11 * 60_000);
+      await vi.advanceTimersByTimeAsync(21 * 60_000);
+      await vi.advanceTimersByTimeAsync(41 * 60_000);
+      await vi.advanceTimersByTimeAsync(81 * 60_000);
+      handle.stop();
+      const log = readFileSync(join(dir, "plugin.log"), "utf8");
+      expect(log).toContain("escalation skipped");
+      // No orq box in this fixture: no DM could have landed anyway.
+      rmSync(dir, { recursive: true, force: true });
+    } finally {
+      vi.useRealTimers();
+    }
+  }, 30_000);
 });

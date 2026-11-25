@@ -367,14 +367,16 @@ describe("formatMeshSidebarCollapsed (v4)", () => {
   it("pluralizes the counters in the unified grammar (1 Agent · 1 Pool · 1 Host, 11 Agents)", () => {
     const s = snapshot();
     s.hats = s.hats.map((h) => ({ ...h, unread: 0 }));
-    s.mailboxes = [s.mailboxes[0]!];
+    s.mailboxes = s.mailboxes.slice(0, 1);
     s.pools = { "team:purser": ["purser"] };
     s.peers = [];
     expect(renderLine(formatMeshSidebarCollapsed(s))).toBe("▶ Mesh ·1 Agent ·1 Pool ·1 Host");
     const counters = formatMeshSidebarExpanded(s).find((l) => renderLine(l).startsWith("  ⌂  "));
     expect(renderLine(counters)).toBe("  ⌂  1 agent · 1 pool · 1 host");
+    const base = s.mailboxes[0];
+    if (!base) throw new Error("fixture: no mailbox");
     s.mailboxes = Array.from({ length: 11 }, (_, i) => ({
-      ...s.mailboxes[0]!,
+      ...base,
       name: `mailbox-${i}`,
     }));
     expect(renderLine(formatMeshSidebarCollapsed(s))).toBe("▶ Mesh ·11 Agents ·1 Pool ·1 Host");

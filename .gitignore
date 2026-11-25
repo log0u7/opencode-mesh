@@ -16,6 +16,7 @@ yarn-error.log*
 *.db-journal
 *.db-wal
 *.db-shm
+plugin.log
 
 # Environment / secrets
 .env

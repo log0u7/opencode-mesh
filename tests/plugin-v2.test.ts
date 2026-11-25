@@ -247,10 +247,31 @@ describe("opencode-mesh v2 setup", () => {
       const { ctx, added } = fakeCtx(tmpDataDir());
       const cleanup = await pluginModule.setup(ctx);
 
-      // Fleet agent: same tool surface as a host session, but the setup never
-      // touched ctx.session, ctx.rpc or ctx.event (no wake loop, no rpc, no
-      // guidance — a one-shot worker needs none).
-      expect(added.map((t) => t.name).sort()).toEqual(TOOL_NAMES);
+      // Fleet agent: the worker surface (0.30.0) — the orchestration tools
+      // stay off a worker's skin (mesh_spawn, mesh_pair, mesh_worker_*):
+      // a worker registers, drains, waits, replies and reads the journal.
+      // The setup never touched ctx.session, ctx.rpc or ctx.event (no wake
+      // loop, no rpc, no guidance — a one-shot worker needs none).
+      const workerToolNames = added.map((t) => t.name).sort();
+      for (const blocked of [
+        "mesh_spawn",
+        "mesh_pair",
+        "mesh_workers",
+        "mesh_worker_logs",
+        "mesh_worker_stop",
+        "mesh_worker_remove",
+      ]) {
+        expect(workerToolNames).not.toContain(blocked);
+      }
+      for (const required of [
+        "mesh_register",
+        "mesh_inbox",
+        "mesh_wait",
+        "mesh_send",
+        "mesh_journal",
+      ]) {
+        expect(workerToolNames).toContain(required);
+      }
       await cleanup?.();
     });
   });

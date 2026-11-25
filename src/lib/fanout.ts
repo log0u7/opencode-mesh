@@ -1,4 +1,4 @@
-import { listMailboxes as listLocalMailboxes } from "./mail.js";
+import { listLocalOnlyMailboxes } from "./mail.js";
 import { listPeers, resolvePeerTarget } from "./peers.js";
 import { pairingProof, type NodeIdentity } from "./identity.js";
 import type { MeshDb } from "./db.js";
@@ -53,7 +53,7 @@ export function createFanout(options: FanoutOptions): Fanout {
 
   const localPools = (): Record<string, string[]> => {
     const pools: Record<string, string[]> = {};
-    for (const box of listLocalMailboxes(options.db)) {
+    for (const box of listLocalOnlyMailboxes(options.db)) {
       for (const pool of box.pools) {
         const members = pools[pool] ?? [];
         members.push(box.name);

@@ -5,12 +5,17 @@ import { openSqlite, type SqliteConn } from "./sqlite.js";
 
 export type MeshDb = {
   conn: SqliteConn;
+  /** The store file path (the plugin log lives beside it). */
+  path: string;
+  /** Rebuild the underlying connection in place: the recovery for a leaked
+   * transaction (the frozen-WAL-snapshot class) and a failed rollback. */
+  reopen(): void;
   close(): void;
 };
 
 // Bump when a schema change needs a migration step; the version anchors future
 // migrations that cannot be expressed as idempotent `CREATE ... IF NOT EXISTS`.
-const SCHEMA_VERSION = 14;
+const SCHEMA_VERSION = 16;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS peers (
@@ -141,6 +146,20 @@ function migrate(conn: SqliteConn): void {
   if (!mailboxColumns.includes("bind_key")) {
     conn.exec("ALTER TABLE mailboxes ADD COLUMN bind_key TEXT");
   }
+  // v15: mailboxes.node_id — the registry federation (0.30.0): NULL = this
+  // node owns the box; a node id = a FEDERATED row (the remote registry
+  // pushed at its rebind). Federated boxes resolve mesh_send addressing
+  // cross-node but are never woken (their session_id is foreign).
+  if (!mailboxColumns.includes("node_id")) {
+    conn.exec("ALTER TABLE mailboxes ADD COLUMN node_id TEXT");
+  }
+  // v16: mailboxes.registered_at — the LWW version for the federation merge
+  // (the ownership conflict resolves on (registered_at, node_id); NULL =
+  // unknown age, backfilled from created_at so existing rows keep their age).
+  if (!mailboxColumns.includes("registered_at")) {
+    conn.exec("ALTER TABLE mailboxes ADD COLUMN registered_at INTEGER");
+    conn.exec("UPDATE mailboxes SET registered_at = created_at WHERE registered_at IS NULL");
+  }
   // v5: messages.origin_id (cross-host broadcast dedup).
   if (!messageColumns.includes("origin_id")) {
     conn.exec("ALTER TABLE messages ADD COLUMN origin_id TEXT");
@@ -210,10 +229,62 @@ export function openMeshDb(path: string): MeshDb {
     mkdirSync(dirname(path), { recursive: true });
   }
 
-  const conn = openSqlite(path);
+  let conn = openSqlite(path);
   conn.run("PRAGMA journal_mode = WAL");
   conn.run("PRAGMA busy_timeout = 5000");
   migrate(conn);
 
-  return { conn, close: () => conn.close() };
+  // The delegating connection: every call forwards to the CURRENT engine.
+  // reopen() rebuilds it in place — the recovery for a leaked transaction
+  // (the frozen-WAL-snapshot class) and a failed rollback; the instance
+  // lives on, no orphan is spawned (this is NOT the rejected conn-level
+  // self-heal: it never reopens after an explicit close, and it exists to
+  // keep THIS instance's wake loop honest, not to revive a disposed one).
+  const reopen = () => {
+    if (closedByUs) return;
+    // An in-memory store cannot be rebuilt: a fresh ":memory:" engine is a
+    // different, EMPTY database. Roll the leaked transaction back instead.
+    if (path.includes(":memory:")) {
+      try {
+        conn.exec("ROLLBACK");
+      } catch {}
+      return;
+    }
+    // Open the replacement FIRST, swap, then close the old engine. Closing
+    // first left the instance on a closed engine forever when the reopen
+    // itself failed (EMFILE, disk, permissions): every later call threw and
+    // the probe could never retry. The old engine still closes right here,
+    // so the leaked transaction's fd + shm READ lock die now, not at GC.
+    const fresh = openSqlite(path);
+    try {
+      fresh.run("PRAGMA journal_mode = WAL");
+      fresh.run("PRAGMA busy_timeout = 5000");
+      migrate(fresh);
+    } catch (error) {
+      try {
+        fresh.close();
+      } catch {}
+      throw error;
+    }
+    const old = conn;
+    conn = fresh;
+    try {
+      old.close();
+    } catch {}
+  };
+  let closedByUs = false;
+  const delegating: SqliteConn = {
+    all: (sql, params) => conn.all(sql, params),
+    get: (sql, params) => conn.get(sql, params),
+    run: (sql, params) => conn.run(sql, params),
+    exec: (sql) => conn.exec(sql),
+    inTransaction: () => conn.inTransaction(),
+    close: () => {
+      // The explicit close: the instance is disposed — reopen() must never
+      // revive it (the 0.28.2 orphan invariant, now enforced).
+      closedByUs = true;
+      conn.close();
+    },
+  };
+  return { conn: delegating, path, reopen, close: () => delegating.close() };
 }

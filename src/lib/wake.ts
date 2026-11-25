@@ -1,7 +1,15 @@
 import { randomUUID } from "node:crypto";
 
 import type { MeshDb } from "./db.js";
-import { listMailboxes, unreadBoxCount, wakeBoxStats } from "./mail.js";
+import {
+  deliverMessage,
+  listMailboxes,
+  mailboxByName,
+  unreadBoxCount,
+  wakeBoxStats,
+  withTransaction,
+} from "./mail.js";
+import { pluginWarn, storeLogDir } from "./plugin-log.js";
 
 // The host's mid-turn signal. The live wire (opencode v2, generated client
 // types) carries BOTH families under `data`: session.execution.* (durable
@@ -74,6 +82,9 @@ export type WakeOptions = {
    * count after the turn acked the mail (false positives). Optional: when
    * absent, every existing session is treated as idle. */
   sessionRunning?: (sessionID: string) => boolean;
+  /** The escalation target mailbox (the box starved through
+   * ESCALATE_AFTER_MUTE_CYCLES alerts it). Default "orq". */
+  escalateTo?: string;
   /** Inject a prompt into a session (ctx.session.prompt). The third argument
    * is a generated messageID: the host server honors an explicit id
    * (input.id ?? create) and the transport can retry the call — with a
@@ -111,15 +122,66 @@ export const MAX_UNDRAINED_PROMPTS = 3;
  * TTL the gate would mute the session forever. Worst case after expiry: one
  * duplicate flash per TTL, still bounded by the fatigue guard. */
 export const PROMPT_GATE_TTL_MS = 120_000;
-/** Consecutive failed ticks before the loop stops itself: a closed database
- * (orphaned plugin instance after a hot-swap) or a dead host must not leave a
- * timer spinning silently forever. Reloading the plugin restarts the loop. */
+/** Consecutive failed ticks before the loop backs off: a busy database (the
+ * busy_timeout is 5s with several processes on mesh.db) or a prompt-refusing
+ * host used to STOP the loop forever (the boxes starved silently — the warns
+ * went to /dev/null). The loop now backs off exponentially (capped) and
+ * recovers on the first successful tick. */
 export const MAX_TICK_FAILURES = 5;
+/** The backoff ceiling: the tick interval never exceeds this between
+ * attempts, however many failures stack up. */
+export const TICK_BACKOFF_CAP_MS = 300_000;
 /** How long a fatigued box stays muted before the loop reminds it again: the
  * mute would otherwise starve the box forever (the purge requires a drain,
  * the drain requires a prompt — a session that never reads never unmutes).
  * One reminder per TTL worst case. */
 export const FATIGUE_MUTE_TTL_MS = 600_000;
+/** The mute TTL doubles per consecutive mute cycle (10 -> 20 -> 40 -> 80 min
+ * cap): a blocked or distracted agent that never drains must not cost a full
+ * turn every 10 minutes forever (6 turns/hour under the flat TTL). */
+export const FATIGUE_MUTE_MAX_MS = 4_800_000;
+/** After this many consecutive mute cycles without a drain, the wake alerts
+ * the orchestrator mailbox (when it exists on this node) instead of letting
+ * the box starve silently. One alert per starvation period (cleared on the
+ * first drain). */
+export const ESCALATE_AFTER_MUTE_CYCLES = 3;
+/** The escalation target: the lead's mailbox, resolved in the local registry. */
+
+/** The active escalation (0.30.0): a box muted through ESCALATE_AFTER_MUTE_CYCLES
+ * consecutive cycles without a drain alerts the orchestrator mailbox (when it
+ * exists on this node) — the human-chaired loop then decides. ONE alert per
+ * starvation period (the flag clears on the first drain); the wake itself
+ * never re-prompts the starved box faster than its backoff. */
+function escalateBox(
+  db: MeshDb,
+  escalateTo: string,
+  box: string,
+  cycles: number,
+  subject: string | null,
+  escalated: Map<string, number>,
+): void {
+  if (escalated.has(box)) return;
+  // The orchestrator mailbox resolves first: absent at escalation time =
+  // the skip is LOGGED and the flag stays unset (a late-registered orq
+  // learns of this starvation period on the next cycle boundary).
+  if (!mailboxByName(db, escalateTo)) {
+    pluginWarn(
+      storeLogDir(db.path),
+      `escalation skipped: no '${escalateTo}' mailbox on this node — the box '${box}' stays starved silently`,
+    );
+    return;
+  }
+  escalated.set(box, cycles);
+  deliverMessage(db, {
+    from: "mesh-wake",
+    to_box: escalateTo,
+    subject: `alert: the box '${box}' never drains (${cycles} mute cycles)`,
+    body:
+      `The box '${box}' receives wakeable mail but its session never drains ` +
+      `(the last subject: ${subject ?? "unknown"}). The wake backoff is at its cap. ` +
+      `Action: a check-in from the owning session (mesh_inbox) or a re-register.`,
+  });
+}
 
 export function startWakeLoop(options: WakeOptions): WakeHandle {
   const interval = options.intervalMs ?? DEFAULT_WAKE_INTERVAL_MS;
@@ -129,10 +191,13 @@ export function startWakeLoop(options: WakeOptions): WakeHandle {
   // Token economy (0.16.0): pool broadcasts never wake by default; since
   // 0.17.0 the sender can flag one deliberate broadcast wake:true.
   const wakePools = options.wakePools ?? false;
+  const escalateTo = options.escalateTo ?? "orq";
   const lastPromptAt = new Map<string, number>();
   const lastUnread = new Map<string, number>();
   const undrained = new Map<string, number>();
   const mutedSince = new Map<string, number>();
+  const muteCycles = new Map<string, number>();
+  const escalated = new Map<string, number>();
   // Collapse gate (0.28.0): at most ONE wake prompt in flight per session.
   // The host queue delivers one queued item per idle cycle: a second queued
   // prompt fires later with its count and subject already stale — the
@@ -150,6 +215,19 @@ export function startWakeLoop(options: WakeOptions): WakeHandle {
     if (stopped || ticking) return;
     ticking = true;
     try {
+      // The transaction-leak probe (0.30.0): every tick runs a noop
+      // transaction. The 0.28.2 guard throws on a leaked BEGIN — the leak
+      // pinned the WAL snapshot (the frozen-view class, seen live twice) —
+      // and the probe recovers via the connection reopen, with the warn in
+      // the plugin log. One noop txn per tick is negligible.
+      try {
+        withTransaction(options.db, () => {});
+      } catch (error) {
+        // Bare failure label: the probe cannot know whether an inner
+        // recovery ran — a false "recovered" in the incident log is the
+        // exact misread this file exists to prevent.
+        pluginWarn(storeLogDir(options.db.path), `wake probe: ${String(error)}`);
+      }
       const now = Date.now();
       // One grouped read for the whole host (0.21.0): per-box unread count,
       // wake gate and preview subject used to cost two queries per mailbox
@@ -176,6 +254,8 @@ export function startWakeLoop(options: WakeOptions): WakeHandle {
           lastUnread.delete(box.name);
           undrained.delete(box.name);
           mutedSince.delete(box.name);
+          muteCycles.delete(box.name);
+          escalated.delete(box.name);
           continue;
         }
         const unread = stat.unread;
@@ -189,9 +269,12 @@ export function startWakeLoop(options: WakeOptions): WakeHandle {
           continue;
         }
         lastUnread.set(box.name, unread);
-        // Drained since the last prompt → the fatigue counter resets.
+        // Drained since the last prompt → the fatigue counter resets AND the
+        // escalation re-arms (the contract: one alert per starvation period,
+        // and a drain ended it — the next starvation re-alerts orq).
         if (unread < previous) {
           undrained.delete(box.name);
+          escalated.delete(box.name);
         }
         const cycles = undrained.get(box.name) ?? 0;
         // Fatigue guard: prompted MAX times, never drained, count unchanged
@@ -207,9 +290,18 @@ export function startWakeLoop(options: WakeOptions): WakeHandle {
             mutedSince.set(box.name, now);
             continue;
           }
-          if (now - mutedAt < FATIGUE_MUTE_TTL_MS) continue;
+          // The reminder backoff (0.30.0): each consecutive mute cycle
+          // doubles the TTL (10 -> 20 -> 40 -> 80 min cap) — a blocked agent
+          // costs one reminder per doubling instead of one per 10 minutes.
+          const cycle = muteCycles.get(box.name) ?? 0;
+          const ttl = Math.min(FATIGUE_MUTE_TTL_MS * 2 ** cycle, FATIGUE_MUTE_MAX_MS);
+          if (now - mutedAt < ttl) continue;
+          if (cycle >= ESCALATE_AFTER_MUTE_CYCLES) {
+            escalateBox(options.db, escalateTo, box.name, cycle, stat.subject, escalated);
+          }
           undrained.delete(box.name);
-          mutedSince.delete(box.name);
+          mutedSince.set(box.name, now);
+          muteCycles.set(box.name, cycle + 1);
         }
         // Prompt only on new mail (count grew) and outside the per-mailbox
         // cooldown, so an agent idle in front of unread mail is reminded,
@@ -288,29 +380,42 @@ export function startWakeLoop(options: WakeOptions): WakeHandle {
         // The prompt resolved after dispose: do not touch any further box.
         if (stopped) return;
       }
+      const hadBackoff = failures > 0;
       failures = 0;
+      // A successful tick restores the normal interval (the backoff unwind).
+      if (!stopped && hadBackoff) {
+        clearInterval(timer);
+        timer = setInterval(() => void tick(), interval);
+      }
     } catch (error) {
-      // A failed tick (db busy or closed, host rejecting a prompt) used to be
-      // retried silently forever — which is what made the post-2.4.0 wake
-      // regression invisible. Log each failure; stop after too many in a row.
+      // A failed tick (db busy or closed, host rejecting a prompt) backs off
+      // exponentially (capped) and recovers on the first successful tick —
+      // the 0.28.x hard stop starved every box permanently.
       failures += 1;
       const message = error instanceof Error ? error.message : String(error);
-      console.warn(
-        `[opencode-mesh] wake tick failed (${failures}/${MAX_TICK_FAILURES}): ${message}`,
-      );
-      if (failures >= MAX_TICK_FAILURES && !stopped) {
-        stopped = true;
-        clearInterval(timer);
-        console.warn(
-          `[opencode-mesh] wake loop stopped after ${failures} consecutive tick failures`,
+      // The backoff replaces the old hard stop: a busy database (25 s of
+      // contention starved every box forever under the 0.28.x hard stop) or
+      // a prompt-refusing host must not kill the wake permanently — the loop
+      // retries on an exponential schedule (capped) and recovers on the
+      // first successful tick. The warns land in the plugin log
+      // (console.warn is /dev/null under serve --service).
+      const backoff = Math.min(interval * 2 ** failures, TICK_BACKOFF_CAP_MS);
+      if (failures >= MAX_TICK_FAILURES) {
+        pluginWarn(
+          storeLogDir(options.db.path),
+          `wake tick failed ${failures} times — backing off to ${Math.round(backoff / 1000)}s: ${message}`,
         );
+      }
+      if (!stopped && backoff > interval) {
+        clearInterval(timer);
+        timer = setInterval(() => void tick(), backoff);
       }
     } finally {
       ticking = false;
     }
   };
 
-  const timer = setInterval(() => void tick(), interval);
+  let timer: ReturnType<typeof setInterval> = setInterval(() => void tick(), interval);
   return {
     stop: () => {
       stopped = true;
