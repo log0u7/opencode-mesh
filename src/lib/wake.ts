@@ -162,9 +162,12 @@ export function startWakeLoop(options: WakeOptions): WakeHandle {
       try {
         withTransaction(options.db, () => {});
       } catch (error) {
+        // Bare failure label: the probe cannot know whether an inner
+        // recovery ran — a false "recovered" in the incident log is the
+        // exact misread this file exists to prevent.
         pluginWarn(
           options.db.path ? dirname(options.db.path) : undefined,
-          `wake probe: the leaked transaction recovered — ${String(error)}`,
+          `wake probe: ${String(error)}`,
         );
       }
       const now = Date.now();

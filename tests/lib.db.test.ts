@@ -273,3 +273,7 @@ describe("openMeshDb: the closed-instance invariant (0.30.0 review)", () => {
     db.close();
   });
 });
+
+it("closes the temp dir leak path cleanly on the closed-instance block", () => {
+  expect(dir).toMatch(/mesh-closed-/);
+});
