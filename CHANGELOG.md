@@ -5,6 +5,17 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.29.2] - 2026-11-25
+
+### Fixed
+
+- The collapsed mesh sidebar adopts the unified panel grammar (shared
+  with the memory panel): compact separators, the labels capitalized and
+  pluralized (1 Agent / 14 Agents), unread lowercase and never
+  pluralized, no glyphs in fold. The two branches (mail pending / quiet
+  inventory) merge into one line: the counters always show, the unread
+  segment appears only when it signals.
+
 ## [0.29.1] - 2026-11-25
 
 ### Added

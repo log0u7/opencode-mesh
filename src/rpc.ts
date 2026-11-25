@@ -172,7 +172,7 @@ export function formatMeshSidebarExpanded(
   const unread = totalUnread(s);
   if (unread > 0) {
     lines.push([
-      { text: "  ● ", tone: "alert" },
+      { text: "  ●  ", tone: "alert" },
       { text: `${unread} unread`, tone: "qualifier" },
     ]);
   } else if (s.hats.length === 0) {
@@ -246,26 +246,25 @@ export function formatMeshSidebarExpanded(
  * toggle glyph (`▶ Mesh`, bold clickable — the expanded header is `▼ Mesh`),
  * restored in 0.24.2 after 0.23.3 dropped it from the conditional lines. */
 export function formatMeshSidebarCollapsed(s: MeshSnapshot): SidebarSegment[] {
+  // The unified panel grammar (2026-11-25, shared with the memory panel):
+  // `▶ <Entity> ·<n> <Label>[s] ·...` — compact separators (the space rides
+  // before the dot), capitalized plural labels, no glyphs in fold (the
+  // labels carry the signals; "unread" stays lowercase — the alert
+  // qualifier). The unread segment appears only when it signals.
   const unread = totalUnread(s);
-  if (unread > 0) {
-    return [
-      { text: "▶ Mesh", tone: "entity" },
-      { text: " ● ", tone: "alert" },
-      { text: `${unread} unread`, tone: "qualifier" },
-    ];
-  }
   const hosts = 1 + s.peers.length;
-  const counts: Array<[number, string]> = [
-    [s.mailboxes.length, "agent"],
-    [Object.keys(s.pools).length, "pool"],
-    [hosts, "host"],
+  const counts: Array<[number, string, boolean]> = [
+    ...(unread > 0 ? [[unread, "unread", false] as [number, string, boolean]] : []),
+    [s.mailboxes.length, "Agent", true],
+    [Object.keys(s.pools).length, "Pool", true],
+    [hosts, "Host", true],
   ];
   const line: SidebarSegment[] = [{ text: "▶ Mesh", tone: "entity" }];
-  for (const [count, label] of counts) {
+  for (const [count, label, capitalize] of counts) {
     line.push(
-      { text: " · ", tone: "value" },
+      { text: " ·", tone: "value" },
       { text: `${count}`, tone: "qualifier" },
-      { text: ` ${plural(label, count)}`, tone: "value" },
+      { text: ` ${capitalize ? plural(label, count) : label}`, tone: "value" },
     );
   }
   return line;
