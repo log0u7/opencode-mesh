@@ -65,6 +65,7 @@ function fakeCtx(
   const added: AddedTool[] = [];
   const rpcHandlers: Record<string, (input: unknown) => Promise<unknown>> = {};
   const prompts: string[] = [];
+  const promptInputs: Array<Record<string, unknown>> = [];
   const hookRegistrations: Array<{ name: string; callback: (input: never) => void }> = [];
 
   const ctx = {
@@ -102,8 +103,9 @@ function fakeCtx(
       get: vi.fn(async (input: { sessionID: string }) =>
         input.sessionID === "s1" ? { sessionID: input.sessionID } : undefined,
       ),
-      prompt: vi.fn(async (input: { sessionID: string; text: string }) => {
+      prompt: vi.fn(async (input: { sessionID: string; text: string; id?: string }) => {
         prompts.push(input.text);
+        promptInputs.push({ ...input });
       }),
       ...(overrides.sessionList !== undefined ? { list: overrides.sessionList } : {}),
     },
@@ -123,7 +125,7 @@ function fakeCtx(
     },
   } as unknown as Plugin.Context;
 
-  return { ctx, added, rpcHandlers, prompts, hookRegistrations };
+  return { ctx, added, rpcHandlers, prompts, promptInputs, hookRegistrations };
 }
 
 const TOOL_NAMES = [
@@ -301,7 +303,7 @@ describe("opencode-mesh v2 setup", () => {
 
   it("wakes an idle restarted session via dynamic instance binding (no static config)", async () => {
     const dir = tmpDataDir();
-    const { ctx, added, rpcHandlers, prompts } = fakeCtx(dir, {
+    const { ctx, added, rpcHandlers, prompts, promptInputs } = fakeCtx(dir, {
       options: { wakeIntervalMs: 20 },
     });
     const cleanup = await pluginModule.setup(ctx as never);
@@ -349,6 +351,14 @@ describe("opencode-mesh v2 setup", () => {
       await new Promise((r) => setTimeout(r, 25));
     }
     expect(prompts.some((t) => t.includes('mesh: 1 unread — "ping"'))).toBe(true);
+
+    // The transport-retry idempotency key (0.28.1): the prompt input carries
+    // the generated id under the key the server reads (`id`), so a retried
+    // call reconciles to the same message instead of spawning a ghost turn.
+    expect(promptInputs.length).toBeGreaterThan(0);
+    for (const input of promptInputs) {
+      expect(input.id).toMatch(/^msg_/);
+    }
 
     await cleanup?.();
   });
