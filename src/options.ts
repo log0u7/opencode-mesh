@@ -28,6 +28,9 @@ export type PluginOptions = {
    * 0.17.0 a sender can flag one broadcast wake:true; this option wakes
    * every broadcast. */
   wakePools?: boolean;
+  /** The escalation target mailbox (the box starved through
+   * ESCALATE_AFTER_MUTE_CYCLES alerts it). Default "orq". */
+  escalateTo?: string;
   /** Serve TLS on the mesh port (default true). */
   tls?: boolean;
   /** Open a documented plain-HTTP side channel on port+1 (default false). */
@@ -152,6 +155,12 @@ export function parseOptions(raw: PluginOptions | undefined): PluginOptions {
       throw new Error("opencode-mesh: options.wakePools must be a boolean");
     }
     options.wakePools = raw.wakePools;
+  }
+  if (raw.escalateTo !== undefined) {
+    if (typeof raw.escalateTo !== "string" || raw.escalateTo.length === 0) {
+      throw new Error("opencode-mesh: options.escalateTo must be a non-empty string");
+    }
+    options.escalateTo = raw.escalateTo;
   }
   if (raw.tls !== undefined) {
     if (typeof raw.tls !== "boolean") {

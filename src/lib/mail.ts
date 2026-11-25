@@ -18,6 +18,10 @@ export type Mailbox = {
   bind_key: string | null;
   primary_pool: string | null;
   last_seen: number;
+  /** NULL = this node owns the box; a node id = a FEDERATED row (the remote
+   * registry pushed at its rebind) — addressing-only, never a delivery
+   * target, never woken. */
+  node_id: string | null;
 };
 
 export type RegisterMailboxInput = {
@@ -118,11 +122,13 @@ function rowToMailbox(row: MailboxRow): Mailbox {
     bind_key: row.bind_key ?? null,
     primary_pool: row.primary_pool ?? null,
     last_seen: row.last_seen,
+    node_id: row.node_id ?? null,
   };
 }
 
 type MailboxRow = {
   name: string;
+  node_id: string | null;
   session_id: string;
   role: string | null;
   pools: string;
@@ -206,6 +212,16 @@ export function mailboxByName(db: MeshDb, name: string): Mailbox | null {
 export function listMailboxes(db: MeshDb): Mailbox[] {
   return db.conn
     .all<MailboxRow>("SELECT * FROM mailboxes ORDER BY created_at ASC")
+    .map(rowToMailbox);
+}
+
+/** The LOCAL mailboxes only (node_id NULL): the delivery targets, the pool
+ * members, the wake subjects. Federated rows (node_id set, pushed by a peer
+ * at its rebind) are ADDRESSING-ONLY — a foreign session never drains
+ * locally, so a local delivery would be a sink (the 0.30.0 review fix). */
+export function listLocalOnlyMailboxes(db: MeshDb): Mailbox[] {
+  return db.conn
+    .all<MailboxRow>("SELECT * FROM mailboxes WHERE node_id IS NULL ORDER BY created_at ASC")
     .map(rowToMailbox);
 }
 
@@ -352,19 +368,23 @@ export function deliverMessage(db: MeshDb, input: DeliverInput): DeliverResult {
 // null = unknown single mailbox. Callers guarantee to_box is set.
 function resolveRecipients(db: MeshDb, input: DeliverInput): string[] | null {
   const target = input.to_box ?? "";
+  // The LOCAL mailboxes only (0.30.0): the federated rows are
+  // addressing-only — a foreign session never drains locally, so delivering
+  // to one is a sink. The unknown_mailbox branch then routes the DM to the
+  // owning peer via the federated resolution.
   if (target === "all") {
-    return listMailboxes(db)
+    return listLocalOnlyMailboxes(db)
       .map((b) => b.name)
       .filter((name) => name !== input.from_box);
   }
   if (target.startsWith("team:")) {
     // Pools are stored under their full "team:<name>" id, matching mesh_join.
-    return listMailboxes(db)
+    return listLocalOnlyMailboxes(db)
       .filter((b) => b.pools.includes(target) && b.name !== input.from_box)
       .map((b) => b.name);
   }
   const box = mailboxByName(db, target);
-  return box ? [box.name] : null;
+  return box && box.node_id === null ? [box.name] : null;
 }
 
 // ---- reading ----
@@ -657,6 +677,7 @@ export function wakeBoxStats(db: MeshDb): WakeBoxStat[] {
                 ORDER BY d3.created_at ASC LIMIT 1) AS subject
        FROM deliveries d JOIN messages m ON m.id = d.message_id
        WHERE d.status = 'unread'
+         AND d.to_box NOT IN (SELECT name FROM mailboxes WHERE node_id IS NOT NULL)
        GROUP BY d.to_box`,
     )
     .map((row) => ({
@@ -716,22 +737,74 @@ export type FederatedRegistryRow = {
  * foreign — sessionKnown false in the wake loop). The sender's own rows are
  * authoritative for its names: the merge is idempotent per row.
  */
+/** The inbound registered_at acceptance window (the PO fix 2): the sender's
+ * clock must be within [now - 1h, now + 5 min skew] — an unbounded timestamp
+ * (9e15, or a clock ahead) would steal every local name via the LWW. */
+const FEDERATED_AT_PAST_TOLERANCE = 60 * 60 * 1000;
+const FEDERATED_AT_FUTURE_SKEW = 5 * 60 * 1000;
+/** A local box with a fresh last_seen is a LIVE session: its name cannot be
+ * taken by a foreign registry row (the two-orq fight resolves: each keeps
+ * its own). The staleness bound is generous (the session may idle). */
+const LIVE_LOCAL_LAST_SEEN_MS = 60 * 60 * 1000;
+
+/** Per-row validation (the PO fix 3): only well-typed rows enter the merge —
+ * a bad row is SKIPPED, the batch survives. registered_at must be a finite
+ * number inside the acceptance window (the clock bound above). */
+function federatedRowValid(row: FederatedRegistryRow, now: number): boolean {
+  if (typeof row.name !== "string" || !/^[A-Za-z0-9._-]{1,64}$/.test(row.name)) return false;
+  if (typeof row.session_id !== "string" || row.session_id.length === 0) return false;
+  if (typeof row.registered_at !== "number" || !Number.isFinite(row.registered_at)) return false;
+  if (
+    row.registered_at < now - FEDERATED_AT_PAST_TOLERANCE ||
+    row.registered_at > now + FEDERATED_AT_FUTURE_SKEW
+  ) {
+    return false;
+  }
+  if (typeof row.pools !== "string") return false;
+  try {
+    const parsed = JSON.parse(row.pools) as unknown;
+    if (!Array.isArray(parsed)) return false;
+  } catch {
+    return false;
+  }
+  if (row.role !== null && typeof row.role !== "string") return false;
+  if (row.primary_pool !== null && typeof row.primary_pool !== "string") return false;
+  return true;
+}
+
 export function mergeFederatedRegistry(
   db: MeshDb,
   rows: FederatedRegistryRow[],
   senderNodeId: string,
 ): number {
+  const now = Date.now();
+  // The full-state replacement (the PO fix 4): each push carries the
+  // sender's COMPLETE local registry — the federated rows owned by the
+  // sender that are ABSENT from the push are stale (the box was deleted or
+  // renamed there) and die here.
+  const pushed = new Set(rows.filter((r) => federatedRowValid(r, now)).map((r) => r.name));
+  db.conn.run(
+    "DELETE FROM mailboxes WHERE node_id = ? AND name NOT IN (" +
+      (pushed.size > 0 ? Array.from(pushed, () => "?").join(",") : "NULL") +
+      ")",
+    [senderNodeId, ...pushed],
+  );
   let applied = 0;
   for (const row of rows) {
-    if (!/^[A-Za-z0-9._-]{1,64}$/.test(row.name)) continue;
-    const local = db.conn.get<{ node_id: string | null; registered_at: number | null }>(
-      "SELECT node_id, registered_at FROM mailboxes WHERE name = ?",
-      [row.name],
-    );
+    if (!federatedRowValid(row, now)) continue;
+    const local = db.conn.get<{
+      node_id: string | null;
+      registered_at: number | null;
+      last_seen: number;
+    }>("SELECT node_id, registered_at, last_seen FROM mailboxes WHERE name = ?", [row.name]);
     if (local) {
       if (local.node_id === null || local.node_id === "") {
-        // This node owns the name: the inbound wins only on a strictly newer
-        // registration (the explicit rebind on the other side transferred it).
+        // This node owns the name. Two guards before a takeover: (1) a LIVE
+        // local session (fresh last_seen) keeps its name — the two-orq fight
+        // resolves: each keeps its own; (2) the inbound registration must be
+        // strictly newer than the local one (the explicit rebind on the
+        // other side transferred it).
+        if (local.last_seen > now - LIVE_LOCAL_LAST_SEEN_MS) continue;
         const localAt = local.registered_at ?? 0;
         if (row.registered_at <= localAt) continue;
       } else if (local.node_id !== senderNodeId) {
@@ -779,9 +852,13 @@ export function mergeFederatedRegistry(
 
 /** The local registry rows this node owns (for the /registry-sync push). */
 export function localRegistryRows(db: MeshDb): FederatedRegistryRow[] {
+  // A NULL registered_at (a row that predates the column) reads as 0 — the
+  // OLDEST possible: a peer's newer registration legitimately wins the LWW.
+  // Date.now() here would fabricate always-newest rows that steal names at
+  // the peers (the PO fix 6).
   return db.conn
     .all<FederatedRegistryRow>(
       "SELECT name, session_id, role, pools, primary_pool, registered_at FROM mailboxes WHERE node_id IS NULL",
     )
-    .map((r) => ({ ...r, registered_at: r.registered_at ?? Date.now() }));
+    .map((r) => ({ ...r, registered_at: r.registered_at ?? 0 }));
 }

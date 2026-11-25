@@ -82,6 +82,9 @@ export type WakeOptions = {
    * count after the turn acked the mail (false positives). Optional: when
    * absent, every existing session is treated as idle. */
   sessionRunning?: (sessionID: string) => boolean;
+  /** The escalation target mailbox (the box starved through
+   * ESCALATE_AFTER_MUTE_CYCLES alerts it). Default "orq". */
+  escalateTo?: string;
   /** Inject a prompt into a session (ctx.session.prompt). The third argument
    * is a generated messageID: the host server honors an explicit id
    * (input.id ?? create) and the transport can retry the call — with a
@@ -143,7 +146,6 @@ export const FATIGUE_MUTE_MAX_MS = 4_800_000;
  * first drain). */
 export const ESCALATE_AFTER_MUTE_CYCLES = 3;
 /** The escalation target: the lead's mailbox, resolved in the local registry. */
-export const ESCALATE_TO = "orq";
 
 /** The active escalation (0.30.0): a box muted through ESCALATE_AFTER_MUTE_CYCLES
  * consecutive cycles without a drain alerts the orchestrator mailbox (when it
@@ -152,6 +154,7 @@ export const ESCALATE_TO = "orq";
  * never re-prompts the starved box faster than its backoff. */
 function escalateBox(
   db: MeshDb,
+  escalateTo: string,
   box: string,
   cycles: number,
   subject: string | null,
@@ -161,22 +164,22 @@ function escalateBox(
   // The orchestrator mailbox resolves first: absent at escalation time =
   // the skip is LOGGED and the flag stays unset (a late-registered orq
   // learns of this starvation period on the next cycle boundary).
-  if (!mailboxByName(db, ESCALATE_TO)) {
+  if (!mailboxByName(db, escalateTo)) {
     pluginWarn(
       storeLogDir(db.path),
-      `escalation skipped: no '${ESCALATE_TO}' mailbox on this node — the box '${box}' stays starved silently`,
+      `escalation skipped: no '${escalateTo}' mailbox on this node — the box '${box}' stays starved silently`,
     );
     return;
   }
   escalated.set(box, cycles);
   deliverMessage(db, {
     from: "mesh-wake",
-    to_box: ESCALATE_TO,
-    subject: `alert: la box '${box}' ne draine pas (${cycles} cycles de mute)`,
+    to_box: escalateTo,
+    subject: `alert: the box '${box}' never drains (${cycles} mute cycles)`,
     body:
-      `La box '${box}' reçoit du courrier réveillant mais sa session ne draine jamais ` +
-      `(le dernier sujet: ${subject ?? "inconnu"}). Le backoff du wake est au cap. ` +
-      `Action: un check-in de la session propriétaire (mesh_inbox) ou un re-register.`,
+      `The box '${box}' receives wakeable mail but its session never drains ` +
+      `(the last subject: ${subject ?? "unknown"}). The wake backoff is at its cap. ` +
+      `Action: a check-in from the owning session (mesh_inbox) or a re-register.`,
   });
 }
 
@@ -188,6 +191,7 @@ export function startWakeLoop(options: WakeOptions): WakeHandle {
   // Token economy (0.16.0): pool broadcasts never wake by default; since
   // 0.17.0 the sender can flag one deliberate broadcast wake:true.
   const wakePools = options.wakePools ?? false;
+  const escalateTo = options.escalateTo ?? "orq";
   const lastPromptAt = new Map<string, number>();
   const lastUnread = new Map<string, number>();
   const undrained = new Map<string, number>();
@@ -293,7 +297,7 @@ export function startWakeLoop(options: WakeOptions): WakeHandle {
           const ttl = Math.min(FATIGUE_MUTE_TTL_MS * 2 ** cycle, FATIGUE_MUTE_MAX_MS);
           if (now - mutedAt < ttl) continue;
           if (cycle >= ESCALATE_AFTER_MUTE_CYCLES) {
-            escalateBox(options.db, box.name, cycle, stat.subject, escalated);
+            escalateBox(options.db, escalateTo, box.name, cycle, stat.subject, escalated);
           }
           undrained.delete(box.name);
           mutedSince.set(box.name, now);

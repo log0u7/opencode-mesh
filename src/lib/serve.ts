@@ -27,6 +27,7 @@ import {
   receiveMessage,
   mergeFederatedRegistry,
   unreadCount,
+  withTransaction,
 } from "./mail.js";
 import type { Fanout } from "./fanout.js";
 import { receiveMemorySync } from "./memory-sync.js";
@@ -321,10 +322,12 @@ async function handle(
       return;
     }
     try {
-      const applied = mergeFederatedRegistry(
-        db,
-        rows as Parameters<typeof mergeFederatedRegistry>[1],
-        peer.node_id,
+      const applied = withTransaction(db, () =>
+        mergeFederatedRegistry(
+          db,
+          rows as Parameters<typeof mergeFederatedRegistry>[1],
+          peer.node_id,
+        ),
       );
       json(res, 200, { applied });
     } catch {

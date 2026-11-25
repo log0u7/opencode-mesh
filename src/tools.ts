@@ -178,6 +178,19 @@ function pushRegistryToPeers(db: MeshDb, identity: NodeIdentity): void {
   }
 }
 
+/** The orchestration tools stay off a WORKER's surface (0.30.0): an enrolled
+ * child registers, drains, waits, replies and reads the journal — it does not
+ * spawn, pair, or manage workers (about 4k characters less on every request
+ * of every worker). Shared by the v1 and v2 plugin surfaces. */
+export const WORKER_TOOL_BLOCKLIST = new Set([
+  "mesh_spawn",
+  "mesh_pair",
+  "mesh_workers",
+  "mesh_worker_logs",
+  "mesh_worker_stop",
+  "mesh_worker_remove",
+]);
+
 export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
   const {
     db,

@@ -28,7 +28,7 @@ import { startWakeLoop, createExecutionTracker, type HostEvent } from "./lib/wak
 import { startSessionLister } from "./lib/sessions.js";
 import { MESH_GUIDANCE } from "./lib/guidance.js";
 import { MeshRpc, snapshotFromMesh } from "./rpc.js";
-import { buildToolSpecs, type ToolSpec } from "./tools.js";
+import { buildToolSpecs, WORKER_TOOL_BLOCKLIST, type ToolSpec } from "./tools.js";
 import { defaultDataDir, parseOptions, addressingOptions, type PluginOptions } from "./options.js";
 
 const DEFAULT_PORT = 4399;
@@ -72,14 +72,6 @@ export const MeshV2 = Plugin.define({
       // enrolled child registers, drains, waits, replies and reads the
       // journal — it does not spawn, pair, or manage workers (about 4k
       // characters less on every request of every worker).
-      const WORKER_TOOL_BLOCKLIST = new Set([
-        "mesh_spawn",
-        "mesh_pair",
-        "mesh_workers",
-        "mesh_worker_logs",
-        "mesh_worker_stop",
-        "mesh_worker_remove",
-      ]);
       await ctx.tool.transform((editor) => {
         for (const spec of buildToolSpecs({
           db,
@@ -290,6 +282,7 @@ export const MeshV2 = Plugin.define({
       ...(options.wakePools !== undefined ? { wakePools: options.wakePools } : {}),
       sessionKnown: (sessionID) => sessionsSeen.has(sessionID) || liveSessions.has(sessionID),
       sessionRunning: (sessionID) => running.has(sessionID),
+      escalateTo: options.escalateTo ?? "orq",
       prompt: (sessionID, text, messageID) => {
         // The server reads the prompt's explicit id (packages/core/src/session/session.ts:
         // input.id ?? create) — the transport-retry idempotency key (0.28.1):
