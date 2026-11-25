@@ -925,3 +925,78 @@ describe("the wake loop: the transaction-leak probe (0.30.0)", () => {
     expect(db.conn.inTransaction()).toBe(false);
   });
 });
+
+describe("the active escalation (0.30.0)", () => {
+  it("alerts orq once per starvation period after 3 mute cycles", async () => {
+    vi.useFakeTimers();
+    try {
+      const { db, prompt, sessionKnown } = setup(["s1"]);
+      registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
+      registerMailbox(db, { name: "orq", session_id: "s-orq", now: 1000 });
+      deliverMessage(db, { from: "n", to_box: "a", subject: "s", body: "b", created_at: 1000 });
+      const handle = startWakeLoop({
+        db,
+        prompt,
+        sessionKnown,
+        sessionRunning: () => false,
+        // One minute per tick: the mute cycles (minutes) advance in a few
+        // dozen ticks instead of tens of thousands.
+        intervalMs: 60_000,
+        cooldownMs: 0,
+      });
+      // The first window: 3 prompts exhaust the fatigue counter (the mute
+      // begins, cycle 0).
+      await vi.advanceTimersByTimeAsync(3 * 60_000);
+      // The mute TTL doubles per cycle: 10 min -> 20 -> 40 -> 80. The 4th
+      // expiry crosses ESCALATE_AFTER_MUTE_CYCLES (3): the alert fires once.
+      await vi.advanceTimersByTimeAsync(11 * 60_000);
+      await vi.advanceTimersByTimeAsync(21 * 60_000);
+      await vi.advanceTimersByTimeAsync(41 * 60_000);
+      await vi.advanceTimersByTimeAsync(81 * 60_000);
+      handle.stop();
+      const orqMail = db.conn.get<{ n: number }>(
+        "SELECT COUNT(*) AS n FROM deliveries WHERE to_box = 'orq' AND status = 'unread'",
+      );
+      expect(orqMail?.n).toBe(1);
+      // One alert per period: further mutes do not re-alert (the escalated
+      // flag clears only on a drain).
+      const orqAll = db.conn.get<{ n: number }>(
+        "SELECT COUNT(*) AS n FROM deliveries WHERE to_box = 'orq'",
+      );
+      expect(orqAll?.n).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  }, 30_000);
+
+  it("skips the escalation with a plugin.log warn when orq is absent", async () => {
+    vi.useFakeTimers();
+    try {
+      const dir = mkdtempSync(join(tmpdir(), "wake-escalate-"));
+      const db = openMeshDb(join(dir, "mesh.db"));
+      registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
+      // NO orq mailbox on this node: the escalation skips.
+      deliverMessage(db, { from: "n", to_box: "a", subject: "s", body: "b", created_at: 1000 });
+      const handle = startWakeLoop({
+        db,
+        prompt: async () => {},
+        sessionKnown: () => true,
+        sessionRunning: () => false,
+        intervalMs: 60_000,
+        cooldownMs: 0,
+      });
+      await vi.advanceTimersByTimeAsync(3 * 60_000);
+      await vi.advanceTimersByTimeAsync(11 * 60_000);
+      await vi.advanceTimersByTimeAsync(21 * 60_000);
+      await vi.advanceTimersByTimeAsync(41 * 60_000);
+      await vi.advanceTimersByTimeAsync(81 * 60_000);
+      handle.stop();
+      const log = readFileSync(join(dir, "plugin.log"), "utf8");
+      expect(log).toContain("escalation skipped");
+      // No orq box in this fixture: no DM could have landed anyway.
+      rmSync(dir, { recursive: true, force: true });
+    } finally {
+      vi.useRealTimers();
+    }
+  }, 30_000);
+});
