@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pluralized, no glyphs in fold. The two branches (mail pending / quiet
   inventory) merge into one line: the counters always show, the unread
   segment appears only when it signals.
+
 ## [0.29.1] - 2026-11-25
 
 ### Added
@@ -33,7 +34,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   plugin restart. An unreachable send or forward now restarts the browse once:
   the fresh browser hears the peer's next announcement and upserts the current
   addresses.
-
 
 ## [0.29.0] - 2026-11-25
 

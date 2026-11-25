@@ -97,7 +97,7 @@ describe("formatMeshSidebarExpanded (v4)", () => {
       ],
       [{ text: "  also orchestrator", tone: "value" }],
       [
-        { text: "  ● ", tone: "alert" },
+        { text: "  ●  ", tone: "alert" },
         { text: "3 unread", tone: "qualifier" },
       ],
       [

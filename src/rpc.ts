@@ -172,7 +172,7 @@ export function formatMeshSidebarExpanded(
   const unread = totalUnread(s);
   if (unread > 0) {
     lines.push([
-      { text: "  ● ", tone: "alert" },
+      { text: "  ●  ", tone: "alert" },
       { text: `${unread} unread`, tone: "qualifier" },
     ]);
   } else if (s.hats.length === 0) {
