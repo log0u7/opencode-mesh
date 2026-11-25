@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { MeshPlugin } from "../src/plugin.js";
 import { openMeshDb } from "../src/lib/db.js";
 import { loadOrCreateIdentity } from "../src/lib/identity.js";
+import { keyFingerprint } from "../src/lib/peers.js";
 import { inboxDir, outboxFile, pushOutbox } from "../src/lib/memory-sync.js";
 
 let dir: string;
@@ -208,6 +209,11 @@ describe("e2e: two plugin instances", () => {
       await b.tool?.mesh_pair?.execute({ code, address: statusA.server }, ctx("s-b")),
     );
     expect(paired).toContain("pairé des deux côtés");
+
+    // The pairing output shows the peer's SPKI fingerprint (informative, TOFU):
+    // it must be the hash of A's actual key, not a made-up display value.
+    const fx = /peer fingerprint: ([0-9a-f]{16})/.exec(paired)?.[1];
+    expect(fx).toBe(keyFingerprint(loadOrCreateIdentity(`${dir}/ca`).public_key));
 
     // B sends to A over the pinned TLS channel.
     const send = String(

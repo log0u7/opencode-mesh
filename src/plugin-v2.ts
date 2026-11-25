@@ -107,7 +107,7 @@ export const MeshV2 = Plugin.define({
 
     // Pool federation: shared by the tools (local broadcasts) and the server
     // (relayed broadcasts arriving from peers).
-    const fanout = createFanout({ db, identity });
+    const fanout = createFanout({ db, identity, rebrowse: () => browseHandle?.refresh() });
 
     // Sessions currently mid-turn, tracked from the host's durable execution
     // events: a queued wake prompt would fire with a stale unread count after
@@ -193,7 +193,7 @@ export const MeshV2 = Plugin.define({
     }
 
     let advertiseHandle: AdvertiseHandle | null = null;
-    let browseHandle: { close(): void } | null = null;
+    let browseHandle: { close(): void; refresh(): void } | null = null;
     if (options.advertise !== false) {
       const bonjour = new Bonjour();
       advertiseHandle = advertiseMesh({
@@ -221,6 +221,7 @@ export const MeshV2 = Plugin.define({
         serverAddress: address,
         port,
         bindKey,
+        rebrowse: () => browseHandle?.refresh(),
         fanout,
         worktreeClient,
         spawnFn,

@@ -137,6 +137,39 @@ describe("createFanout", () => {
     local.close();
   });
 
+  it("calls rebrowse when a forward lands unreachable (stale address heal)", async () => {
+    const local = db();
+    const identity = loadOrCreateIdentity(join(tmpdir(), "fanout-id-rebrowse")) as NodeIdentity;
+    registerMailbox(local, { name: "ops", session_id: "s0", now: 1000 });
+    joinPool(local, "ops", "team:infra");
+
+    // A paired peer whose address is dead (DHCP churn: the peer moved).
+    pairPeer(local, {
+      node_id: "peer-moved",
+      hostname: "peer-moved",
+      fingerprint: "peer-moved",
+      token: "tok",
+      addresses: ["127.0.0.1:1"],
+    });
+    local.conn.run("UPDATE peers SET tls = 0");
+
+    const rebrowse = vi.fn();
+    const fanout = createFanout({ db: local, identity, rebrowse });
+    const forwarded = await fanout.fanout({
+      to_box: "team:infra",
+      origin_id: "22222222-2222-4222-8222-222222222222",
+      from_box: "ops",
+      subject: "status: go",
+      body: "...",
+      via: [],
+    });
+
+    expect(forwarded).toEqual([]);
+    expect(rebrowse).toHaveBeenCalled();
+
+    local.close();
+  });
+
   it("never forwards to a peer listed in via", async () => {
     const local = db();
     const peer = await startFakePeer("peer-a", { "team:x": ["a"] });

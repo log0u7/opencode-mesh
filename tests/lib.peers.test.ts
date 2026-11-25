@@ -9,6 +9,7 @@ import {
   authenticateToken,
   createPairingToken,
   findPeerById,
+  keyFingerprint,
   pairWithToken,
   upsertDiscoveredPeer,
 } from "../src/lib/peers.js";
@@ -63,6 +64,13 @@ describe("pairing token rules", () => {
     expect(authenticateToken(db, expired, "node-b", proofFor(keys, "node-b", expired))).toBeNull();
 
     db.close();
+  });
+
+  it("keyFingerprint hashes a peer SPKI to 16 hex chars, distinct per key", () => {
+    const keys = nodeBKeys();
+    const fx = keyFingerprint(keys.public_key);
+    expect(fx).toMatch(/^[0-9a-f]{16}$/);
+    expect(fx).not.toBe(keyFingerprint(nodeBKeys().public_key));
   });
 
   it("refuses to auto-pair a node id it has never seen", () => {

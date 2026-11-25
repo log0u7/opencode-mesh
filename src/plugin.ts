@@ -161,7 +161,7 @@ export const MeshPlugin: Plugin = async (input, rawOptions?: PluginOptions) => {
         });
 
   let advertiseHandle: AdvertiseHandle | null = null;
-  let browseHandle: { close(): void } | null = null;
+  let browseHandle: { close(): void; refresh(): void } | null = null;
   if (options.advertise !== false) {
     const bonjour = new Bonjour();
     advertiseHandle = advertiseMesh({
@@ -190,7 +190,7 @@ export const MeshPlugin: Plugin = async (input, rawOptions?: PluginOptions) => {
         serverAddress: address,
         port,
         bindKey: `v1:${dataDir}`,
-        fanout: createFanout({ db, identity }),
+        fanout: createFanout({ db, identity, rebrowse: () => browseHandle?.refresh() }),
         worktreeClient,
         spawnFn,
         addressing: addressingOptions(options),

@@ -43,28 +43,42 @@ export type DiscoveredPeer = {
 export function browseMesh(options: {
   bonjour: Bonjour;
   onDiscovered: (peer: DiscoveredPeer) => void;
-}): { close(): void } {
-  const browser = options.bonjour.find({ type: MESH_SERVICE_TYPE }, (service) => {
-    const id = service.txt?.id;
-    const fp = service.txt?.fp;
-    if (typeof id !== "string" || typeof fp !== "string" || id.length === 0) {
-      return;
-    }
-    options.onDiscovered({
-      node_id: id,
-      hostname: service.host ?? service.name,
-      fingerprint: fp,
-      addresses: socketAddresses(service.addresses, service.port),
-      ...(typeof service.txt?.pk === "string" && service.txt.pk.length > 0
-        ? { public_key: service.txt.pk }
-        : {}),
-      ...(service.txt?.tls === "1" ? { tls: true } : {}),
+}): { close(): void; refresh(): void } {
+  // A browser caches the services it has seen: `up` fires once per fqdn, and
+  // an IP-only change (DHCP churn) fires no event at all (srv-update only
+  // watches host/port), so a paired peer's new address never reaches
+  // onDiscovered again. `refresh()` swaps in a fresh browser whose cache is
+  // empty: the peer's next mDNS response fires `up` and the discovered row is
+  // upserted with the current addresses.
+  let browser: { stop(): void } | null = null;
+  const start = () => {
+    browser = options.bonjour.find({ type: MESH_SERVICE_TYPE }, (service) => {
+      const id = service.txt?.id;
+      const fp = service.txt?.fp;
+      if (typeof id !== "string" || typeof fp !== "string" || id.length === 0) {
+        return;
+      }
+      options.onDiscovered({
+        node_id: id,
+        hostname: service.host ?? service.name,
+        fingerprint: fp,
+        addresses: socketAddresses(service.addresses, service.port),
+        ...(typeof service.txt?.pk === "string" && service.txt.pk.length > 0
+          ? { public_key: service.txt.pk }
+          : {}),
+        ...(service.txt?.tls === "1" ? { tls: true } : {}),
+      });
     });
-  });
+  };
+  start();
 
   return {
     close() {
-      browser.stop();
+      browser?.stop();
+    },
+    refresh() {
+      browser?.stop();
+      start();
     },
   };
 }

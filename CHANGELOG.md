@@ -5,6 +5,25 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.29.1] - 2026-11-25
+
+### Added
+
+- The pairing output shows the peer's SPKI fingerprint: `peer fingerprint:
+  <sha256-16> (TOFU pinning: check this fingerprint if you're paranoid)`.
+  Informative only: the 6-digit code stays the human gesture and the pinned
+  Ed25519 proof the trust anchor (no comparison step, no protocol change).
+
+### Fixed
+
+- A DHCP address change on a paired LAN peer left the stored addresses stale:
+  the mDNS browser fires `up` once per service and nothing at all on an
+  IP-only re-announce, so discovery never refreshed the row and sends kept
+  failing (`unreachable` on mesh_send, silently dropped in fanout) until a
+  plugin restart. An unreachable send or forward now restarts the browse once:
+  the fresh browser hears the peer's next announcement and upserts the current
+  addresses.
+
 ## [0.29.0] - 2026-11-25
 
 ### Changed

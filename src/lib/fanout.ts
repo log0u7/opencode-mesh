@@ -41,6 +41,9 @@ export type FanoutOptions = {
   identity: NodeIdentity;
   /** TTL of the per-peer /pools cache. Default 60s. */
   poolsCacheTtlMs?: number;
+  /** Called when a forward lands "unreachable": a fresh mDNS browse lets the
+   * peer's next announcement replace the stale DHCP-churned addresses. */
+  rebrowse?: () => void;
 };
 
 export function createFanout(options: FanoutOptions): Fanout {
@@ -138,6 +141,8 @@ export function createFanout(options: FanoutOptions): Fanout {
         });
         if (result === "ok") {
           forwarded.push(peer.node_id);
+        } else if (result === "unreachable") {
+          options.rebrowse?.();
         }
       }
       return forwarded;
