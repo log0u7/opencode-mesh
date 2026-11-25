@@ -75,7 +75,11 @@ export const MESSAGE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 // re-executes its sends after a local crash lands its duplicates within
 // seconds (seen live: the same DM twice, 14 s apart), while legitimate
 // identical content (daily reminders) repeats hours later and passes.
-export const RESEND_WINDOW_MS = 60_000;
+// 6h (0.29.0, was 60s): the minutes-apart re-send class (the 6admin-to-orq
+// episode: three identical DMs over 20 minutes, all delivered) dies here —
+// the burst retries were already covered, the interruption-resume class was
+// not. The rolling recent_mails purge bounds the rows.
+export const RESEND_WINDOW_MS = 6 * 60 * 60 * 1000;
 
 // Content key of the re-send defense. to_box stays in the key so a broadcast
 // to one box never swallows the same text to another, and reply_to so an

@@ -526,10 +526,12 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
         if (rows.length === 0) {
           return "inbox empty";
         }
+        // Compact JSON (0.29.0): the pretty-print cost bytes on every drain,
+        // and delivery_id is an internal key the agent never uses (mesh_wait
+        // matches on reply_to).
         return JSON.stringify(
           rows.map((r) => ({
             id: r.id,
-            delivery_id: r.delivery_id,
             ...(r.box !== undefined && r.box !== null ? { box: r.box } : {}),
             from: r.from,
             from_box: r.from_box,
@@ -538,8 +540,6 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
             reply_to: r.reply_to,
             created_at: r.created_at,
           })),
-          null,
-          2,
         );
       },
     },

@@ -143,14 +143,15 @@ describe("mesh_send", () => {
     expect(sent.recipients).toEqual(["bob"]);
 
     const bobInbox = JSON.parse(await call("mesh_inbox", {}, "s2")) as Array<{
-      delivery_id: string;
       from_box: string | null;
       subject: string;
     }>;
     expect(bobInbox).toHaveLength(1);
     expect(bobInbox[0]!.from_box).toBe("alice");
     expect(bobInbox[0]!.subject).toBe("hi");
-    expect(bobInbox[0]!.delivery_id).not.toBe("");
+    // 0.29.0: delivery_id left the agent view (an internal key; mesh_wait
+    // matches on reply_to).
+    expect("delivery_id" in bobInbox[0]!).toBe(false);
 
     // The cross-drain killer is dead: the sender's session sees nothing.
     expect(await call("mesh_inbox", {}, "s1")).toBe("inbox empty");
@@ -188,11 +189,11 @@ describe("mesh_inbox", () => {
     const sent = deliverMessage(db, { from: "n9", subject: "legacy", body: "b" });
     if (!sent.ok) return;
     const inbox = JSON.parse(await call("mesh_inbox", {}, "s-unreg")) as Array<{
-      delivery_id: string;
       id: string;
     }>;
     expect(inbox).toHaveLength(1);
-    expect(inbox[0]!.delivery_id).toBe("");
+    // 0.29.0: delivery_id left the agent view (the legacy path's empty
+    // delivery_id was an internal marker anyway).
     expect(inbox[0]!.id).toBe(sent.id);
     // Acked through the legacy message path.
     expect(await call("mesh_inbox", {}, "s-unreg")).toBe("inbox empty");

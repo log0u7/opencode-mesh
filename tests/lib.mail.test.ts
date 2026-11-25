@@ -13,6 +13,7 @@ import {
   waitReplyRead,
   wakeBoxStats,
   withTransaction,
+  RESEND_WINDOW_MS,
 } from "../src/lib/mail.js";
 
 /** The wake loop reads per-box stats in one grouped query; the gate tests
@@ -339,10 +340,15 @@ describe("content dedup at delivery (0.20.0 sender re-send defense)", () => {
     db.close();
   });
 
-  it("the same content 61 s later delivers again (window elapsed)", () => {
+  it("the same content after the window delivers again (window elapsed)", () => {
     const db = boxDb();
     const first = deliverMessage(db, { ...MAIL, to_box: "a", created_at: 1000 });
-    const second = deliverMessage(db, { ...MAIL, to_box: "a", created_at: 62000 });
+    // One millisecond past the (now 6h) window: a genuinely new delivery.
+    const second = deliverMessage(db, {
+      ...MAIL,
+      to_box: "a",
+      created_at: 1000 + RESEND_WINDOW_MS + 1,
+    });
     if (!first.ok || !second.ok) throw new Error("delivery failed");
 
     expect(second.id).not.toBe(first.id);
@@ -458,6 +464,52 @@ describe("wake gates (0.16.0 token economy)", () => {
     deliverMessage(db, { from: "n", to_box: "a", subject: "second", body: "b", created_at: 2000 });
     expect(statOf(db, "a")?.subject).toBe("first");
     expect(statOf(db, "a")?.unread).toBe(2);
+    db.close();
+  });
+});
+
+describe("resend dedup window (0.29.0: the minutes-apart re-send class)", () => {
+  it("collapses a re-send sent minutes apart (the 6admin-to-orq episode)", () => {
+    const db = openMeshDb(":memory:");
+    registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
+    const first = deliverMessage(db, {
+      from: "6admin",
+      to_box: "a",
+      subject: "rapport round",
+      body: "round terminé",
+      created_at: 1000,
+    });
+    // 2 minutes later: the 60s window is long dead; the extended window
+    // still recognizes the identical content.
+    const second = deliverMessage(db, {
+      from: "6admin",
+      to_box: "a",
+      subject: "rapport round",
+      body: "round terminé",
+      created_at: 1000 + 2 * 60_000,
+    });
+    if (!first.ok || !second.ok) throw new Error("delivery failed");
+    expect(second.id).toBe(first.id);
+    expect(second.recipients).toEqual([]);
+    expect(unreadBoxCount(db, "a")).toBe(1);
+    db.close();
+  });
+
+  it("still delivers a genuinely different mail inside the window", () => {
+    const db = openMeshDb(":memory:");
+    registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
+    deliverMessage(db, { from: "n", to_box: "a", subject: "s", body: "first", created_at: 1000 });
+    const second = deliverMessage(db, {
+      from: "n",
+      to_box: "a",
+      subject: "s",
+      body: "different body",
+      created_at: 2000,
+    });
+    expect(second.ok).toBe(true);
+    if (!second.ok) throw new Error("delivery failed");
+    expect(second.recipients).toEqual(["a"]);
+    expect(unreadBoxCount(db, "a")).toBe(2);
     db.close();
   });
 });
