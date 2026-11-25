@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   ackMessages,
@@ -60,15 +60,15 @@ describe("withTransaction (the txn hygiene the ghost hunt demanded)", () => {
     db.close();
   });
 
-  it("refuses to nest on a leaked outer transaction (loud, not silent)", () => {
+  it("refuses to nest on a leaked outer transaction (loud, and recovered)", () => {
     const db = openMeshDb(":memory:");
     db.conn.exec("BEGIN");
     expect(() => withTransaction(db, () => 1)).toThrow(/leaked|already open/i);
-    // The caller's own transaction is the caller's business: the guard threw
-    // before its own BEGIN, so it is still open — documented.
-    expect(db.conn.inTransaction()).toBe(true);
-    db.conn.exec("ROLLBACK");
+    // 0.30.0: the guard recovers the leak (the connection rebuilt in place)
+    // before throwing — the frozen-snapshot class dies with the error.
     expect(db.conn.inTransaction()).toBe(false);
+    // The connection is usable again: a clean transaction runs.
+    expect(withTransaction(db, () => "ok")).toBe("ok");
     db.close();
   });
 
@@ -597,5 +597,44 @@ describe("resend dedup window (0.29.0: the minutes-apart re-send class)", () => 
     );
     expect(stale?.n).toBe(0);
     db.close();
+  });
+});
+
+describe("withTransaction: the rollback-failure recovery (0.30.0)", () => {
+  it("reopens the connection when the ROLLBACK itself fails (the leak dies)", () => {
+    let leaked = false;
+    const conn = {
+      all: () => [],
+      get: () => null,
+      run: () => {},
+      exec: (sql: string) => {
+        if (sql === "ROLLBACK") {
+          // The rollback fails AND leaves the transaction open (the leak).
+          leaked = true;
+          throw new Error("rollback failed: connection mid-teardown");
+        }
+        if (sql === "BEGIN") {
+          if (leaked) throw new Error("transaction already open: the leak the reopen must clear");
+        }
+      },
+      inTransaction: () => leaked,
+      close: () => {},
+    };
+    const reopen = vi.fn(() => {
+      leaked = false;
+    });
+    const db = {
+      conn,
+      path: "/tmp/does-not-matter/mesh.db",
+      reopen,
+    } as unknown as Parameters<typeof withTransaction>[0];
+    expect(() =>
+      withTransaction(db, () => {
+        throw new Error("boom");
+      }),
+    ).toThrow("boom");
+    // The rollback failed, the txn state was unknown: the reopen ran (the
+    // leak cleared), the connection is usable again.
+    expect(db.reopen).toHaveBeenCalled();
   });
 });

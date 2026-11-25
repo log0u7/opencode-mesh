@@ -1,6 +1,9 @@
 import { createHash, randomUUID } from "node:crypto";
 
+import { dirname } from "node:path";
+
 import type { MeshDb } from "./db.js";
+import { pluginWarn } from "./plugin-log.js";
 import type { MailMessage } from "../types/peer.js";
 
 // Named mailboxes. A message is either:
@@ -465,7 +468,14 @@ export function withTransaction<T>(db: MeshDb, fn: () => T): T {
   if (db.conn.inTransaction()) {
     // A leaked BEGIN pins the WAL snapshot forever (the wake loop then reads
     // a frozen view and re-prompts read mail — the phantom-unread class).
-    // Refuse loudly instead of silently nesting on the frozen snapshot.
+    // Recover: rebuild the connection in place (the instance lives on), warn
+    // to the plugin log (console.warn is /dev/null under serve --service),
+    // and refuse loudly.
+    pluginWarn(
+      db.path ? dirname(db.path) : undefined,
+      "withTransaction: a leaked transaction recovered via connection reopen",
+    );
+    db.reopen?.();
     throw new Error(
       "transaction already open on this connection: a BEGIN leaked and must be fixed at the source",
     );
@@ -476,18 +486,30 @@ export function withTransaction<T>(db: MeshDb, fn: () => T): T {
     db.conn.exec("COMMIT");
     return result;
   } catch (error) {
+    let rollbackFailed = false;
     try {
       db.conn.exec("ROLLBACK");
     } catch {
-      // The rollback itself failed (connection mid-teardown): the connection
-      // is unusable either way — surface the ORIGINAL error, not this one.
+      // The rollback itself failed: the transaction state is unknown — the
+      // connection would read a frozen snapshot forever. Rebuild it in place
+      // (0.30.0: the leak path that survived 0.28.2's silent swallow).
+      rollbackFailed = true;
+    }
+    if (rollbackFailed) {
+      pluginWarn(
+        db.path ? dirname(db.path) : undefined,
+        "withTransaction: the ROLLBACK failed — the connection rebuilt in place",
+      );
+      db.reopen?.();
     }
     throw error;
   } finally {
     if (db.conn.inTransaction()) {
-      console.warn(
-        "[opencode-mesh] transaction still open after withTransaction — a BEGIN leaked; snapshot reads are now frozen",
+      pluginWarn(
+        db.path ? dirname(db.path) : undefined,
+        "withTransaction: transaction still open after the call — a BEGIN leaked; the connection must be rebuilt",
       );
+      db.reopen?.();
     }
   }
 }

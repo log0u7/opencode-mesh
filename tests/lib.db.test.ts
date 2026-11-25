@@ -222,3 +222,30 @@ CREATE INDEX idx_workers_status ON workers(status);
 CREATE INDEX idx_locks_expires ON locks(expires_at);
 PRAGMA user_version = 1;
 `;
+
+describe("openMeshDb: the transaction-leak recovery (0.30.0)", () => {
+  it("reopen() resets a leaked transaction state and keeps the data", () => {
+    const testDir = mkdtempSync(join(tmpdir(), "mesh-reopen-"));
+    const db = openMeshDb(join(testDir, "reopen.db"));
+    db.conn.run(
+      "INSERT INTO messages (id, from_node, subject, body, status, created_at) VALUES ('x','n','s','b','unread',1)",
+    );
+    // The leaked BEGIN class (the rollback failure left the txn open): the
+    // connection reads a frozen WAL snapshot forever.
+    db.conn.exec("BEGIN");
+    expect(db.conn.inTransaction()).toBe(true);
+    db.reopen();
+    expect(db.conn.inTransaction()).toBe(false);
+    // The same file: the data persists across the reopen.
+    expect(db.conn.get<{ n: number }>("SELECT COUNT(*) AS n FROM messages")?.n).toBe(1);
+    rmSync(testDir, { recursive: true, force: true });
+  });
+
+  it("exposes the store path for the plugin log", () => {
+    const testDir = mkdtempSync(join(tmpdir(), "mesh-path-"));
+    const db = openMeshDb(join(testDir, "withpath.db"));
+    expect(db.path).toBe(join(testDir, "withpath.db"));
+    db.close();
+    rmSync(testDir, { recursive: true, force: true });
+  });
+});

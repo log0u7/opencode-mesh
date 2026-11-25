@@ -5,6 +5,25 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.30.0] - 2026-11-25
+
+### Fixed
+
+- The leaked-transaction recovery: a ROLLBACK that itself fails left the
+  transaction open (0.28.2 swallowed the failure silently) — the connection
+  read a frozen WAL snapshot forever and the wake loop re-prompted read
+  mail (seen live TWICE: the lock held on the mesh.db-shm read-mark byte
+  for hours, one real mail re-flashing six times). The connection now
+  rebuilds in place on every leaked-transaction surface (the guard, the
+  failed rollback, the post-call check) and the warn lands in a real
+  plugin log (`plugin.log` beside the store — console.warn is /dev/null
+  under `serve --service`). The wake loop probes with a noop transaction
+  every tick: a leak is detected and recovered within one poll interval.
+- `MeshDb` gains `path` and `reopen()`. The instance lives on — this is
+  NOT the rejected conn-level self-heal: it never reopens after an
+  explicit close, and it exists to keep this instance honest, not to
+  revive a disposed one.
+
 ## [0.29.2] - 2026-11-25
 
 ### Fixed

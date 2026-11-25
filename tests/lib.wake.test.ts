@@ -901,3 +901,19 @@ describe("phantom unread counter (0.24.6): the displayed count is the database's
     db.close();
   });
 });
+
+describe("the wake loop: the transaction-leak probe (0.30.0)", () => {
+  it("detects and recovers a leaked BEGIN on the next tick", async () => {
+    const { db, prompt, sessionKnown } = setup(["s1"]);
+    registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
+    // Simulate the leak: a BEGIN left open on the connection.
+    db.conn.exec("BEGIN");
+    expect(db.conn.inTransaction()).toBe(true);
+    const handle = startWakeLoop({ db, prompt, sessionKnown, intervalMs: 20 });
+    await new Promise((r) => setTimeout(r, 100));
+    handle.stop();
+    // The probe ran the guard, hit the leak, reopened: the connection is
+    // clean and the loop kept working (no silent frozen view).
+    expect(db.conn.inTransaction()).toBe(false);
+  });
+});

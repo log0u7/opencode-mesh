@@ -5,6 +5,11 @@ import { openSqlite, type SqliteConn } from "./sqlite.js";
 
 export type MeshDb = {
   conn: SqliteConn;
+  /** The store file path (the plugin log lives beside it). */
+  path: string;
+  /** Rebuild the underlying connection in place: the recovery for a leaked
+   * transaction (the frozen-WAL-snapshot class) and a failed rollback. */
+  reopen(): void;
   close(): void;
 };
 
@@ -210,10 +215,30 @@ export function openMeshDb(path: string): MeshDb {
     mkdirSync(dirname(path), { recursive: true });
   }
 
-  const conn = openSqlite(path);
+  let conn = openSqlite(path);
   conn.run("PRAGMA journal_mode = WAL");
   conn.run("PRAGMA busy_timeout = 5000");
   migrate(conn);
 
-  return { conn, close: () => conn.close() };
+  // The delegating connection: every call forwards to the CURRENT engine.
+  // reopen() rebuilds it in place — the recovery for a leaked transaction
+  // (the frozen-WAL-snapshot class) and a failed rollback; the instance
+  // lives on, no orphan is spawned (this is NOT the rejected conn-level
+  // self-heal: it never reopens after an explicit close, and it exists to
+  // keep THIS instance's wake loop honest, not to revive a disposed one).
+  const reopen = () => {
+    conn = openSqlite(path);
+    conn.run("PRAGMA journal_mode = WAL");
+    conn.run("PRAGMA busy_timeout = 5000");
+    migrate(conn);
+  };
+  const delegating: SqliteConn = {
+    all: (sql, params) => conn.all(sql, params),
+    get: (sql, params) => conn.get(sql, params),
+    run: (sql, params) => conn.run(sql, params),
+    exec: (sql) => conn.exec(sql),
+    inTransaction: () => conn.inTransaction(),
+    close: () => conn.close(),
+  };
+  return { conn: delegating, path, reopen, close: () => conn.close() };
 }

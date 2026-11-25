@@ -1,6 +1,10 @@
 import { randomUUID } from "node:crypto";
 
+import { dirname } from "node:path";
+
 import type { MeshDb } from "./db.js";
+import { withTransaction } from "./mail.js";
+import { pluginWarn } from "./plugin-log.js";
 import { listMailboxes, unreadBoxCount, wakeBoxStats } from "./mail.js";
 
 // The host's mid-turn signal. The live wire (opencode v2, generated client
@@ -150,6 +154,19 @@ export function startWakeLoop(options: WakeOptions): WakeHandle {
     if (stopped || ticking) return;
     ticking = true;
     try {
+      // The transaction-leak probe (0.30.0): every tick runs a noop
+      // transaction. The 0.28.2 guard throws on a leaked BEGIN — the leak
+      // pinned the WAL snapshot (the frozen-view class, seen live twice) —
+      // and the probe recovers via the connection reopen, with the warn in
+      // the plugin log. One noop txn per tick is negligible.
+      try {
+        withTransaction(options.db, () => {});
+      } catch (error) {
+        pluginWarn(
+          options.db.path ? dirname(options.db.path) : undefined,
+          `wake probe: the leaked transaction recovered — ${String(error)}`,
+        );
+      }
       const now = Date.now();
       // One grouped read for the whole host (0.21.0): per-box unread count,
       // wake gate and preview subject used to cost two queries per mailbox
