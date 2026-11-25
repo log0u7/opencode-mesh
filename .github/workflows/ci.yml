@@ -81,7 +81,7 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Engine-sensitive suites under bun
-        run: bun --bun pnpm vitest run tests/lib.wake.test.ts tests/lib.mail.test.ts
+        run: bun --bun vitest run tests/lib.wake.test.ts tests/lib.mail.test.ts
 
   gitleaks:
     runs-on: ubuntu-latest
