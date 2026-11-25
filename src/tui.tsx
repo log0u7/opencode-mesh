@@ -98,7 +98,6 @@ export default Plugin.define({
     // labels, the fallback for terminals that draw ambiguous-width glyphs
     // double-cell and glue the next character (see rpc.ts).
     const icons = context.options?.icons !== false;
-    context.ui.toast.show({ message: "opencode-mesh loaded", variant: "info", duration: 2000 });
 
     // Durable collapse state when the host allows it (scoped plugin ids hit a
     // host-side segment validation error — anomalyco/opencode#62634); RPC
