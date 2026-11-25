@@ -54,6 +54,35 @@ jobs:
       - name: Build and pack dry-run
         run: pnpm run build:check
 
+  # The production engine is bun (the compiled OpenCode runtime embeds
+  # bun:sqlite): the node matrix cannot catch an engine-name drift like the
+  # 0.28.0 inTransaction no-op (bun names the state inTransaction, node
+  # isTransaction — node stayed green while prod was disarmed). Run the
+  # engine-sensitive suites under bun on every PR.
+  bun-engine:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2.0.2
+        with:
+          bun-version: 1.3.14
+
+      - name: Activate pnpm
+        run: |
+          corepack enable
+          corepack prepare pnpm@11.0.0 --activate
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Engine-sensitive suites under bun
+        run: bun --bun vitest run tests/lib.wake.test.ts tests/lib.mail.test.ts
+
   gitleaks:
     runs-on: ubuntu-latest
     permissions:
