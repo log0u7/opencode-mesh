@@ -137,6 +137,35 @@ describe("createExecutionTracker (the host's real session-status events)", () =>
     // different prompts are two different messages.
     expect(ids[0]).not.toBe(ids[1]);
   });
+  it("expires the fatigue mute — a starved box wakes again", async () => {
+    vi.useFakeTimers();
+    try {
+      const { db, prompt, prompts, sessionKnown } = setup(["s1"]);
+      registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
+      deliverMessage(db, { from: "n", to_box: "a", subject: "s", body: "b", created_at: 1000 });
+      const handle = startWakeLoop({
+        db,
+        prompt,
+        sessionKnown,
+        // No sessionRunning: the collapse gate disengages — this test isolates
+        // the fatigue mute (cooldown 50 < interval 100 → three prompts then
+        // the mute).
+        intervalMs: 100,
+        cooldownMs: 50,
+      });
+      // Three prompts exhaust the fatigue counter; the box never drains.
+      await vi.advanceTimersByTimeAsync(500);
+      const muted = prompts.length;
+      expect(muted).toBe(3);
+      // Ten minutes of silence: without a mute TTL the box never prompts
+      // again and its mail starves (the orq/6admin episode).
+      await vi.advanceTimersByTimeAsync(600_000);
+      handle.stop();
+      expect(prompts.length).toBeGreaterThan(muted);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe("wake collapse gate (at most one prompt in flight per session)", () => {
