@@ -328,45 +328,55 @@ describe("formatMeshSidebarCollapsed (v4)", () => {
     expect(renderLine(formatMeshSidebarExpanded(snapshot())[0])).toMatch(/^▼ Mesh/);
   });
 
-  it("shows only the attention line when mail is pending (no counters stacked)", () => {
+  it("renders the unified grammar with mail pending: ▶ Mesh ·N unread ·counters (no glyph in fold)", () => {
     expect(formatMeshSidebarCollapsed(snapshot())).toEqual([
       { text: "▶ Mesh", tone: "entity" },
-      { text: " ● ", tone: "alert" },
-      { text: "3 unread", tone: "qualifier" },
+      { text: " ·", tone: "value" },
+      { text: "3", tone: "qualifier" },
+      { text: " unread", tone: "value" },
+      { text: " ·", tone: "value" },
+      { text: "4", tone: "qualifier" },
+      { text: " Agents", tone: "value" },
+      { text: " ·", tone: "value" },
+      { text: "3", tone: "qualifier" },
+      { text: " Pools", tone: "value" },
+      { text: " ·", tone: "value" },
+      { text: "2", tone: "qualifier" },
+      { text: " Hosts", tone: "value" },
     ]);
   });
 
-  it("shows the full inventory when quiet: Mesh bold, counters muted, hosts = self + paired peers", () => {
+  it("shows the full inventory when quiet: Mesh bold, counters capitalized-plural, hosts = self + paired peers", () => {
     const s = snapshot();
     s.peers = [];
     s.hats = s.hats.map((h) => ({ ...h, unread: 0 }));
     expect(formatMeshSidebarCollapsed(s)).toEqual([
       { text: "▶ Mesh", tone: "entity" },
-      { text: " · ", tone: "value" },
+      { text: " ·", tone: "value" },
       { text: "4", tone: "qualifier" },
-      { text: " agents", tone: "value" },
-      { text: " · ", tone: "value" },
+      { text: " Agents", tone: "value" },
+      { text: " ·", tone: "value" },
       { text: "3", tone: "qualifier" },
-      { text: " pools", tone: "value" },
-      { text: " · ", tone: "value" },
+      { text: " Pools", tone: "value" },
+      { text: " ·", tone: "value" },
       { text: "1", tone: "qualifier" },
-      { text: " host", tone: "value" },
+      { text: " Host", tone: "value" },
     ]);
   });
 
-  it("pluralizes the counters (1 agent · 1 pool · 1 host, 11 agents), collapsed and expanded", () => {
+  it("pluralizes the counters in the unified grammar (1 Agent · 1 Pool · 1 Host, 11 Agents)", () => {
     const s = snapshot();
     s.hats = s.hats.map((h) => ({ ...h, unread: 0 }));
     s.mailboxes = [s.mailboxes[0]!];
     s.pools = { "team:purser": ["purser"] };
     s.peers = [];
-    expect(renderLine(formatMeshSidebarCollapsed(s))).toBe("▶ Mesh · 1 agent · 1 pool · 1 host");
+    expect(renderLine(formatMeshSidebarCollapsed(s))).toBe("▶ Mesh ·1 Agent ·1 Pool ·1 Host");
     const counters = formatMeshSidebarExpanded(s).find((l) => renderLine(l).startsWith("  ⌂  "));
     expect(renderLine(counters)).toBe("  ⌂  1 agent · 1 pool · 1 host");
     s.mailboxes = Array.from({ length: 11 }, (_, i) => ({
       ...s.mailboxes[0]!,
       name: `mailbox-${i}`,
     }));
-    expect(renderLine(formatMeshSidebarCollapsed(s))).toBe("▶ Mesh · 11 agents · 1 pool · 1 host");
+    expect(renderLine(formatMeshSidebarCollapsed(s))).toBe("▶ Mesh ·11 Agents ·1 Pool ·1 Host");
   });
 });
