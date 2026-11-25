@@ -5,6 +5,31 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.28.0] - 2026-11-25
+
+### Fixed
+
+- The phantom-unread class had a second root: a leaked BEGIN pins the WAL
+  snapshot forever, and the wake loop then reads a frozen view — re-prompting
+  mail the rest of the fleet already read (seen live: one real mail, six
+  flashes; `lslocks` showed a READ lock held on the mesh.db-shm read-mark
+  byte for hours). Three layers: `withTransaction` now refuses to nest on a
+  leaked transaction (loud, not silent), rolls back defensively (a failing
+  ROLLBACK no longer eats the original error), and warns if a transaction is
+  still open after the call; the connection wrapper exposes
+  `inTransaction()` on both engines.
+
+### Added
+
+- The wake collapse gate: at most ONE wake prompt in flight per session
+  (the collapse-key pattern). The host queue delivers one queued item per
+  idle cycle — a second queued prompt fires later with its count and subject
+  already stale. Set at queue time, cleared when the session goes busy (the
+  delivered prompt CAUSES the turn, so the busy event is the delivery
+  receipt); disengaged when no `sessionRunning` callback exists. Fewer
+  phantom turns: the notification cost per event is now bounded at one short
+  turn instead of a delivery cycle.
+
 ## [0.27.3] - 2026-11-25
 
 ### Fixed

@@ -439,15 +439,34 @@ export function ackReply(db: MeshDb, row: InboxRow): void {
 // The repo's SqliteConn wrapper exposes no transaction() method (node:sqlite /
 // bun:sqlite both support plain BEGIN/COMMIT through exec), so transactions are
 // manual. Single connection, synchronous, and no nested use: safe.
-function withTransaction<T>(db: MeshDb, fn: () => T): T {
+export function withTransaction<T>(db: MeshDb, fn: () => T): T {
+  if (db.conn.inTransaction()) {
+    // A leaked BEGIN pins the WAL snapshot forever (the wake loop then reads
+    // a frozen view and re-prompts read mail — the phantom-unread class).
+    // Refuse loudly instead of silently nesting on the frozen snapshot.
+    throw new Error(
+      "transaction already open on this connection: a BEGIN leaked and must be fixed at the source",
+    );
+  }
   db.conn.exec("BEGIN");
   try {
     const result = fn();
     db.conn.exec("COMMIT");
     return result;
   } catch (error) {
-    db.conn.exec("ROLLBACK");
+    try {
+      db.conn.exec("ROLLBACK");
+    } catch {
+      // The rollback itself failed (connection mid-teardown): the connection
+      // is unusable either way — surface the ORIGINAL error, not this one.
+    }
     throw error;
+  } finally {
+    if (db.conn.inTransaction()) {
+      console.warn(
+        "[opencode-mesh] transaction still open after withTransaction — a BEGIN leaked; snapshot reads are now frozen",
+      );
+    }
   }
 }
 

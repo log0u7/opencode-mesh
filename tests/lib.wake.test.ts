@@ -101,6 +101,66 @@ describe("createExecutionTracker (the host's real session-status events)", () =>
   });
 });
 
+describe("wake collapse gate (at most one prompt in flight per session)", () => {
+  it("does not queue a second prompt while the first is in flight", async () => {
+    const { db, prompt, prompts, sessionKnown } = setup(["s1"]);
+    let running = false;
+    registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
+    deliverMessage(db, { from: "n", to_box: "a", subject: "s", body: "b", created_at: 1000 });
+    const handle = startWakeLoop({
+      db,
+      prompt,
+      sessionKnown,
+      sessionRunning: () => running,
+      intervalMs: 10,
+      cooldownMs: 20,
+    });
+    await new Promise((r) => setTimeout(r, 80));
+    const first = prompts.length;
+    expect(first).toBeGreaterThanOrEqual(1);
+    // The mail drains (any path: the queue delivered a DIFFERENT turn, a
+    // journal read, ...) while the first prompt's own turn never ran. The
+    // fatigue and cooldown maps reset on the drain; a fresh mail arrives.
+    // Without the collapse gate this fires a second prompt whose inbox is
+    // already empty when its turn runs — the phantom class.
+    db.conn.run("UPDATE deliveries SET status = 'read' WHERE to_box = 'a'");
+    // Two fresh mails: unread must GROW past the stale previous (1) so the
+    // fatigue mute cannot explain the silence — only the collapse gate can.
+    deliverMessage(db, { from: "n", to_box: "a", subject: "s2", body: "b2", created_at: 2000 });
+    deliverMessage(db, { from: "n", to_box: "a", subject: "s3", body: "b3", created_at: 2001 });
+    await new Promise((r) => setTimeout(r, 200));
+    handle.stop();
+    expect(prompts.length).toBe(first);
+  });
+
+  it("clears the in-flight gate when the delivered prompt's turn runs", async () => {
+    const { db, prompt, prompts, sessionKnown } = setup(["s1"]);
+    let running = false;
+    registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
+    deliverMessage(db, { from: "n", to_box: "a", subject: "s", body: "b", created_at: 1000 });
+    const handle = startWakeLoop({
+      db,
+      prompt,
+      sessionKnown,
+      sessionRunning: () => running,
+      intervalMs: 10,
+      cooldownMs: 20,
+    });
+    await new Promise((r) => setTimeout(r, 80));
+    const first = prompts.length;
+    expect(first).toBeGreaterThanOrEqual(1);
+    // The delivered prompt causes a turn: busy flips true, then back to idle
+    // (the turn finished). The gate must have cleared with the busy event.
+    running = true;
+    await new Promise((r) => setTimeout(r, 40));
+    running = false;
+    deliverMessage(db, { from: "n", to_box: "a", subject: "s2", body: "b2", created_at: 2000 });
+    await new Promise((r) => setTimeout(r, 80));
+    handle.stop();
+    expect(prompts.length).toBeGreaterThan(first);
+  });
+});
+
 describe("wake loop", () => {
   it("uses the documented defaults", () => {
     expect(DEFAULT_WAKE_INTERVAL_MS).toBe(5000);

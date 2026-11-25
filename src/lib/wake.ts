@@ -114,6 +114,13 @@ export function startWakeLoop(options: WakeOptions): WakeHandle {
   const lastPromptAt = new Map<string, number>();
   const lastUnread = new Map<string, number>();
   const undrained = new Map<string, number>();
+  // Collapse gate (0.28.0): at most ONE wake prompt in flight per session.
+  // The host queue delivers one queued item per idle cycle: a second queued
+  // prompt fires later with its count and subject already stale — the
+  // phantom-unread class. Set at queue time, cleared when the session goes
+  // busy (a delivered prompt CAUSES the turn, so the busy event is the
+  // delivery receipt).
+  const pendingPrompt = new Map<string, number>();
   let stopped = false;
   let failures = 0;
   // Overlap guard (0.18.0): a prompt slower than the interval must not run
@@ -130,6 +137,13 @@ export function startWakeLoop(options: WakeOptions): WakeHandle {
       // plus one at prompt time. Boxes without unread deliveries are absent
       // from the result — their fatigue maps are cleared below like before.
       const statsByName = new Map(wakeBoxStats(options.db).map((s) => [s.box, s]));
+      // Clear in-flight gates whose prompt was delivered: the delivery causes
+      // a turn, the turn's busy event shows here as sessionRunning.
+      if (options.sessionRunning) {
+        for (const sessionID of pendingPrompt.keys()) {
+          if (options.sessionRunning(sessionID)) pendingPrompt.delete(sessionID);
+        }
+      }
       for (const box of listMailboxes(options.db)) {
         const stat = statsByName.get(box.name);
         const previous = lastUnread.get(box.name) ?? 0;
@@ -178,6 +192,14 @@ export function startWakeLoop(options: WakeOptions): WakeHandle {
           // pre-restart id): its live session will re-register and re-bind.
           continue;
         }
+        // Collapse gate: a prompt for this session is still queued — the host
+        // delivers it one idle cycle at a time and its turn drains the box.
+        // Queueing another only manufactures a stale phantom. Only engage
+        // when a sessionRunning callback exists (no busy signal, no delivery
+        // receipt — the gate would never clear).
+        if (options.sessionRunning && pendingPrompt.has(box.session_id)) {
+          continue;
+        }
         if (options.sessionRunning?.(box.session_id)) {
           // Mid-turn: a queued prompt would fire with a stale unread count
           // after the turn acked the mail. The turn-start check-in reads the
@@ -186,6 +208,7 @@ export function startWakeLoop(options: WakeOptions): WakeHandle {
         }
         lastPromptAt.set(box.name, now);
         undrained.set(box.name, cycles + 1);
+        if (options.sessionRunning) pendingPrompt.set(box.session_id, now);
         // The flash recomputes from the database at the moment it is emitted
         // (0.24.6): the tick-start grouped stat can be seconds old by the time
         // the loop reaches this box, and the prompt is queued — it fires later
@@ -212,10 +235,16 @@ export function startWakeLoop(options: WakeOptions): WakeHandle {
         const subject = stat.subject;
         const preview =
           subject === null ? "" : subject.length > 60 ? `${subject.slice(0, 59)}…` : subject;
-        await options.prompt(
-          box.session_id,
-          preview === "" ? `mesh: ${fresh} unread` : `mesh: ${fresh} unread — "${preview}"`,
-        );
+        try {
+          await options.prompt(
+            box.session_id,
+            preview === "" ? `mesh: ${fresh} unread` : `mesh: ${fresh} unread — "${preview}"`,
+          );
+        } catch (error) {
+          // The prompt never queued: drop the gate so the next tick may retry.
+          pendingPrompt.delete(box.session_id);
+          throw error;
+        }
         // The prompt resolved after dispose: do not touch any further box.
         if (stopped) return;
       }

@@ -3,6 +3,9 @@ export interface SqliteConn {
   get<T = unknown>(sql: string, params?: unknown[]): T | null;
   run(sql: string, params?: unknown[]): void;
   exec(sql: string): void;
+  /** Is a transaction open on this connection? A leaked BEGIN pins the WAL
+   * snapshot forever — the phantom-unread class — so callers assert on it. */
+  inTransaction(): boolean;
   close(): void;
 }
 
@@ -15,12 +18,14 @@ interface SqliteStatement {
 interface BunSqliteDatabase {
   query(sql: string): SqliteStatement;
   run(sql: string, params?: unknown[]): unknown;
+  isTransaction: boolean;
   close(): void;
 }
 
 interface NodeSqliteDatabase {
   prepare(sql: string): SqliteStatement;
   exec(sql: string): unknown;
+  isTransaction: boolean;
   close(): void;
 }
 
@@ -41,6 +46,9 @@ function createPreparedConn(db: NodeSqliteDatabase): SqliteConn {
     exec(sql: string): void {
       db.exec(sql);
     },
+    inTransaction(): boolean {
+      return db.isTransaction;
+    },
     close(): void {
       db.close();
     },
@@ -60,6 +68,9 @@ function createBunConn(db: BunSqliteDatabase): SqliteConn {
     },
     exec(sql: string): void {
       db.run(sql);
+    },
+    inTransaction(): boolean {
+      return db.isTransaction;
     },
     close(): void {
       db.close();

@@ -12,6 +12,7 @@ import {
   unreadMessages,
   waitReplyRead,
   wakeBoxStats,
+  withTransaction,
 } from "../src/lib/mail.js";
 
 /** The wake loop reads per-box stats in one grouped query; the gate tests
@@ -20,6 +21,55 @@ function statOf(db: Parameters<typeof wakeBoxStats>[0], box: string) {
   return wakeBoxStats(db).find((s) => s.box === box);
 }
 import { openMeshDb } from "../src/lib/db.js";
+
+describe("withTransaction (the txn hygiene the ghost hunt demanded)", () => {
+  it("exposes the connection's transaction state", () => {
+    const db = openMeshDb(":memory:");
+    expect(db.conn.inTransaction()).toBe(false);
+    db.conn.exec("BEGIN");
+    expect(db.conn.inTransaction()).toBe(true);
+    db.conn.exec("ROLLBACK");
+    expect(db.conn.inTransaction()).toBe(false);
+    db.close();
+  });
+
+  it("leaves no transaction open on success", () => {
+    const db = openMeshDb(":memory:");
+    registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
+    const rows = inboxRead(db, "s1", true);
+    expect(rows).toEqual([]);
+    expect(db.conn.inTransaction()).toBe(false);
+    db.close();
+  });
+
+  it("rolls back and leaves no transaction open when fn throws", () => {
+    const db = openMeshDb(":memory:");
+    expect(() =>
+      withTransaction(db, () => {
+        db.conn.exec(
+          "INSERT INTO messages (id, from_node, subject, body, status, created_at) VALUES ('x','n','s','b','unread',1)",
+        );
+        throw new Error("boom");
+      }),
+    ).toThrow("boom");
+    // The insert rode the rolled-back transaction: gone.
+    expect(db.conn.get<{ count: number }>("SELECT COUNT(*) AS count FROM messages")?.count).toBe(0);
+    expect(db.conn.inTransaction()).toBe(false);
+    db.close();
+  });
+
+  it("refuses to nest on a leaked outer transaction (loud, not silent)", () => {
+    const db = openMeshDb(":memory:");
+    db.conn.exec("BEGIN");
+    expect(() => withTransaction(db, () => 1)).toThrow(/leaked|already open/i);
+    // The caller's own transaction is the caller's business: the guard threw
+    // before its own BEGIN, so it is still open — documented.
+    expect(db.conn.inTransaction()).toBe(true);
+    db.conn.exec("ROLLBACK");
+    expect(db.conn.inTransaction()).toBe(false);
+    db.close();
+  });
+});
 
 describe("mail ack flow", () => {
   it("acks messages and empties the inbox", () => {
