@@ -1,4 +1,4 @@
-import { randomBytes, randomInt } from "node:crypto";
+import { createHash, randomBytes, randomInt } from "node:crypto";
 
 import type { MeshDb } from "./db.js";
 import { pairingProofPayload, verifyPairingProof } from "./identity.js";
@@ -11,6 +11,13 @@ export const PAIRING_TOKEN_TTL_MS = 30 * 60_000;
 /** Six-digit pairing code: a capability naming a pending offer, not a secret.
  * The trust anchor stays the Ed25519 proof (pk pinned at completion). */
 export type PairingCode = { code: string; token: string; hostname: string };
+
+/** Display fingerprint of a peer's SPKI (base64 DER): sha256, 16 hex chars.
+ * Informative only (the pairing code stays the human gesture, the proof the
+ * trust anchor). */
+export function keyFingerprint(spki: string): string {
+  return createHash("sha256").update(Buffer.from(spki, "base64")).digest("hex").slice(0, 16);
+}
 
 function newCode(): string {
   return String(randomInt(0, 1_000_000)).padStart(6, "0");

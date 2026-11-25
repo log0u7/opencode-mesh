@@ -31,6 +31,7 @@ import {
   createPairingToken,
   findPendingByCode,
   findSendablePeer,
+  keyFingerprint,
   listPeers,
   pairWithToken,
   resolvePeerTarget,
@@ -104,6 +105,9 @@ export type MeshContext = {
   capa?: () => Promise<HostCapa>;
   /** Maximum concurrently running enrolled workers (default 4). */
   spawnMax?: number;
+  /** Restart the mDNS browse: an unreachable send usually means a stale
+   * address (DHCP churn), and a fresh browse re-hears the peer's announce. */
+  rebrowse?: () => void;
 };
 
 function str(name: string, description: string, required = true): ToolField {
@@ -278,7 +282,10 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
               addresses: [counter.address ?? candidate.url.replace(/^https?:\/\//, "")],
               public_key: counter.pk,
             });
-            return `pairé des deux côtés avec ${peerLabelShort(counter.node_id, counter.hostname)}`;
+            return [
+              `pairé des deux côtés avec ${peerLabelShort(counter.node_id, counter.hostname)}`,
+              `peer fingerprint: ${keyFingerprint(counter.pk)} (TOFU pinning: check this fingerprint if you're paranoid)`,
+            ].join("\n");
           }
           return "error: code refusé ou injoignable (expire au bout de 30 min; vérifie l'address= en cross-subnet)";
         }
@@ -303,7 +310,10 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
             hostname: identity.hostname,
             address: `${serverAddress}:${port}`,
           });
-          return `pairé avec ${peerLabelShort(parsed.node_id, parsed.hostname)}. Contre-offre pour l'autre côté: mesh_pair(offer="${counter}")`;
+          return [
+            `pairé avec ${peerLabelShort(parsed.node_id, parsed.hostname)}. Contre-offre pour l'autre côté: mesh_pair(offer="${counter}")`,
+            `peer fingerprint: ${keyFingerprint(parsed.pk)} (TOFU pinning: check this fingerprint if you're paranoid)`,
+          ].join("\n");
         }
 
         // Legacy completion (older mesh versions).
@@ -323,7 +333,11 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
             addresses: typeof args.address === "string" ? [args.address] : [],
             ...(typeof args.pk === "string" && args.pk.length > 0 ? { public_key: args.pk } : {}),
           });
-          return `paired with ${node_id}`;
+          const paired = `paired with ${node_id}`;
+          // Legacy pk is optional: no key attested, no fingerprint to show.
+          return typeof args.pk === "string" && args.pk.length > 0
+            ? `${paired}\npeer fingerprint: ${keyFingerprint(args.pk)} (TOFU pinning: check this fingerprint if you're paranoid)`
+            : paired;
         }
 
         // Code offer.
@@ -506,6 +520,11 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
               : result === "plaintext-peer"
                 ? " — the peer answered in plaintext: version skew, the peer needs opencode-mesh >= 0.11 (TLS-only)"
                 : "";
+          // The usual cause of "unreachable" is a stale address (DHCP churn):
+          // a fresh mDNS browse lets the peer's announce replace it.
+          if (result === "unreachable") {
+            mesh.rebrowse?.();
+          }
           return `sent to ${target.node_id}: ${result}${hint}`;
         }
         return await selfSendLocal();

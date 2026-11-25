@@ -39,13 +39,18 @@ type FakeService = {
 function fakeBonjour() {
   const published: ServiceRecord[] = [];
   const stops = vi.fn();
-  let findCallback: ((service: FakeService) => void) | null = null;
+  // Each find() registers a fresh browser callback: refresh() swaps browsers,
+  // and only the newest one is live.
+  const callbacks: ((service: FakeService) => void)[] = [];
 
   return {
     published,
     stops,
+    get findCalls() {
+      return callbacks.length;
+    },
     emit(service: FakeService) {
-      findCallback?.(service);
+      callbacks[callbacks.length - 1]?.(service);
     },
     bonjour: {
       publish: (record: ServiceRecord) => {
@@ -53,7 +58,7 @@ function fakeBonjour() {
         return { stop: stops };
       },
       find: (_types: unknown, onUp: (service: FakeService) => void) => {
-        findCallback = onUp;
+        callbacks.push(onUp);
         return { stop: stops };
       },
     },
@@ -197,6 +202,43 @@ describe("browseMesh host fallback", () => {
 
     expect(seen[0]?.hostname).toBe("peer-3-name");
     expect(seen[0]?.addresses).toEqual([]);
+  });
+});
+
+describe("browseMesh refresh (DHCP churn heal)", () => {
+  it("refresh() swaps in a fresh browser so an already-known peer is re-discovered", () => {
+    const fake = fakeBonjour();
+    const seen: DiscoveredPeer[] = [];
+    const handle = browseMesh({
+      bonjour: fake.bonjour as never,
+      onDiscovered: (p) => seen.push(p),
+    });
+
+    fake.emit({
+      port: 4399,
+      txt: { id: "peer-1", fp: "ff00" },
+      name: "peer-1",
+      addresses: ["192.168.1.5"],
+    });
+    expect(seen).toHaveLength(1);
+
+    handle.refresh();
+    expect(fake.findCalls).toBe(2);
+    expect(fake.stops).toHaveBeenCalled();
+
+    // The same fqdn re-announcing (its IP changed under it) is seen again by
+    // the fresh browser: the stale-address blind spot is gone.
+    fake.emit({
+      port: 4399,
+      txt: { id: "peer-1", fp: "ff00" },
+      name: "peer-1",
+      addresses: ["192.168.1.9"],
+    });
+    expect(seen).toHaveLength(2);
+    expect(seen[1]?.addresses).toEqual(["192.168.1.9:4399"]);
+
+    handle.close();
+    expect(fake.stops).toHaveBeenCalledTimes(2);
   });
 });
 
