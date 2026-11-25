@@ -115,6 +115,11 @@ export const PROMPT_GATE_TTL_MS = 120_000;
  * (orphaned plugin instance after a hot-swap) or a dead host must not leave a
  * timer spinning silently forever. Reloading the plugin restarts the loop. */
 export const MAX_TICK_FAILURES = 5;
+/** How long a fatigued box stays muted before the loop reminds it again: the
+ * mute would otherwise starve the box forever (the purge requires a drain,
+ * the drain requires a prompt — a session that never reads never unmutes).
+ * One reminder per TTL worst case. */
+export const FATIGUE_MUTE_TTL_MS = 600_000;
 
 export function startWakeLoop(options: WakeOptions): WakeHandle {
   const interval = options.intervalMs ?? DEFAULT_WAKE_INTERVAL_MS;
@@ -127,6 +132,7 @@ export function startWakeLoop(options: WakeOptions): WakeHandle {
   const lastPromptAt = new Map<string, number>();
   const lastUnread = new Map<string, number>();
   const undrained = new Map<string, number>();
+  const mutedSince = new Map<string, number>();
   // Collapse gate (0.28.0): at most ONE wake prompt in flight per session.
   // The host queue delivers one queued item per idle cycle: a second queued
   // prompt fires later with its count and subject already stale — the
@@ -169,6 +175,7 @@ export function startWakeLoop(options: WakeOptions): WakeHandle {
         if (stat === undefined || stat.unread === 0) {
           lastUnread.delete(box.name);
           undrained.delete(box.name);
+          mutedSince.delete(box.name);
           continue;
         }
         const unread = stat.unread;
@@ -188,10 +195,21 @@ export function startWakeLoop(options: WakeOptions): WakeHandle {
         }
         const cycles = undrained.get(box.name) ?? 0;
         // Fatigue guard: prompted MAX times, never drained, count unchanged
-        // → the binding is wrong (the bound session never reads this box).
-        // Stop prompting; the orphaned box surfaces in host diagnostics.
+        // → mute. Fatigue mute TTL (0.28.2): a muted box never unmuted by
+        // itself — the purge requires the count to drop, which requires the
+        // box to drain, which requires a prompt — starvation (seen live: the
+        // orq box held 8 unread mails while the session kept running). The
+        // TTL releases the mute: one reminder per TTL, the mail never
+        // starves.
         if (unread <= previous && cycles >= MAX_UNDRAINED_PROMPTS) {
-          continue;
+          const mutedAt = mutedSince.get(box.name);
+          if (mutedAt === undefined) {
+            mutedSince.set(box.name, now);
+            continue;
+          }
+          if (now - mutedAt < FATIGUE_MUTE_TTL_MS) continue;
+          undrained.delete(box.name);
+          mutedSince.delete(box.name);
         }
         // Prompt only on new mail (count grew) and outside the per-mailbox
         // cooldown, so an agent idle in front of unread mail is reminded,

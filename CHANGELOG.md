@@ -5,6 +5,26 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.28.2] - 2026-11-25
+
+### Fixed
+
+- The fatigue mute starved a box forever: three prompts without a drain mute
+  the mailbox, and the mute only lifts when the count drops — which requires
+  the box to drain, which requires a prompt. Seen live: the orq box held
+  eight unread mails (three of them reported by a peer as "never delivered"
+  — they were) while the session kept running. The mute now carries a TTL
+  (10 min): one reminder per TTL worst case, the mail never starves.
+- The inbox protocol rides the standing guidance (the sequential-processing
+  failure seen live): drain the whole inbox first, process the set in one
+  pass — never act on the first message while the rest sits unread; re-check
+  the inbox before any decisive reply; a mesh_wait timeout is not proof of
+  loss — re-check before re-sending.
+- A connection-level self-heal was prototyped and REJECTED: reopening a
+  closed engine revives orphaned plugin instances after a hot-swap — the
+  double-wake-loop class behind the 0.24.x phantom. The 0.18.0 contract
+  stands: a closed database answers a plain 500 JSON, the orphan dies.
+
 ## [0.28.1] - 2026-11-25
 
 ### Fixed

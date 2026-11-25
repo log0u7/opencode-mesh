@@ -475,6 +475,13 @@ describe("opencode-mesh v2 setup", () => {
     expect(MESH_GUIDANCE).toContain("role: keep it 1-3 words");
     expect(MESH_GUIDANCE).toContain("the panel truncates at word boundary");
     expect(MESH_GUIDANCE).toContain("the full role lives in mesh_status");
+    // The 0.28.2 batch protocol (the sequential-processing failure seen live:
+    // a turn acting on the first message while the rest of the batch sits
+    // unread in the box).
+    expect(MESH_GUIDANCE).toContain("drain the whole inbox first");
+    expect(MESH_GUIDANCE).toContain("process the set in one pass");
+    expect(MESH_GUIDANCE).toContain("re-check the inbox before any decisive reply");
+    expect(MESH_GUIDANCE).toContain("a mesh_wait timeout is not proof of loss");
 
     await cleanup?.();
   });
