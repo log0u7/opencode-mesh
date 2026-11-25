@@ -5,6 +5,22 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.27.1] - 2026-11-25
+
+### Fixed
+
+- The mid-turn guard of the wake loop was silently off: it listened for
+  `session.execution.*` events with `data.sessionID`, names and payload the
+  opencode v2 bus never emits (the real signal is `session.status` with
+  `properties.sessionID` and `status.type` busy/retry/idle, plus
+  `session.idle`). The wake loop therefore queued prompts into running
+  sessions whose turns drained the mail before the queued prompt fired — the
+  phantom-unread class (1-5 flashes per turn with an empty inbox and zero
+  pending in the DB, always the same already-read thread; it survived three
+  count-freshness fixes because the race was the emission, not the count).
+  The tracker now follows the real `session.status`/`session.idle` events and
+  keeps the legacy names for older hosts.
+
 ## [0.27.0] - 2026-11-25
 
 ### Changed

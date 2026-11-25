@@ -24,7 +24,7 @@ import { startMemorySyncPusher } from "./lib/memory-sync.js";
 import { createDurableStore } from "./lib/persist.js";
 import { createFanout } from "./lib/fanout.js";
 import { createHostCapa } from "./lib/capa.js";
-import { startWakeLoop } from "./lib/wake.js";
+import { startWakeLoop, createExecutionTracker, type HostEvent } from "./lib/wake.js";
 import { startSessionLister } from "./lib/sessions.js";
 import { MESH_GUIDANCE } from "./lib/guidance.js";
 import { MeshRpc, snapshotFromMesh } from "./rpc.js";
@@ -252,21 +252,11 @@ export const MeshV2 = Plugin.define({
     // Session records outlive their process — ctx.session.get would call a
     // dead pre-restart session "alive".
     const sessionsSeen = new Set<string>();
+    const executions = createExecutionTracker(running);
     const trackExecutions = async () => {
       try {
         for await (const event of ctx.event.subscribe()) {
-          const type = (event as { type?: string }).type ?? "";
-          const sessionID = (event as { data?: { sessionID?: string } }).data?.sessionID;
-          if (typeof sessionID !== "string") continue;
-          if (type === "session.execution.started") {
-            running.add(sessionID);
-          } else if (
-            type === "session.execution.succeeded" ||
-            type === "session.execution.failed" ||
-            type === "session.execution.interrupted"
-          ) {
-            running.delete(sessionID);
-          }
+          executions.observe(event as HostEvent);
         }
       } catch {
         // Event stream unavailable: the wake loop then treats every existing
