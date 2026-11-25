@@ -638,3 +638,30 @@ describe("withTransaction: the rollback-failure recovery (0.30.0)", () => {
     expect(db.reopen).toHaveBeenCalled();
   });
 });
+
+describe("withTransaction: the third recovery surface (0.30.0 review)", () => {
+  it("recovers when the transaction is still open after a successful rollback path", () => {
+    // The engine-quirk class: the COMMIT ran, the ROLLBACK path never threw,
+    // yet inTransaction flips true after the call (the finally surface). The
+    // mock is sequence-aware: false at the entry guard, true at the finally.
+    const reopen = vi.fn(() => {});
+    let inTransactionCalls = 0;
+    const conn = {
+      all: () => [],
+      get: () => null,
+      run: () => {},
+      exec: () => {},
+      inTransaction: () => inTransactionCalls++ > 0,
+      close: () => {},
+    };
+    const db = {
+      conn,
+      path: "/tmp/does-not-matter/mesh.db",
+      reopen,
+    } as unknown as Parameters<typeof withTransaction>[0];
+    const result = withTransaction(db, () => "value");
+    expect(result).toBe("value");
+    // The finally check saw the stuck transaction and recovered.
+    expect(reopen).toHaveBeenCalled();
+  });
+});

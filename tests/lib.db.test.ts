@@ -249,3 +249,27 @@ describe("openMeshDb: the transaction-leak recovery (0.30.0)", () => {
     rmSync(testDir, { recursive: true, force: true });
   });
 });
+
+describe("openMeshDb: the closed-instance invariant (0.30.0 review)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "mesh-closed-"));
+  it("reopen() after an explicit close does NOT revive the instance", () => {
+    const db = openMeshDb(join(dir, "closed.db"));
+    db.close();
+    db.reopen();
+    // The disposed instance stays disposed: every call rethrows the closed
+    // engine error (the 0.28.2 orphan invariant, now enforced by the flag).
+    expect(() => db.conn.get("SELECT 1")).toThrow();
+  });
+
+  it("reopen() closes the abandoned engine (the shm lock dies with it)", () => {
+    const db = openMeshDb(join(dir, "leak.db"));
+    db.conn.exec("BEGIN");
+    const before = db.conn.inTransaction();
+    expect(before).toBe(true);
+    db.reopen();
+    // The reopen closed the leaked engine: the transaction is gone and the
+    // connection is fresh (the lock released with the close).
+    expect(db.conn.inTransaction()).toBe(false);
+    db.close();
+  });
+});

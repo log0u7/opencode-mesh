@@ -227,18 +227,33 @@ export function openMeshDb(path: string): MeshDb {
   // self-heal: it never reopens after an explicit close, and it exists to
   // keep THIS instance's wake loop honest, not to revive a disposed one).
   const reopen = () => {
+    if (closedByUs) return;
+    // Close the OLD engine before the rebuild: a leaked transaction's fd +
+    // shm READ lock die HERE (the incident signature was the lock surviving
+    // the recovery until GC finalized the abandoned handle). The close rolls
+    // back the open transaction and releases the locks; the catch covers a
+    // mid-teardown failure.
+    try {
+      conn.close();
+    } catch {}
     conn = openSqlite(path);
     conn.run("PRAGMA journal_mode = WAL");
     conn.run("PRAGMA busy_timeout = 5000");
     migrate(conn);
   };
+  let closedByUs = false;
   const delegating: SqliteConn = {
     all: (sql, params) => conn.all(sql, params),
     get: (sql, params) => conn.get(sql, params),
     run: (sql, params) => conn.run(sql, params),
     exec: (sql) => conn.exec(sql),
     inTransaction: () => conn.inTransaction(),
-    close: () => conn.close(),
+    close: () => {
+      // The explicit close: the instance is disposed — reopen() must never
+      // revive it (the 0.28.2 orphan invariant, now enforced).
+      closedByUs = true;
+      conn.close();
+    },
   };
-  return { conn: delegating, path, reopen, close: () => conn.close() };
+  return { conn: delegating, path, reopen, close: () => delegating.close() };
 }
