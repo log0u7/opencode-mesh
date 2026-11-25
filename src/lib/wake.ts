@@ -98,6 +98,12 @@ export const DEFAULT_WAKE_COOLDOWN_MS = 60000;
  * up on it: the binding is wrong (the bound session never reads this box) —
  * re-register in the owning session's tab. */
 export const MAX_UNDRAINED_PROMPTS = 3;
+/** How long a wake prompt may stay "in flight" before the collapse gate
+ * releases on its own: a turn shorter than the poll interval can deliver the
+ * prompt between two ticks (the busy event goes unobserved) — without the
+ * TTL the gate would mute the session forever. Worst case after expiry: one
+ * duplicate flash per TTL, still bounded by the fatigue guard. */
+export const PROMPT_GATE_TTL_MS = 120_000;
 /** Consecutive failed ticks before the loop stops itself: a closed database
  * (orphaned plugin instance after a hot-swap) or a dead host must not leave a
  * timer spinning silently forever. Reloading the plugin restarts the loop. */
@@ -114,6 +120,13 @@ export function startWakeLoop(options: WakeOptions): WakeHandle {
   const lastPromptAt = new Map<string, number>();
   const lastUnread = new Map<string, number>();
   const undrained = new Map<string, number>();
+  // Collapse gate (0.28.0): at most ONE wake prompt in flight per session.
+  // The host queue delivers one queued item per idle cycle: a second queued
+  // prompt fires later with its count and subject already stale — the
+  // phantom-unread class. Set at queue time, cleared when the session goes
+  // busy (a delivered prompt CAUSES the turn, so the busy event is the
+  // delivery receipt).
+  const pendingPrompt = new Map<string, number>();
   let stopped = false;
   let failures = 0;
   // Overlap guard (0.18.0): a prompt slower than the interval must not run
@@ -130,6 +143,19 @@ export function startWakeLoop(options: WakeOptions): WakeHandle {
       // plus one at prompt time. Boxes without unread deliveries are absent
       // from the result — their fatigue maps are cleared below like before.
       const statsByName = new Map(wakeBoxStats(options.db).map((s) => [s.box, s]));
+      // Clear in-flight gates: (a) delivered — the delivery causes a turn, the
+      // turn's busy event shows here as sessionRunning; (b) expired — a turn
+      // shorter than the poll interval fits entirely between two ticks, so
+      // the busy event can go unobserved; the TTL releases the gate and
+      // bounds any stuck state at the cost of at most one duplicate flash
+      // per TTL.
+      if (options.sessionRunning) {
+        for (const [sessionID, ts] of pendingPrompt) {
+          if (options.sessionRunning(sessionID) || now - ts >= PROMPT_GATE_TTL_MS) {
+            pendingPrompt.delete(sessionID);
+          }
+        }
+      }
       for (const box of listMailboxes(options.db)) {
         const stat = statsByName.get(box.name);
         const previous = lastUnread.get(box.name) ?? 0;
@@ -178,6 +204,14 @@ export function startWakeLoop(options: WakeOptions): WakeHandle {
           // pre-restart id): its live session will re-register and re-bind.
           continue;
         }
+        // Collapse gate: a prompt for this session is still queued — the host
+        // delivers it one idle cycle at a time and its turn drains the box.
+        // Queueing another only manufactures a stale phantom. Only engage
+        // when a sessionRunning callback exists (no busy signal, no delivery
+        // receipt — the gate would never clear).
+        if (options.sessionRunning && pendingPrompt.has(box.session_id)) {
+          continue;
+        }
         if (options.sessionRunning?.(box.session_id)) {
           // Mid-turn: a queued prompt would fire with a stale unread count
           // after the turn acked the mail. The turn-start check-in reads the
@@ -201,6 +235,9 @@ export function startWakeLoop(options: WakeOptions): WakeHandle {
           continue;
         }
         lastUnread.set(box.name, fresh);
+        // Collapse gate set ONLY now — after every bail: a bail here queues no
+        // prompt, and a gate set without one would mute the session forever.
+        if (options.sessionRunning) pendingPrompt.set(box.session_id, now);
         // Dispose during this tick (stop() below the running interval): the
         // prompt would fire into a torn-down host binding.
         if (stopped) return;
@@ -212,10 +249,16 @@ export function startWakeLoop(options: WakeOptions): WakeHandle {
         const subject = stat.subject;
         const preview =
           subject === null ? "" : subject.length > 60 ? `${subject.slice(0, 59)}…` : subject;
-        await options.prompt(
-          box.session_id,
-          preview === "" ? `mesh: ${fresh} unread` : `mesh: ${fresh} unread — "${preview}"`,
-        );
+        try {
+          await options.prompt(
+            box.session_id,
+            preview === "" ? `mesh: ${fresh} unread` : `mesh: ${fresh} unread — "${preview}"`,
+          );
+        } catch (error) {
+          // The prompt never queued: drop the gate so the next tick may retry.
+          pendingPrompt.delete(box.session_id);
+          throw error;
+        }
         // The prompt resolved after dispose: do not touch any further box.
         if (stopped) return;
       }

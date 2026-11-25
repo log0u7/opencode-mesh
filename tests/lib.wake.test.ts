@@ -94,10 +94,117 @@ describe("createExecutionTracker (the host's real session-status events)", () =>
     expect(t.isRunning("props")).toBe(false);
   });
 
+  it("flips inTransaction on the bun engine (the production runtime)", async () => {
+    // The exact relapse class: node:sqlite names the state `isTransaction`,
+    // bun:sqlite names it `inTransaction`. This test is inert on the node CI
+    // and runs wherever bun is the runtime.
+    const Bun = (globalThis as { Bun?: { sqlite?: { Database?: unknown } } }).Bun;
+    if (!Bun?.sqlite?.Database) return;
+    const { openSqlite } = await import("../src/lib/sqlite.js");
+    const conn = openSqlite(":memory:");
+    expect(conn.inTransaction()).toBe(false);
+    conn.exec("BEGIN");
+    expect(conn.inTransaction()).toBe(true);
+    conn.exec("ROLLBACK");
+    expect(conn.inTransaction()).toBe(false);
+    conn.close();
+  });
+
   it("tolerates unknown event shapes", () => {
     const t = createExecutionTracker();
     expect(() => t.observe({ type: "mystery" })).not.toThrow();
     expect(() => t.observe({})).not.toThrow();
+  });
+});
+
+describe("wake collapse gate (at most one prompt in flight per session)", () => {
+  it("does not queue a second prompt while the first is in flight", async () => {
+    const { db, prompt, prompts, sessionKnown } = setup(["s1"]);
+    let running = false;
+    registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
+    deliverMessage(db, { from: "n", to_box: "a", subject: "s", body: "b", created_at: 1000 });
+    const handle = startWakeLoop({
+      db,
+      prompt,
+      sessionKnown,
+      sessionRunning: () => running,
+      intervalMs: 10,
+      cooldownMs: 20,
+    });
+    await new Promise((r) => setTimeout(r, 80));
+    const first = prompts.length;
+    expect(first).toBeGreaterThanOrEqual(1);
+    // The mail drains (any path: the queue delivered a DIFFERENT turn, a
+    // journal read, ...) while the first prompt's own turn never ran. The
+    // fatigue and cooldown maps reset on the drain; a fresh mail arrives.
+    // Without the collapse gate this fires a second prompt whose inbox is
+    // already empty when its turn runs — the phantom class.
+    db.conn.run("UPDATE deliveries SET status = 'read' WHERE to_box = 'a'");
+    // Two fresh mails: unread must GROW past the stale previous (1) so the
+    // fatigue mute cannot explain the silence — only the collapse gate can.
+    deliverMessage(db, { from: "n", to_box: "a", subject: "s2", body: "b2", created_at: 2000 });
+    deliverMessage(db, { from: "n", to_box: "a", subject: "s3", body: "b3", created_at: 2001 });
+    await new Promise((r) => setTimeout(r, 200));
+    handle.stop();
+    expect(prompts.length).toBe(first);
+  });
+
+  it("clears the in-flight gate when the delivered prompt's turn runs", async () => {
+    const { db, prompt, prompts, sessionKnown } = setup(["s1"]);
+    let running = false;
+    registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
+    deliverMessage(db, { from: "n", to_box: "a", subject: "s", body: "b", created_at: 1000 });
+    const handle = startWakeLoop({
+      db,
+      prompt,
+      sessionKnown,
+      sessionRunning: () => running,
+      intervalMs: 10,
+      cooldownMs: 20,
+    });
+    await new Promise((r) => setTimeout(r, 80));
+    const first = prompts.length;
+    expect(first).toBeGreaterThanOrEqual(1);
+    // The delivered prompt causes a turn: busy flips true, then back to idle
+    // (the turn finished). The gate must have cleared with the busy event.
+    running = true;
+    await new Promise((r) => setTimeout(r, 40));
+    running = false;
+    deliverMessage(db, { from: "n", to_box: "a", subject: "s2", body: "b2", created_at: 2000 });
+    await new Promise((r) => setTimeout(r, 80));
+    handle.stop();
+    expect(prompts.length).toBeGreaterThan(first);
+  });
+  it("releases the gate after the TTL even if the busy window went unobserved", async () => {
+    vi.useFakeTimers();
+    try {
+      const { db, prompt, prompts, sessionKnown } = setup(["s1"]);
+      registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
+      deliverMessage(db, { from: "n", to_box: "a", subject: "s", body: "b", created_at: 1000 });
+      const handle = startWakeLoop({
+        db,
+        prompt,
+        sessionKnown,
+        // Never busy: the delivery receipt never shows — the TTL is the only
+        // escape (a turn shorter than the poll interval hides its busy event).
+        sessionRunning: () => false,
+        intervalMs: 100,
+        cooldownMs: 50,
+      });
+      await vi.advanceTimersByTimeAsync(100);
+      expect(prompts.length).toBe(1);
+      // Two fresh mails: ungated, the growth would fire again.
+      deliverMessage(db, { from: "n", to_box: "a", subject: "s2", body: "b2", created_at: 2000 });
+      deliverMessage(db, { from: "n", to_box: "a", subject: "s3", body: "b3", created_at: 2001 });
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(prompts.length).toBe(1);
+      // Past the TTL the gate releases: at most one duplicate flash per TTL.
+      await vi.advanceTimersByTimeAsync(70_000);
+      handle.stop();
+      expect(prompts.length).toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

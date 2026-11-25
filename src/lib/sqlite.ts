@@ -3,6 +3,9 @@ export interface SqliteConn {
   get<T = unknown>(sql: string, params?: unknown[]): T | null;
   run(sql: string, params?: unknown[]): void;
   exec(sql: string): void;
+  /** Is a transaction open on this connection? A leaked BEGIN pins the WAL
+   * snapshot forever — the phantom-unread class — so callers assert on it. */
+  inTransaction(): boolean;
   close(): void;
 }
 
@@ -15,12 +18,20 @@ interface SqliteStatement {
 interface BunSqliteDatabase {
   query(sql: string): SqliteStatement;
   run(sql: string, params?: unknown[]): unknown;
+  /** bun:sqlite exposes a GETTER named inTransaction (bun-types 1.3.x).
+   * db.isTransaction does NOT exist on bun — reading it returns undefined
+   * and silently disarms every guard (the 0.27.1 class: node green, prod
+   * engine differs). Verified on bun 1.3.14. */
+  inTransaction: boolean;
   close(): void;
 }
 
 interface NodeSqliteDatabase {
   prepare(sql: string): SqliteStatement;
   exec(sql: string): unknown;
+  /** node:sqlite exposes isTransaction (added v22.16/v24). bun:sqlite does
+   * NOT — the two engines name the same state differently. */
+  isTransaction: boolean;
   close(): void;
 }
 
@@ -41,6 +52,9 @@ function createPreparedConn(db: NodeSqliteDatabase): SqliteConn {
     exec(sql: string): void {
       db.exec(sql);
     },
+    inTransaction(): boolean {
+      return db.isTransaction;
+    },
     close(): void {
       db.close();
     },
@@ -60,6 +74,9 @@ function createBunConn(db: BunSqliteDatabase): SqliteConn {
     },
     exec(sql: string): void {
       db.run(sql);
+    },
+    inTransaction(): boolean {
+      return db.inTransaction;
     },
     close(): void {
       db.close();
