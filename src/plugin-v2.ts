@@ -276,12 +276,16 @@ export const MeshV2 = Plugin.define({
       ...(options.wakePools !== undefined ? { wakePools: options.wakePools } : {}),
       sessionKnown: (sessionID) => sessionsSeen.has(sessionID) || liveSessions.has(sessionID),
       sessionRunning: (sessionID) => running.has(sessionID),
-      prompt: (sessionID, text) =>
-        ctx.session.prompt({
-          sessionID,
-          text,
-          delivery: "queue",
-        }),
+      prompt: (sessionID, text, messageID) => {
+        // The server reads the prompt's explicit id (packages/core/src/session/session.ts:
+        // input.id ?? create) — the transport-retry idempotency key (0.28.1):
+        // every retry of this call reconciles to the same message and no
+        // ghost turn re-fires. The key is `id` (SessionPromptInput) — NOT
+        // `messageID` (that key lives on the plugin HOOK type, a different
+        // surface; an effect-schema input strips unknown keys).
+        const input = { sessionID, id: messageID, text, delivery: "queue" as const };
+        return ctx.session.prompt(input);
+      },
     });
 
     // Standing anti-narration directive in every session's system prompt: the
