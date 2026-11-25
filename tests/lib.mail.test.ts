@@ -69,6 +69,25 @@ describe("withTransaction (the txn hygiene the ghost hunt demanded)", () => {
     expect(db.conn.inTransaction()).toBe(false);
     db.close();
   });
+
+  it("surfaces the original error when the ROLLBACK itself fails", () => {
+    const conn = {
+      all: () => [],
+      get: () => null,
+      run: () => {},
+      exec: (sql: string) => {
+        if (sql === "ROLLBACK") throw new Error("rollback failed: connection mid-teardown");
+      },
+      inTransaction: () => false,
+      close: () => {},
+    };
+    const db = { conn } as unknown as Parameters<typeof withTransaction>[0];
+    expect(() =>
+      withTransaction(db, () => {
+        throw new Error("boom");
+      }),
+    ).toThrow("boom");
+  });
 });
 
 describe("mail ack flow", () => {

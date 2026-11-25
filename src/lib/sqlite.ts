@@ -18,13 +18,19 @@ interface SqliteStatement {
 interface BunSqliteDatabase {
   query(sql: string): SqliteStatement;
   run(sql: string, params?: unknown[]): unknown;
-  isTransaction: boolean;
+  /** bun:sqlite exposes a GETTER named inTransaction (bun-types 1.3.x).
+   * db.isTransaction does NOT exist on bun — reading it returns undefined
+   * and silently disarms every guard (the 0.27.1 class: node green, prod
+   * engine differs). Verified on bun 1.3.14. */
+  inTransaction: boolean;
   close(): void;
 }
 
 interface NodeSqliteDatabase {
   prepare(sql: string): SqliteStatement;
   exec(sql: string): unknown;
+  /** node:sqlite exposes isTransaction (added v22.16/v24). bun:sqlite does
+   * NOT — the two engines name the same state differently. */
   isTransaction: boolean;
   close(): void;
 }
@@ -70,7 +76,7 @@ function createBunConn(db: BunSqliteDatabase): SqliteConn {
       db.run(sql);
     },
     inTransaction(): boolean {
-      return db.isTransaction;
+      return db.inTransaction;
     },
     close(): void {
       db.close();

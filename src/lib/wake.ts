@@ -98,6 +98,12 @@ export const DEFAULT_WAKE_COOLDOWN_MS = 60000;
  * up on it: the binding is wrong (the bound session never reads this box) —
  * re-register in the owning session's tab. */
 export const MAX_UNDRAINED_PROMPTS = 3;
+/** How long a wake prompt may stay "in flight" before the collapse gate
+ * releases on its own: a turn shorter than the poll interval can deliver the
+ * prompt between two ticks (the busy event goes unobserved) — without the
+ * TTL the gate would mute the session forever. Worst case after expiry: one
+ * duplicate flash per TTL, still bounded by the fatigue guard. */
+export const PROMPT_GATE_TTL_MS = 120_000;
 /** Consecutive failed ticks before the loop stops itself: a closed database
  * (orphaned plugin instance after a hot-swap) or a dead host must not leave a
  * timer spinning silently forever. Reloading the plugin restarts the loop. */
@@ -137,11 +143,17 @@ export function startWakeLoop(options: WakeOptions): WakeHandle {
       // plus one at prompt time. Boxes without unread deliveries are absent
       // from the result — their fatigue maps are cleared below like before.
       const statsByName = new Map(wakeBoxStats(options.db).map((s) => [s.box, s]));
-      // Clear in-flight gates whose prompt was delivered: the delivery causes
-      // a turn, the turn's busy event shows here as sessionRunning.
+      // Clear in-flight gates: (a) delivered — the delivery causes a turn, the
+      // turn's busy event shows here as sessionRunning; (b) expired — a turn
+      // shorter than the poll interval fits entirely between two ticks, so
+      // the busy event can go unobserved; the TTL releases the gate and
+      // bounds any stuck state at the cost of at most one duplicate flash
+      // per TTL.
       if (options.sessionRunning) {
-        for (const sessionID of pendingPrompt.keys()) {
-          if (options.sessionRunning(sessionID)) pendingPrompt.delete(sessionID);
+        for (const [sessionID, ts] of pendingPrompt) {
+          if (options.sessionRunning(sessionID) || now - ts >= PROMPT_GATE_TTL_MS) {
+            pendingPrompt.delete(sessionID);
+          }
         }
       }
       for (const box of listMailboxes(options.db)) {
@@ -208,7 +220,6 @@ export function startWakeLoop(options: WakeOptions): WakeHandle {
         }
         lastPromptAt.set(box.name, now);
         undrained.set(box.name, cycles + 1);
-        if (options.sessionRunning) pendingPrompt.set(box.session_id, now);
         // The flash recomputes from the database at the moment it is emitted
         // (0.24.6): the tick-start grouped stat can be seconds old by the time
         // the loop reaches this box, and the prompt is queued — it fires later
@@ -224,6 +235,9 @@ export function startWakeLoop(options: WakeOptions): WakeHandle {
           continue;
         }
         lastUnread.set(box.name, fresh);
+        // Collapse gate set ONLY now — after every bail: a bail here queues no
+        // prompt, and a gate set without one would mute the session forever.
+        if (options.sessionRunning) pendingPrompt.set(box.session_id, now);
         // Dispose during this tick (stop() below the running interval): the
         // prompt would fire into a torn-down host binding.
         if (stopped) return;
