@@ -1,9 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 
-import { dirname } from "node:path";
-
 import type { MeshDb } from "./db.js";
-import { pluginWarn } from "./plugin-log.js";
+import { pluginWarn, storeLogDir } from "./plugin-log.js";
 import type { MailMessage } from "../types/peer.js";
 
 // Named mailboxes. A message is either:
@@ -464,6 +462,17 @@ export function ackReply(db: MeshDb, row: InboxRow): void {
 // The repo's SqliteConn wrapper exposes no transaction() method (node:sqlite /
 // bun:sqlite both support plain BEGIN/COMMIT through exec), so transactions are
 // manual. Single connection, synchronous, and no nested use: safe.
+// A reopen that fails must not replace the error the caller is reporting (the
+// original failure, or the leak refusal): log it, keep the old engine, and let
+// the next wake probe retry.
+function safeReopen(db: MeshDb): void {
+  try {
+    db.reopen?.();
+  } catch (error) {
+    pluginWarn(storeLogDir(db.path), `reopen failed: ${String(error)}`);
+  }
+}
+
 export function withTransaction<T>(db: MeshDb, fn: () => T): T {
   if (db.conn.inTransaction()) {
     // A leaked BEGIN pins the WAL snapshot forever (the wake loop then reads
@@ -472,10 +481,10 @@ export function withTransaction<T>(db: MeshDb, fn: () => T): T {
     // to the plugin log (console.warn is /dev/null under serve --service),
     // and refuse loudly.
     pluginWarn(
-      db.path ? dirname(db.path) : undefined,
-      "withTransaction: a leaked transaction recovered via connection reopen",
+      storeLogDir(db.path),
+      "withTransaction: a leaked transaction found, rebuilding the connection",
     );
-    db.reopen?.();
+    safeReopen(db);
     throw new Error(
       "transaction already open on this connection: a BEGIN leaked and must be fixed at the source",
     );
@@ -497,19 +506,19 @@ export function withTransaction<T>(db: MeshDb, fn: () => T): T {
     }
     if (rollbackFailed) {
       pluginWarn(
-        db.path ? dirname(db.path) : undefined,
-        "withTransaction: the ROLLBACK failed — the connection rebuilt in place",
+        storeLogDir(db.path),
+        "withTransaction: the ROLLBACK failed, rebuilding the connection",
       );
-      db.reopen?.();
+      safeReopen(db);
     }
     throw error;
   } finally {
     if (db.conn.inTransaction()) {
       pluginWarn(
-        db.path ? dirname(db.path) : undefined,
-        "withTransaction: transaction still open after the call — a BEGIN leaked; the connection must be rebuilt",
+        storeLogDir(db.path),
+        "withTransaction: transaction still open after the call, rebuilding the connection",
       );
-      db.reopen?.();
+      safeReopen(db);
     }
   }
 }

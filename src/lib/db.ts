@@ -228,18 +228,35 @@ export function openMeshDb(path: string): MeshDb {
   // keep THIS instance's wake loop honest, not to revive a disposed one).
   const reopen = () => {
     if (closedByUs) return;
-    // Close the OLD engine before the rebuild: a leaked transaction's fd +
-    // shm READ lock die HERE (the incident signature was the lock surviving
-    // the recovery until GC finalized the abandoned handle). The close rolls
-    // back the open transaction and releases the locks; the catch covers a
-    // mid-teardown failure.
+    // An in-memory store cannot be rebuilt: a fresh ":memory:" engine is a
+    // different, EMPTY database. Roll the leaked transaction back instead.
+    if (path.includes(":memory:")) {
+      try {
+        conn.exec("ROLLBACK");
+      } catch {}
+      return;
+    }
+    // Open the replacement FIRST, swap, then close the old engine. Closing
+    // first left the instance on a closed engine forever when the reopen
+    // itself failed (EMFILE, disk, permissions): every later call threw and
+    // the probe could never retry. The old engine still closes right here,
+    // so the leaked transaction's fd + shm READ lock die now, not at GC.
+    const fresh = openSqlite(path);
     try {
-      conn.close();
+      fresh.run("PRAGMA journal_mode = WAL");
+      fresh.run("PRAGMA busy_timeout = 5000");
+      migrate(fresh);
+    } catch (error) {
+      try {
+        fresh.close();
+      } catch {}
+      throw error;
+    }
+    const old = conn;
+    conn = fresh;
+    try {
+      old.close();
     } catch {}
-    conn = openSqlite(path);
-    conn.run("PRAGMA journal_mode = WAL");
-    conn.run("PRAGMA busy_timeout = 5000");
-    migrate(conn);
   };
   let closedByUs = false;
   const delegating: SqliteConn = {

@@ -724,33 +724,28 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
     {
       name: "mesh_spawn",
       description:
-        "Run a task as a headless background worker. Three spawn modes: session (default — the child runs in this host's natural context), project (project=<dir> — the child runs in that existing directory, git or not; a non-git project is still a project), worktree (worktree=true + project=<dir> — the git isolation, opt-in). With name: births an ENROLLED fleet agent instead — the child keeps the mesh tools, self-enrolls (mesh_register/mesh_join) at its first turn and joins the pools. Name collisions hand the mailbox over: last binder wins. Refuses past the enrolled spawn quota (spawnMax, default 4 running). With node=<paired peer>: the enrolled agent is born ON THAT PEER instead — the request is signed with this node's key, the peer runs its own enrolled-spawn path (same three modes; project must exist there) and DMs back an ack; the worker lives on the peer's registry (reap it there), local spawnMax does not apply.",
+        "Run a task as a headless background worker. Modes: session (default, this host's context), project (project=<dir>, git or not), worktree (worktree=true + project=<dir>, git isolation). " +
+        "name= births an ENROLLED fleet agent: it keeps the mesh tools, self-enrolls on its first turn and joins pools; a name collision hands the mailbox over (last binder wins); refused past spawnMax (default 4 running). " +
+        "node=<paired peer> births the enrolled agent ON that peer: signed request, same modes (project must exist there), ack by DM; it lives in the peer's registry (reap it there) and local spawnMax does not apply.",
       fields: [
         str("task", "Task for the worker"),
         str(
           "name",
-          "Enrolled spawn: the child's mailbox name (letters, digits, . _ -; max 64); names the worktree/branch in worktree mode",
+          "Enrolled: mailbox name ([A-Za-z0-9._-], max 64); also names the worktree branch",
           false,
         ),
-        str("role", "Enrolled spawn: fleet role (default worker)", false),
-        strArr(
-          "pools",
-          "Enrolled spawn: pool ids to join; the first becomes the primary group",
-          false,
-        ),
-        str("node", "Paired peer (node id or hostname): spawn the enrolled agent THERE", false),
+        str("role", "Enrolled: fleet role (default worker)", false),
+        strArr("pools", "Enrolled: pools to join, first = primary", false),
+        str("node", "Paired peer (node id or hostname) to spawn on", false),
         str(
           "project",
-          "Spawn mode project: run the child in this directory (must exist on the target host; git or not). With worktree=true: the source repo for the worktree",
+          "Directory on the target host (git or not); with worktree=true, the source repo",
           false,
         ),
-        bool(
-          "worktree",
-          "Spawn mode worktree (requires project=): isolate the child in a git worktree",
-        ),
-        str("model", "Worker provider/model (local spawn only)", false),
-        str("agent", "Agent for the worker (local spawn only)", false),
-        bool("auto", "Grant all permissions (default true; local spawn only)"),
+        bool("worktree", "Isolate in a git worktree (requires project)"),
+        str("model", "provider/model (local only)", false),
+        str("agent", "Agent (local only)", false),
+        bool("auto", "Grant all permissions (default true, local only)"),
       ],
       execute: async (args, context) => {
         const name = typeof args.name === "string" && args.name.length > 0 ? args.name : undefined;

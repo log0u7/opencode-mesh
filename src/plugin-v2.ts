@@ -68,6 +68,18 @@ export const MeshV2 = Plugin.define({
       const worktreeClient: WorktreeClient =
         options.worktreeClient ?? v2WorktreeDomainClient(ctx.worktree, ctx.location.project.id);
       const bindKey = `${ctx.location.project.id}:${ctx.location.directory}`;
+      // The orchestration tools stay off a worker's surface (0.30.0): an
+      // enrolled child registers, drains, waits, replies and reads the
+      // journal — it does not spawn, pair, or manage workers (about 4k
+      // characters less on every request of every worker).
+      const WORKER_TOOL_BLOCKLIST = new Set([
+        "mesh_spawn",
+        "mesh_pair",
+        "mesh_workers",
+        "mesh_worker_logs",
+        "mesh_worker_stop",
+        "mesh_worker_remove",
+      ]);
       await ctx.tool.transform((editor) => {
         for (const spec of buildToolSpecs({
           db,
@@ -83,6 +95,7 @@ export const MeshV2 = Plugin.define({
           projectID: ctx.location.project.id,
           ...(options.spawnMax !== undefined ? { spawnMax: options.spawnMax } : {}),
         })) {
+          if (WORKER_TOOL_BLOCKLIST.has(spec.name)) continue;
           editor.add({
             name: spec.name,
             description: spec.description,

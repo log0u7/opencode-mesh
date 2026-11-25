@@ -13,8 +13,11 @@ const PLUGIN_LOG_CAP = 512 * 1024;
 const PLUGIN_LOG_TAIL = 64 * 1024;
 
 export function pluginWarn(dir: string | undefined, message: string): void {
+  // No store directory, no log: falling back to "." wrote plugin.log into the
+  // process cwd, i.e. the user's project (and this repo, under the tests).
+  if (dir === undefined) return;
   try {
-    const file = join(dir ?? ".", PLUGIN_LOG_NAME);
+    const file = join(dir, PLUGIN_LOG_NAME);
     mkdirSync(dirname(file), { recursive: true });
     try {
       if (statSync(file).size > PLUGIN_LOG_CAP) {
@@ -30,7 +33,14 @@ export function pluginWarn(dir: string | undefined, message: string): void {
   }
 }
 
+/** The log directory of a store: beside the file, or none for an in-memory
+ * store (dirname(":memory:") is ".", the process cwd, i.e. the user's project). */
+export function storeLogDir(path: string | undefined): string | undefined {
+  if (path === undefined || path === "" || path.includes(":memory:")) return undefined;
+  return dirname(path);
+}
+
 /** The log file path, for tests and diagnostics. */
 export function pluginLogPath(dir: string): string {
-  return join(dir ?? ".", PLUGIN_LOG_NAME);
+  return join(dir, PLUGIN_LOG_NAME);
 }

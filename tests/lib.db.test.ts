@@ -273,3 +273,51 @@ describe("openMeshDb: the closed-instance invariant (0.30.0 review)", () => {
     db.close();
   });
 });
+
+describe("openMeshDb: reopen robustness (0.30.0 review fixes)", () => {
+  it("releases the leaked transaction's write lock for other connections", () => {
+    const testDir = mkdtempSync(join(tmpdir(), "mesh-lock-"));
+    const path = join(testDir, "lock.db");
+    const db = openMeshDb(path);
+    db.conn.exec("BEGIN");
+    db.conn.run(
+      "INSERT INTO messages (id, from_node, subject, body, status, created_at) VALUES ('leak','n','s','b','unread',1)",
+    );
+    const other = openSqlite(path);
+    other.run("PRAGMA busy_timeout = 0");
+    // The leaked writer holds the WAL write lock: the other connection is refused.
+    expect(() => other.exec("BEGIN IMMEDIATE")).toThrow();
+    db.reopen();
+    // The old engine closed: its write lock and its uncommitted row are gone.
+    other.exec("BEGIN IMMEDIATE");
+    other.exec("ROLLBACK");
+    expect(db.conn.get<{ n: number }>("SELECT COUNT(*) AS n FROM messages")?.n).toBe(0);
+    other.close();
+    db.close();
+    rmSync(testDir, { recursive: true, force: true });
+  });
+
+  it("keeps the instance usable when the replacement engine cannot open", () => {
+    const testDir = mkdtempSync(join(tmpdir(), "mesh-reopen-fail-"));
+    const db = openMeshDb(join(testDir, "gone.db"));
+    // The directory disappears: a fresh open fails, the open fd still works.
+    rmSync(testDir, { recursive: true, force: true });
+    expect(() => db.reopen()).toThrow();
+    expect(db.conn.get<{ one: number }>("SELECT 1 AS one")?.one).toBe(1);
+    db.close();
+  });
+});
+
+describe("openMeshDb: in-memory reopen", () => {
+  it("rolls back instead of swapping in an empty database", () => {
+    const db = openMeshDb(":memory:");
+    db.conn.run(
+      "INSERT INTO messages (id, from_node, subject, body, status, created_at) VALUES ('keep','n','s','b','unread',1)",
+    );
+    db.conn.exec("BEGIN");
+    db.reopen();
+    expect(db.conn.inTransaction()).toBe(false);
+    expect(db.conn.get<{ n: number }>("SELECT COUNT(*) AS n FROM messages")?.n).toBe(1);
+    db.close();
+  });
+});

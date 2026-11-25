@@ -1,5 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 import { openMeshDb } from "../src/lib/db.js";
 import { deliverMessage, joinPool, registerMailbox, unreadBoxCount } from "../src/lib/mail.js";
 import {
@@ -174,7 +178,7 @@ describe("createExecutionTracker (the host's real session-status events)", () =>
 describe("wake collapse gate (at most one prompt in flight per session)", () => {
   it("does not queue a second prompt while the first is in flight", async () => {
     const { db, prompt, prompts, sessionKnown } = setup(["s1"]);
-    let running = false;
+    const running = false;
     registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
     deliverMessage(db, { from: "n", to_box: "a", subject: "s", body: "b", created_at: 1000 });
     const handle = startWakeLoop({
@@ -644,9 +648,10 @@ describe("wake guards (0.18.0)", () => {
 });
 
 describe("wake tick failures", () => {
-  it("logs each failed tick and stops the loop after MAX_TICK_FAILURES", async () => {
+  it("backs off on failed ticks instead of stopping — and warns to the plugin log", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const db = openMeshDb(":memory:");
+    const dir = mkdtempSync(join(tmpdir(), "wake-backoff-"));
+    const db = openMeshDb(join(dir, "mesh.db"));
     registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
     deliverMessage(db, { from: "n", to_box: "a", subject: "s", body: "b", created_at: 1000 });
     db.close(); // A hot-swapped orphan instance owns a closed database.
@@ -659,16 +664,19 @@ describe("wake tick failures", () => {
       cooldownMs: 0,
     });
     await vi.waitFor(() => {
-      expect(warn.mock.calls.some((c) => String(c[0]).includes("wake loop stopped"))).toBe(true);
+      const log = readFileSync(join(dir, "plugin.log"), "utf8");
+      expect(log).toContain("wake tick failed 5 times — backing off");
     });
     handle.stop();
 
-    const stopMessages = warn.mock.calls.filter((c) =>
-      String(c[0]).includes("wake loop stopped after 5 consecutive tick failures"),
-    );
-    expect(stopMessages).toHaveLength(1);
-    expect(warn.mock.calls.some((c) => String(c[0]).includes("wake tick failed (1/5)"))).toBe(true);
+    // The 0.30.0 contract: the loop NEVER stops (the 0.28.x hard stop
+    // starved every box forever) — the backoff warns land in the plugin
+    // log, not in /dev/null.
+    const log = readFileSync(join(dir, "plugin.log"), "utf8");
+    expect(log).not.toContain("wake loop stopped");
+    expect(log).toContain("backing off to");
     warn.mockRestore();
+    rmSync(dir, { recursive: true, force: true });
   });
 
   it("keeps polling when a failure is followed by success", async () => {
