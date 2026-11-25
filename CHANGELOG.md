@@ -5,6 +5,20 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.27.3] - 2026-11-25
+
+### Fixed
+
+- The 0.27.1 tracker keyed on `properties.sessionID`/`properties.status` — a
+  shape taken from a stale SDK generation in node_modules. The live wire
+  (the host's generated client types) carries everything under `data`:
+  `session.status` is `{data: {sessionID, status: {type}}}`, `session.idle`
+  is `{data: {sessionID}}`. The tracker therefore matched nothing, the
+  mid-turn guard stayed off, and the phantom-unread class relapsed (one real
+  mail produced three flashes, the last two with an empty inbox). The
+  tracker now reads `data` first (the real wire) and `properties` second
+  (older SDK generations).
+
 ## [0.27.2] - 2026-11-25
 
 ### Removed
