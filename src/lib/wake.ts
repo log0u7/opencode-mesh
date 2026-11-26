@@ -8,6 +8,7 @@ import {
   claimFlash,
   claimFlashWithContent,
   deliverMessage,
+  sweepTasks,
   listMailboxes,
   mailboxByName,
   releaseFlash,
@@ -251,6 +252,9 @@ export function startWakeLoop(options: WakeOptions): WakeHandle {
       // wake gate and preview subject used to cost two queries per mailbox
       // plus one at prompt time. Boxes without unread deliveries are absent
       // from the result — their fatigue maps are cleared below like before.
+      // The deadline sweeper (refonte P2): expired open tasks fail on their
+      // own and the asker is notified — no intervention, no starvation.
+      sweepTasks(options.db, Date.now());
       const statsByName = new Map(wakeBoxStats(options.db).map((s) => [s.box, s]));
       for (const box of listMailboxes(options.db)) {
         const stat = statsByName.get(box.name);

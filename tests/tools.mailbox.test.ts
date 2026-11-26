@@ -10,13 +10,7 @@ import {
   registerMailbox,
 } from "../src/lib/mail.js";
 import { pairWithToken } from "../src/lib/peers.js";
-import {
-  buildToolSpecs,
-  buildWaitTimeoutMessage,
-  meshWaitClamp,
-  type MeshContext,
-  type ToolSpec,
-} from "../src/tools.js";
+import { buildToolSpecs, type MeshContext, type ToolSpec } from "../src/tools.js";
 import type { HostCapa } from "../src/lib/capa.js";
 
 function setup(capa?: () => Promise<HostCapa>) {
@@ -155,8 +149,8 @@ describe("mesh_send", () => {
     expect(bobInbox).toHaveLength(1);
     expect(bobInbox[0]!.from_box).toBe("alice");
     expect(bobInbox[0]!.subject).toBe("hi");
-    // 0.29.0: delivery_id left the agent view (an internal key; mesh_wait
-    // matches on reply_to).
+    // 0.29.0: delivery_id left the agent view (an internal key; the reply
+    // correlation is reply_to).
     expect("delivery_id" in bobInbox[0]!).toBe(false);
 
     // The cross-drain killer is dead: the sender's session sees nothing.
@@ -203,72 +197,6 @@ describe("mesh_inbox", () => {
     expect(inbox[0]!.id).toBe(sent.id);
     // Acked through the legacy message path.
     expect(await call("mesh_inbox", {}, "s-unreg")).toBe("inbox empty");
-  });
-});
-
-describe("mesh_wait", () => {
-  it("returns a reply delivered mid-poll and acks it", async () => {
-    const { db, call } = setup();
-    await call("mesh_register", { name: "alice" }, "s1");
-    await call("mesh_register", { name: "bob" }, "s2");
-    const out = await call("mesh_send", { to: "bob", subject: "q", body: "?" }, "s1");
-    const sent = JSON.parse(out) as { id: string };
-
-    const waiting = call("mesh_wait", { id: sent.id, timeout: 2 }, "s1");
-    setTimeout(() => {
-      deliverMessage(db, {
-        from: "n1",
-        from_box: "bob",
-        to_box: "alice",
-        subject: "a",
-        body: "!",
-        reply_to: sent.id,
-      });
-    }, 300);
-    const row = JSON.parse(await waiting) as { reply_to: string; from_box: string | null };
-    expect(row.reply_to).toBe(sent.id);
-    expect(row.from_box).toBe("bob");
-    expect(await call("mesh_inbox", {}, "s1")).toBe("inbox empty");
-  });
-
-  it("times out with the timeout message", async () => {
-    const { call } = setup();
-    await call("mesh_register", { name: "alice" }, "s1");
-    expect(await call("mesh_wait", { id: "nope", timeout: 1 }, "s1")).toBe(
-      "timeout: no reply to nope within 1s",
-    );
-  });
-
-  it("times out cleanly for an unregistered session (mailboxBySession null, global-only path)", async () => {
-    const { call } = setup();
-    expect(await call("mesh_wait", { id: "nope", timeout: 1 }, "s-unreg")).toBe(
-      "timeout: no reply to nope within 1s",
-    );
-  });
-
-  it("on timeout, lists the uncorrelated replies sitting in the box (the wake-path answers, 0.30.1)", async () => {
-    const { db, call } = setup();
-    await call("mesh_register", { name: "alice" }, "s1");
-    await call("mesh_register", { name: "bob" }, "s2");
-    await call("mesh_register", { name: "carol" }, "s3");
-    const out = await call("mesh_send", { to: "bob", subject: "q", body: "?" }, "s1");
-    const sent = JSON.parse(out) as { id: string };
-    // A reply from a THIRD box: not the request's recipient, so the sender
-    // match cannot fire — the wait reaches its timeout and lists the stray.
-    deliverMessage(db, {
-      from: "n1",
-      from_box: "carol",
-      to_box: "alice",
-      subject: "re: q",
-      body: "!",
-      created_at: Date.now() + 10,
-    });
-    const result = await call("mesh_wait", { id: sent.id, timeout: 1 }, "s1");
-    expect(result).toContain(`timeout: no reply to ${sent.id} within 1s`);
-    expect(result).toContain("uncorrelated");
-    expect(result).toContain("carol");
-    expect(result).toContain("re: q");
-    expect(result).toContain("mesh_inbox");
   });
 });
 
@@ -321,52 +249,6 @@ describe("P3 (0.31.0): the reply correlation is server-side", () => {
       "SELECT reply_to FROM messages WHERE from_box = 'bob'",
     );
     expect(row?.reply_to).toBeNull();
-  });
-});
-
-describe("P4 (0.31.0): mesh_wait is bounded and correlates on the sender", () => {
-  it("a reply that bypassed the auto-fill still returns the wait (sender match)", async () => {
-    const { db, call } = setup();
-    await call("mesh_register", { name: "alice" }, "s1");
-    await call("mesh_register", { name: "bob" }, "s2");
-    const out = await call("mesh_send", { to: "bob", subject: "q", body: "?" }, "s1");
-    const sent = JSON.parse(out) as { id: string };
-    const t0 = Date.now();
-    const waiting = call("mesh_wait", { id: sent.id, timeout: 5 }, "s1");
-    // DB-level delivery: the answer bypasses mesh_send, so NO auto-fill —
-    // reply_to stays NULL (a legacy/wire-path reply). The wait must still
-    // return on the sender + arrival-after-request match.
-    setTimeout(() => {
-      deliverMessage(db, {
-        from: "n1",
-        from_box: "bob",
-        to_box: "alice",
-        subject: "re: q",
-        body: "!",
-      });
-    }, 300);
-    const row = JSON.parse(await waiting) as { from_box: string | null; subject: string };
-    expect(Date.now() - t0).toBeLessThan(4500);
-    expect(row.from_box).toBe("bob");
-    expect(row.subject).toBe("re: q");
-  });
-
-  it("the timeout message names the clamp — the caller never reads an unexplained early death (the orq repro, 0.32.0)", () => {
-    // orq: timeout 60 requested, the result said "within 30s" with no word
-    // about the clamp — read as a mechanical abort or an agent silence.
-    const msg = buildWaitTimeoutMessage("id-x", 30, 60, []);
-    expect(msg).toContain("within 30s");
-    expect(msg).toContain("requested 60s");
-    expect(msg).toContain("clamped");
-    // An explicit short timeout: no clamp note.
-    const plain = buildWaitTimeoutMessage("id-y", 5, 5, []);
-    expect(plain).not.toContain("clamped");
-  });
-
-  it("the clamp caps the requested timeout at 30s", () => {
-    expect(meshWaitClamp(300)).toBe(30);
-    expect(meshWaitClamp(undefined)).toBe(30);
-    expect(meshWaitClamp(5)).toBe(5);
   });
 });
 

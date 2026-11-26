@@ -26,8 +26,12 @@ import {
   touchMailbox,
   unreadCount,
   unreadMessages,
-  unmatchedUnread,
-  waitReplyBroad,
+  askTask,
+  getTask,
+  listTasks,
+  replyTask,
+  sweepTasks,
+  type TaskState,
 } from "./lib/mail.js";
 import { journalQuery } from "./lib/journal.js";
 import { listLocks, releaseLock, tryLock } from "./lib/locks.js";
@@ -194,54 +198,6 @@ export const WORKER_TOOL_BLOCKLIST = new Set([
   "mesh_worker_stop",
   "mesh_worker_remove",
 ]);
-
-/** The hard cap (0.31.0): a wait parks the whole turn and makes the agent
- * unreachable — every blocked second invites the host's user-prompt
- * interrupt. 30s covers the fast-RPC case; anything longer is the wake
- * pattern's job (send, end the turn, drain on the flash). */
-export const MESH_WAIT_MAX_S = 30;
-export const meshWaitClamp = (timeout: number | undefined): number =>
-  Math.min(typeof timeout === "number" && timeout > 0 ? timeout : MESH_WAIT_MAX_S, MESH_WAIT_MAX_S);
-
-/** The wait's timeout message (0.32.0): a clamped request says SO — the orq
- * repro read "within 30s" on a 60s request as a mechanical abort or an
- * agent silence, because the message never named the clamp. The note also
- * carries the doctrine (send, end the turn, drain). */
-export function buildWaitTimeoutMessage(
-  id: string,
-  seconds: number,
-  requested: number | undefined,
-  strays: {
-    id: string;
-    from_box: string | null;
-    from: string;
-    subject: string;
-    reply_to: string | null;
-  }[],
-): string {
-  const clamped = requested !== undefined && requested > MESH_WAIT_MAX_S;
-  const note = clamped
-    ? ` (requested ${requested}s, clamped at MESH_WAIT_MAX_S=${MESH_WAIT_MAX_S} — send, end the turn, the wake brings the reply)`
-    : "";
-  if (strays.length === 0) {
-    return `timeout: no reply to ${id} within ${seconds}s${note}`;
-  }
-  const shown = strays
-    .slice(0, 5)
-    .map(
-      (r) =>
-        `  ${r.id.slice(0, 8)} from ${r.from_box ?? r.from ?? "?"} "${r.subject}" (reply_to: ${r.reply_to ?? "none"})`,
-    );
-  const more =
-    strays.length > shown.length ? `\n  ... and ${strays.length - shown.length} more` : "";
-  return (
-    [
-      `timeout: no reply to ${id} within ${seconds}s${note}`,
-      `uncorrelated unread in your box — drain with mesh_inbox and reply with reply_to=<id>:`,
-      ...shown,
-    ].join("\n") + more
-  );
-}
 
 export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
   const {
@@ -697,8 +653,9 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
           return "inbox empty";
         }
         // Compact JSON (0.29.0): the pretty-print cost bytes on every drain,
-        // and delivery_id is an internal key the agent never uses (mesh_wait
-        // matches on reply_to).
+        // and delivery_id is an internal key the agent never uses (the
+        // reply correlation is reply_to; tasks correlate by task_id
+        // server-side).
         return JSON.stringify(
           rows.map((r) => ({
             id: r.id,
@@ -715,39 +672,96 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
     },
 
     {
-      name: "mesh_wait",
+      name: "mesh_ask",
       description:
-        "Wait (max 30s) for a reply to a sent message. Only when your next step in THIS turn depends on the answer. Otherwise send, end the turn, the wake brings the reply.",
+        "Ask another mailbox a question and get a task id immediately (NEVER blocks). The answer arrives as a wake on the terminal or input_required state; a group notifies ONCE when fully answered. Replaces mesh_wait.",
       fields: [
-        str("id", "Message id from mesh_send output"),
-        num("timeout", "Seconds to wait (default 30, hard-capped at 30)"),
+        str("to", "The target mailbox (same host — cross-host tasks land with the outbox)"),
+        str("body", "The question"),
+        str("group", "Group id: batch several asks, ONE digest when all are answered", false),
+        num("deadline", "Seconds from now; past it the task fails on its own"),
       ],
       execute: async (args, context) => {
         const sid = sessionID(context);
+        const sessionBoxes = mailboxesBySession(db, sid);
+        const from_box = sessionBoxes[0]?.name ?? null;
         touchMailbox(db, sid, Date.now());
-        const requested = typeof args.timeout === "number" ? args.timeout : undefined;
-        const seconds = meshWaitClamp(requested);
-        const deadline = Date.now() + seconds * 1000;
-        while (Date.now() < deadline) {
-          // Atomic fetch+ack, same race fix as mesh_inbox (0.16.1). The
-          // broadened matcher (0.31.0) also returns on any message from the
-          // request's recipient box — the correlation survives a reply that
-          // skipped the auto-fill.
-          const row = waitReplyBroad(db, String(args.id), sid);
-          if (row) {
-            return JSON.stringify(row, null, 2);
-          }
-          await new Promise((r) => setTimeout(r, 250));
-        }
-        // On timeout, list the uncorrelated unread (0.30.1): the wake-path
-        // replies (reply_to NULL — the flash carried no id before 0.30.1) sit
-        // in the box while the waiter starves. Name them so the caller drains
-        // immediately instead of re-waiting blind.
-        const strays = unmatchedUnread(db, String(args.id), sid);
-        return buildWaitTimeoutMessage(String(args.id), seconds, requested, strays);
+        const to = typeof args.to === "string" ? args.to : "";
+        if (!to) return "error: mesh_ask needs a target mailbox";
+        const deadline =
+          typeof args.deadline === "number" && args.deadline > 0
+            ? Date.now() + args.deadline * 1000
+            : null;
+        const task = askTask(db, {
+          from_box,
+          to_box: to,
+          question: String(args.body ?? ""),
+          group_id: typeof args.group === "string" && args.group.length > 0 ? args.group : null,
+          deadline,
+        });
+        return JSON.stringify(
+          { task_id: task.id, group: task.group_id, delivered_to: task.to_box },
+          null,
+          2,
+        );
       },
     },
-
+    {
+      name: "mesh_reply",
+      description:
+        "Answer a task received in your box. The asker is notified on terminal and input_required states; a group notifies once, fully answered, as a digest.",
+      fields: [
+        str("task_id", "The task id from the task message in your box"),
+        str("result", "The answer"),
+        str("state", "completed (default) | failed | input_required | working", false),
+      ],
+      execute: async (args, context) => {
+        const sid = sessionID(context);
+        const sessionBoxes = mailboxesBySession(db, sid).map((b) => b.name);
+        touchMailbox(db, sid, Date.now());
+        const taskId = typeof args.task_id === "string" ? args.task_id : "";
+        const state = (typeof args.state === "string" ? args.state : "completed") as TaskState;
+        if (!taskId) return "error: mesh_reply needs a task_id";
+        const task = getTask(db, taskId);
+        if (!task) return "error: unknown task";
+        const replyingBox = sessionBoxes.find((b) => b === task.to_box);
+        if (!replyingBox)
+          return "error: only the task's target mailbox may reply — run mesh_register with that box";
+        const res = replyTask(db, taskId, replyingBox, String(args.result ?? ""), state);
+        return res.ok
+          ? JSON.stringify({ task_id: taskId.slice(0, 8), state, notified: res.notified })
+          : `error: ${res.error}`;
+      },
+    },
+    {
+      name: "mesh_tasks",
+      description: "List your tasks (asked or received), newest first. Read-only, never blocks.",
+      fields: [str("group", "Filter by group id", false)],
+      execute: async (args, context) => {
+        const sid = sessionID(context);
+        const sessionBoxes = mailboxesBySession(db, sid).map((b) => b.name);
+        touchMailbox(db, sid, Date.now());
+        const rows = listTasks(
+          db,
+          sessionBoxes,
+          typeof args.group === "string" && args.group.length > 0 ? args.group : undefined,
+        );
+        return `tasks: ${rows.length}\n${JSON.stringify(
+          rows.map((t) => ({
+            id: t.id.slice(0, 8),
+            from: t.from_box,
+            to: t.to_box,
+            state: t.state,
+            group: t.group_id,
+            question: t.question.slice(0, 60),
+            result: t.result?.slice(0, 120),
+            deadline: t.deadline,
+          })),
+          null,
+          2,
+        )}`;
+      },
+    },
     {
       name: "mesh_journal",
       description:

@@ -64,7 +64,7 @@ describe("mesh database schema", () => {
       legacy.close();
 
       const db = openMeshDb(file);
-      expect(db.conn.get<{ user_version: number }>("PRAGMA user_version")?.user_version).toBe(18);
+      expect(db.conn.get<{ user_version: number }>("PRAGMA user_version")?.user_version).toBe(19);
       const names = db.conn
         .all<{ name: string }>("SELECT name FROM sqlite_master WHERE type = 'index'")
         .map((row) => row.name);
@@ -89,7 +89,7 @@ describe("mesh database schema", () => {
       v1.close();
 
       const db = openMeshDb(file);
-      expect(db.conn.get<{ user_version: number }>("PRAGMA user_version")?.user_version).toBe(18);
+      expect(db.conn.get<{ user_version: number }>("PRAGMA user_version")?.user_version).toBe(19);
       const columns = db.conn
         .all<{ name: string }>("PRAGMA table_info(peers)")
         .map((row) => row.name);
@@ -101,7 +101,7 @@ describe("mesh database schema", () => {
       // migration pass, no version churn.
       const reopened = openMeshDb(file);
       expect(reopened.conn.get<{ user_version: number }>("PRAGMA user_version")?.user_version).toBe(
-        18,
+        19,
       );
       reopened.close();
     } finally {
@@ -157,7 +157,7 @@ describe("mesh database schema", () => {
       v8.close();
 
       const db = openMeshDb(file);
-      expect(db.conn.get<{ user_version: number }>("PRAGMA user_version")?.user_version).toBe(18);
+      expect(db.conn.get<{ user_version: number }>("PRAGMA user_version")?.user_version).toBe(19);
       const columns = db.conn
         .all<{ name: string }>("PRAGMA table_info(messages)")
         .map((row) => row.name);
@@ -188,7 +188,7 @@ describe("mesh database schema", () => {
       v13.close();
 
       const db = openMeshDb(file);
-      expect(db.conn.get<{ user_version: number }>("PRAGMA user_version")?.user_version).toBe(18);
+      expect(db.conn.get<{ user_version: number }>("PRAGMA user_version")?.user_version).toBe(19);
       const columns = db.conn
         .all<{ name: string }>("PRAGMA table_info(workers)")
         .map((row) => row.name);

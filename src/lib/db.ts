@@ -15,7 +15,7 @@ export type MeshDb = {
 
 // Bump when a schema change needs a migration step; the version anchors future
 // migrations that cannot be expressed as idempotent `CREATE ... IF NOT EXISTS`.
-const SCHEMA_VERSION = 18;
+const SCHEMA_VERSION = 19;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS peers (
@@ -176,6 +176,29 @@ function migrate(conn: SqliteConn): void {
   // wakes: read at the next drain or flash). Legacy rows read as notify.
   if (!messageColumns.includes("kind")) {
     conn.exec("ALTER TABLE messages ADD COLUMN kind TEXT NOT NULL DEFAULT 'notify'");
+  }
+  // v19: tasks — the A2A task lifecycle (the refonte P2): mesh_ask submits,
+  // the responder mesh_reply's, the correlation is server-side (the asker's
+  // notification fires on terminal/input_required states only). group_id
+  // batches a collective ask into ONE digest.
+  const taskColumns = conn.all<{ name: string }>("PRAGMA table_info(tasks)").map((r) => r.name);
+  if (taskColumns.length === 0) {
+    conn.exec(`
+      CREATE TABLE tasks (
+        id TEXT PRIMARY KEY,
+        from_box TEXT,
+        to_box TEXT NOT NULL,
+        group_id TEXT,
+        question TEXT NOT NULL,
+        result TEXT,
+        state TEXT NOT NULL DEFAULT 'submitted',
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        deadline INTEGER
+      );
+      CREATE INDEX idx_tasks_to_state ON tasks(to_box, state);
+      CREATE INDEX idx_tasks_group ON tasks(group_id);
+    `);
   }
   // v5: messages.origin_id (cross-host broadcast dedup).
   if (!messageColumns.includes("origin_id")) {

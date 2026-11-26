@@ -1061,6 +1061,192 @@ export function claimFlashWithContent(
   });
 }
 
+// ---- tasks (the refonte P2: the A2A lifecycle, server-side correlation) ----
+
+export type TaskState =
+  | "submitted"
+  | "working"
+  | "input_required"
+  | "completed"
+  | "failed"
+  | "canceled";
+
+export const TASK_OPEN_STATES = ["submitted", "working", "input_required"] as const;
+
+export type TaskRow = {
+  id: string;
+  from_box: string | null;
+  to_box: string;
+  group_id: string | null;
+  question: string;
+  result: string | null;
+  state: TaskState;
+  created_at: number;
+  updated_at: number;
+  deadline: number | null;
+};
+
+function rowToTask(row: Record<string, unknown>): TaskRow {
+  return row as unknown as TaskRow;
+}
+
+/** mesh_ask: submit a task — the row lands and the responder is notified
+ * (a notify message carrying the task id and the reply instruction). The
+ * correlation is server-side: the reply comes through mesh_reply(task_id),
+ * reply_to is no longer part of the contract. Returns immediately. */
+export function askTask(
+  db: MeshDb,
+  input: {
+    from_box: string | null;
+    to_box: string;
+    question: string;
+    group_id?: string | null;
+    deadline?: number | null;
+  },
+): TaskRow {
+  const id = randomUUID();
+  const now = Date.now();
+  db.conn.run(
+    `INSERT INTO tasks (id, from_box, to_box, group_id, question, result, state, created_at, updated_at, deadline)
+     VALUES (?, ?, ?, ?, ?, NULL, 'submitted', ?, ?, ?)`,
+    [
+      id,
+      input.from_box,
+      input.to_box,
+      input.group_id ?? null,
+      input.question,
+      now,
+      now,
+      input.deadline ?? null,
+    ],
+  );
+  const id8 = id.slice(0, 8);
+  deliverMessage(db, {
+    from: "mesh-tasks",
+    from_box: input.from_box,
+    to_box: input.to_box,
+    subject: `task ${id8}: ${input.question.slice(0, 60)}`,
+    body:
+      `${input.question}\n\n` +
+      `Reply with: mesh_reply(task_id="${id}", result="...", state="completed") ` +
+      `— state also accepts "failed" and "input_required". The asker is notified on terminal and input_required states.`,
+    kind: "notify",
+  });
+  return {
+    id,
+    from_box: input.from_box,
+    to_box: input.to_box,
+    group_id: input.group_id ?? null,
+    question: input.question,
+    result: null,
+    state: "submitted",
+    created_at: now,
+    updated_at: now,
+    deadline: input.deadline ?? null,
+  };
+}
+
+/** The task by id (or null). */
+export function getTask(db: MeshDb, id: string): TaskRow | null {
+  const row = db.conn.get<Record<string, unknown>>("SELECT * FROM tasks WHERE id = ?", [id]);
+  return row ? rowToTask(row) : null;
+}
+
+/** Is the group fully answered (every task terminal or input_required)? */
+function groupReady(db: MeshDb, groupId: string): boolean {
+  const open = db.conn.get<{ n: number }>(
+    `SELECT COUNT(*) AS n FROM tasks WHERE group_id = ? AND state NOT IN ('completed','failed','canceled','input_required')`,
+    [groupId],
+  );
+  return (open?.n ?? 0) === 0;
+}
+
+/** The digest for a group: one line per task. */
+function groupDigest(db: MeshDb, groupId: string): string {
+  const rows = db.conn.all<{ id: string; state: string; result: string | null; question: string }>(
+    "SELECT id, state, result, question FROM tasks WHERE group_id = ? ORDER BY created_at ASC",
+    [groupId],
+  );
+  return rows
+    .map((r) => `[${r.id.slice(0, 8)}] ${r.state}: ${r.result ?? r.question.slice(0, 60)}`)
+    .join("\n");
+}
+
+/** mesh_reply: the responder answers a task. ONLY the task's to_box owner
+ * may reply. Terminal states (and input_required) notify the asker; a
+ * group notifies ONCE, when ALL its tasks are answered (the digest — the
+ * collective ask costs one wake instead of one per task). */
+export function replyTask(
+  db: MeshDb,
+  taskId: string,
+  replyingBox: string,
+  result: string,
+  state: TaskState = "completed",
+): { ok: boolean; error?: string; notified: boolean } {
+  const task = getTask(db, taskId);
+  if (!task) return { ok: false, error: "unknown task", notified: false };
+  if (task.to_box !== replyingBox)
+    return { ok: false, error: "only the task's target mailbox may reply", notified: false };
+  if (["completed", "failed", "canceled"].includes(task.state))
+    return { ok: false, error: `the task is already ${task.state}`, notified: false };
+  const now = Date.now();
+  db.conn.run("UPDATE tasks SET result = ?, state = ?, updated_at = ? WHERE id = ?", [
+    result,
+    state,
+    now,
+    taskId,
+  ]);
+  // The asker notification: terminal states always; input_required too (a
+  // pause is a deliberate answer the asker must see). "working" never wakes.
+  // The asker notification: terminal states always; input_required too (a
+  // pause is a deliberate answer the asker must see). working/submitted never.
+  const notifyNow = ["completed", "failed", "canceled", "input_required"].includes(state);
+  if (!notifyNow) return { ok: true, notified: false };
+  if (task.group_id && !groupReady(db, task.group_id)) return { ok: true, notified: false };
+  if (!task.from_box) return { ok: true, notified: false };
+  const body = task.group_id
+    ? `The group is answered:\n${groupDigest(db, task.group_id)}`
+    : `${result}\n(task ${taskId.slice(0, 8)}, state: ${state})`;
+  deliverMessage(db, {
+    from: "mesh-tasks",
+    from_box: task.to_box,
+    to_box: task.from_box,
+    subject: `task ${taskId.slice(0, 8)} ${state}`,
+    body,
+    kind: "notify",
+  });
+  return { ok: true, notified: true };
+}
+
+/** The deadline sweeper: expired open tasks fail WITHOUT intervention and
+ * the asker is notified (the group rules apply). Returns the swept count. */
+export function sweepTasks(db: MeshDb, now: number): number {
+  const expired = db.conn.all<{ id: string }>(
+    `SELECT id FROM tasks WHERE deadline IS NOT NULL AND deadline < ? AND state IN ('submitted','working','input_required')`,
+    [now],
+  );
+  for (const row of expired) {
+    const task = getTask(db, row.id);
+    if (!task) continue;
+    replyTask(db, row.id, task.to_box, "deadline exceeded", "failed");
+  }
+  return expired.length;
+}
+
+/** mesh_tasks: the compact listing (no blocking). group filters; the caller's
+ * boxes see the tasks they asked OR are asked. */
+export function listTasks(db: MeshDb, boxes: string[], groupId?: string): TaskRow[] {
+  if (boxes.length === 0) return [];
+  const placeholders = boxes.map(() => "?").join(",");
+  const rows = db.conn.all<Record<string, unknown>>(
+    `SELECT * FROM tasks WHERE (from_box IN (${placeholders}) OR to_box IN (${placeholders}))${
+      groupId ? " AND group_id = ?" : ""
+    } ORDER BY created_at DESC LIMIT 50`,
+    groupId ? [...boxes, ...boxes, groupId] : [...boxes, ...boxes],
+  );
+  return rows.map(rowToTask);
+}
+
 /** The local registry rows this node owns (for the /registry-sync push). */
 export function localRegistryRows(db: MeshDb): FederatedRegistryRow[] {
   // A NULL registered_at (a row that predates the column) reads as 0 — the

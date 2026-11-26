@@ -129,6 +129,7 @@ function fakeCtx(
 }
 
 const TOOL_NAMES = [
+  "mesh_ask",
   "mesh_inbox",
   "mesh_join",
   "mesh_journal",
@@ -137,11 +138,12 @@ const TOOL_NAMES = [
   "mesh_pair",
   "mesh_pools",
   "mesh_register",
+  "mesh_reply",
   "mesh_send",
   "mesh_spawn",
   "mesh_status",
+  "mesh_tasks",
   "mesh_unlock",
-  "mesh_wait",
   "mesh_worker_logs",
   "mesh_worker_remove",
   "mesh_worker_stop",
@@ -265,8 +267,11 @@ describe("opencode-mesh v2 setup", () => {
       }
       for (const required of [
         "mesh_register",
+        "mesh_ask",
         "mesh_inbox",
-        "mesh_wait",
+        "mesh_ask",
+        "mesh_reply",
+        "mesh_tasks",
         "mesh_send",
         "mesh_journal",
       ]) {
@@ -502,7 +507,8 @@ describe("opencode-mesh v2 setup", () => {
     expect(MESH_GUIDANCE).toContain("drain the whole inbox first");
     expect(MESH_GUIDANCE).toContain("process the set in one pass");
     expect(MESH_GUIDANCE).toContain("re-check the inbox before any decisive reply");
-    expect(MESH_GUIDANCE).toContain("a mesh_wait timeout is not proof of loss");
+    expect(MESH_GUIDANCE).toContain("mesh_wait no longer exists");
+    expect(MESH_GUIDANCE).toContain("mesh_ask (NEVER blocks)");
 
     await cleanup?.();
   });

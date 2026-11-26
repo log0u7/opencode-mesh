@@ -2,7 +2,11 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   ackMessages,
+  askTask,
   deliverMessage,
+  getTask,
+  replyTask,
+  sweepTasks,
   inboxRead,
   joinPool,
   receiveMessage,
@@ -1006,6 +1010,106 @@ describe("P1.2 (refonte): message kinds — a fyi DM never wakes", () => {
       created_at: 1000,
     });
     expect(wakeBoxStats(db).find((s) => s.box === "a")?.wakeable).toBe(true);
+    db.close();
+  });
+});
+
+describe("P2 (refonte): the tasks core — server-side correlation, one wake for a group", () => {
+  it("mesh_ask submits and notifies the responder with the task id (no reply_to in the contract)", () => {
+    const db = openMeshDb(":memory:");
+    registerMailbox(db, { name: "alice", session_id: "s1", now: 1000 });
+    registerMailbox(db, { name: "bob", session_id: "s2", now: 1000 });
+    const task = askTask(db, { from_box: "alice", to_box: "bob", question: "quel etat du build?" });
+    expect(task.state).toBe("submitted");
+    expect(task.to_box).toBe("bob");
+    // The responder's box holds a notify message carrying the task id.
+    const row = db.conn.get<{ subject: string; body: string; kind: string }>(
+      "SELECT m.subject, m.body, m.kind FROM messages m JOIN deliveries d ON d.message_id = m.id WHERE d.to_box = 'bob'",
+    )!;
+    expect(row.kind).toBe("notify");
+    expect(row.subject).toContain(task.id.slice(0, 8));
+    expect(row.body).toContain("quel etat du build?");
+    expect(row.body).toContain(`mesh_reply(task_id="${task.id}"`);
+    db.close();
+  });
+
+  it("mesh_reply completes and notifies the asker; only the target mailbox may reply", () => {
+    const db = openMeshDb(":memory:");
+    registerMailbox(db, { name: "alice", session_id: "s1", now: 1000 });
+    registerMailbox(db, { name: "bob", session_id: "s2", now: 1000 });
+    const task = askTask(db, { from_box: "alice", to_box: "bob", question: "q" });
+    // A foreign box cannot reply.
+    const foreign = replyTask(db, task.id, "mallory", "hack", "completed");
+    expect(foreign.ok).toBe(false);
+    // The right box replies: the asker gets the result.
+    const rep = replyTask(db, task.id, "bob", "build vert", "completed");
+    expect(rep.ok).toBe(true);
+    expect(rep.notified).toBe(true);
+    const got = db.conn.get<{ subject: string; body: string }>(
+      "SELECT m.subject, m.body FROM messages m JOIN deliveries d ON d.message_id = m.id WHERE d.to_box = 'alice'",
+    )!;
+    expect(got.subject).toContain("completed");
+    expect(got.body).toContain("build vert");
+    expect(getTask(db, task.id)?.state).toBe("completed");
+    // Double reply: refused.
+    expect(replyTask(db, task.id, "bob", "again", "completed").ok).toBe(false);
+    db.close();
+  });
+
+  it("the group digest: ONE notification when all the group's tasks are answered", () => {
+    const db = openMeshDb(":memory:");
+    registerMailbox(db, { name: "alice", session_id: "s1", now: 1000 });
+    registerMailbox(db, { name: "bob", session_id: "s2", now: 1000 });
+    const t1 = askTask(db, { from_box: "alice", to_box: "bob", question: "q1", group_id: "g1" });
+    const t2 = askTask(db, { from_box: "alice", to_box: "bob", question: "q2", group_id: "g1" });
+    // The first answer: nothing reaches the asker yet (the group is open).
+    const r1 = replyTask(db, t1.id, "bob", "reponse 1", "completed");
+    expect(r1.notified).toBe(false);
+    expect(
+      db.conn.get<{ n: number }>(
+        "SELECT COUNT(*) AS n FROM messages m JOIN deliveries d ON d.message_id = m.id WHERE d.to_box = 'alice'",
+      )?.n,
+    ).toBe(0);
+    // The second answer: ONE digest with both results.
+    const r2 = replyTask(db, t2.id, "bob", "reponse 2", "completed");
+    expect(r2.notified).toBe(true);
+    const got = db.conn.get<{ body: string }>(
+      "SELECT m.body FROM messages m JOIN deliveries d ON d.message_id = m.id WHERE d.to_box = 'alice'",
+    )!;
+    expect(got.body).toContain("The group is answered");
+    expect(got.body).toContain("reponse 1");
+    expect(got.body).toContain("reponse 2");
+    db.close();
+  });
+
+  it("input_required notifies the asker immediately (a pause is a deliberate answer)", () => {
+    const db = openMeshDb(":memory:");
+    registerMailbox(db, { name: "alice", session_id: "s1", now: 1000 });
+    registerMailbox(db, { name: "bob", session_id: "s2", now: 1000 });
+    const t = askTask(db, { from_box: "alice", to_box: "bob", question: "q" });
+    const r = replyTask(db, t.id, "bob", "il me manque la zone DNS", "input_required");
+    expect(r.notified).toBe(true);
+    expect(getTask(db, t.id)?.state).toBe("input_required");
+    db.close();
+  });
+
+  it("the deadline sweeper fails expired tasks and notifies the asker", () => {
+    const db = openMeshDb(":memory:");
+    registerMailbox(db, { name: "alice", session_id: "s1", now: 1000 });
+    registerMailbox(db, { name: "bob", session_id: "s2", now: 1000 });
+    const t = askTask(db, {
+      from_box: "alice",
+      to_box: "bob",
+      question: "q",
+      deadline: Date.now() - 1000,
+    });
+    const swept = sweepTasks(db, Date.now());
+    expect(swept).toBe(1);
+    expect(getTask(db, t.id)?.state).toBe("failed");
+    const got = db.conn.get<{ body: string }>(
+      "SELECT m.body FROM messages m JOIN deliveries d ON d.message_id = m.id WHERE d.to_box = 'alice'",
+    )!;
+    expect(got.body).toContain("deadline exceeded");
     db.close();
   });
 });

@@ -53,6 +53,7 @@ describe("mesh plugin", () => {
     });
 
     expect(Object.keys(hooks.tool ?? {}).sort()).toEqual([
+      "mesh_ask",
       "mesh_inbox",
       "mesh_join",
       "mesh_journal",
@@ -61,11 +62,12 @@ describe("mesh plugin", () => {
       "mesh_pair",
       "mesh_pools",
       "mesh_register",
+      "mesh_reply",
       "mesh_send",
       "mesh_spawn",
       "mesh_status",
+      "mesh_tasks",
       "mesh_unlock",
-      "mesh_wait",
       "mesh_worker_logs",
       "mesh_worker_remove",
       "mesh_worker_stop",
