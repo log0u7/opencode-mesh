@@ -54,6 +54,8 @@ describe("mesh plugin", () => {
 
     expect(Object.keys(hooks.tool ?? {}).sort()).toEqual([
       "mesh_ask",
+      "mesh_board_get",
+      "mesh_board_set",
       "mesh_inbox",
       "mesh_join",
       "mesh_journal",

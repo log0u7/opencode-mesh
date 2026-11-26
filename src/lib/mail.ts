@@ -1267,3 +1267,40 @@ export function localRegistryRows(db: MeshDb): FederatedRegistryRow[] {
     )
     .map((r) => ({ ...r, registered_at: r.registered_at ?? 0 }));
 }
+
+// ---- the board (the refonte P4: the shared status state, not DMs) ----
+
+export const BOARD_KEYS = ["task", "blocker", "state", "eta"] as const;
+export type BoardKey = (typeof BOARD_KEYS)[number];
+
+/** mesh_board_set: write ONE status key for the box. NO wake — the board is
+ * shared state: nobody is interrupted by an update, whoever needs it reads
+ * it (mesh_board_get). The keys are FIXED (the schema above) so the reads
+ * stay comparable across the fleet. */
+export function boardSet(db: MeshDb, box: string, key: BoardKey, value: string, now: number): void {
+  db.conn.run(
+    `INSERT INTO board (box, key, value, updated_at) VALUES (?, ?, ?, ?)
+     ON CONFLICT(box, key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+    [box, key, value, now],
+  );
+}
+
+/** mesh_board_get: the compact read — ONE line per box, the keys in the
+ * fixed order. The pool filter keeps the boxes carrying that pool. */
+export function boardGet(db: MeshDb, pool?: string): Array<{ box: string; line: string }> {
+  const boxes = listLocalOnlyMailboxes(db).filter((b) => !pool || b.pools.includes(pool));
+  const out: Array<{ box: string; line: string }> = [];
+  for (const box of boxes) {
+    const rows = db.conn.all<{ key: string; value: string; updated_at: number }>(
+      "SELECT key, value, updated_at FROM board WHERE box = ? ORDER BY updated_at DESC",
+      [box.name],
+    );
+    if (rows.length === 0) continue;
+    const order = new Map(BOARD_KEYS.map((k, i) => [k, i]));
+    rows.sort(
+      (a, b) => (order.get(a.key as BoardKey) ?? 99) - (order.get(b.key as BoardKey) ?? 99),
+    );
+    out.push({ box: box.name, line: rows.map((r) => `${r.key}=${r.value}`).join("; ") });
+  }
+  return out;
+}

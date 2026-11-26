@@ -10,6 +10,7 @@ import { listOwnAddresses, type AddressOptions } from "./lib/providers.js";
 import { pluginVersion } from "./lib/version.js";
 import { pairingProof, type NodeIdentity } from "./lib/identity.js";
 import { queueOutbox, queueTaskAsk, queueTaskReply, sweepOutbox } from "./lib/outbox.js";
+import { BOARD_KEYS, boardGet, boardSet, type BoardKey } from "./lib/mail.js";
 import {
   deliverMessage,
   inboxRead,
@@ -765,6 +766,41 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
           null,
           2,
         )}`;
+      },
+    },
+    {
+      name: "mesh_board_set",
+      description:
+        "Write ONE status key for your box (task | blocker | state | eta). NO wake — the board is shared state: update it instead of DMing a status.",
+      fields: [str("key", "task | blocker | state | eta"), str("value", "The value (short)")],
+      execute: async (args, context) => {
+        const sid = sessionID(context);
+        const sessionBoxes = mailboxesBySession(db, sid);
+        const box = sessionBoxes[0]?.name;
+        touchMailbox(db, sid, Date.now());
+        const key = typeof args.key === "string" ? args.key : "";
+        if (!(BOARD_KEYS as readonly string[]).includes(key))
+          return `error: key must be one of ${BOARD_KEYS.join(" | ")}`;
+        boardSet(
+          db,
+          box ?? "",
+          key as BoardKey,
+          String(args.value ?? "").slice(0, 200),
+          Date.now(),
+        );
+        return `board set: ${box} ${key}=${String(args.value ?? "").slice(0, 200)}`;
+      },
+    },
+    {
+      name: "mesh_board_get",
+      description:
+        "Read the board: ONE line per box (the fixed keys). pool filters to the boxes carrying it. Nobody is woken by a read.",
+      fields: [str("pool", "Filter: the boxes carrying this pool", false)],
+      execute: async (args, context) => {
+        touchMailbox(db, sessionID(context), Date.now());
+        const pool = typeof args.pool === "string" && args.pool.length > 0 ? args.pool : undefined;
+        const rows = boardGet(db, pool);
+        return `board (${rows.length} boxes):\n${rows.map((r) => `${r.box}: ${r.line}`).join("\n") || "(empty)"}`;
       },
     },
     {

@@ -15,7 +15,7 @@ export type MeshDb = {
 
 // Bump when a schema change needs a migration step; the version anchors future
 // migrations that cannot be expressed as idempotent `CREATE ... IF NOT EXISTS`.
-const SCHEMA_VERSION = 20;
+const SCHEMA_VERSION = 21;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS peers (
@@ -197,6 +197,21 @@ function migrate(conn: SqliteConn): void {
         created_at INTEGER NOT NULL
       );
       CREATE INDEX idx_outbox_state_next ON outbox(state, next_at);
+    `);
+  }
+  // v21: the board (the refonte P4) — the SHARED status state, not DMs:
+  // box + key + value, the keys fixed (task/blocker/state/eta), written
+  // WITHOUT waking anyone, read compactly by whoever needs it.
+  const boardColumns = conn.all<{ name: string }>("PRAGMA table_info(board)").map((r) => r.name);
+  if (boardColumns.length === 0) {
+    conn.exec(`
+      CREATE TABLE board (
+        box TEXT NOT NULL,
+        key TEXT NOT NULL,
+        value TEXT NOT NULL,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY (box, key)
+      );
     `);
   }
   const taskColumns = conn.all<{ name: string }>("PRAGMA table_info(tasks)").map((r) => r.name);

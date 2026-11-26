@@ -510,3 +510,37 @@ describe("P2.6 (refonte): the outbox — the agent sees queued, never unreachabl
     db.close();
   });
 });
+
+describe("P4 (refonte): the blackboard — status is shared state, not DMs", () => {
+  it("mesh_board_set writes without waking; mesh_board_get reads one line per box", async () => {
+    const { db, call } = setup();
+    await call("mesh_register", { name: "alice" }, "s1");
+    await call("mesh_register", { name: "bob" }, "s2");
+    await call("mesh_board_set", { key: "task", value: "build 2025" }, "s1");
+    await call("mesh_board_set", { key: "state", value: "working" }, "s1");
+    await call("mesh_board_set", { key: "task", value: "DNS record" }, "s2");
+    // No wake: the board is not a message (no deliveries, no wakeable rows).
+    expect(db.conn.get<{ n: number }>("SELECT COUNT(*) AS n FROM deliveries")?.n).toBe(0);
+    const out = String(await call("mesh_board_get", {}, "s1"));
+    expect(out).toContain("alice");
+    expect(out).toContain("build 2025");
+    expect(out).toContain("bob");
+    expect(out).toContain("DNS record");
+    db.close();
+  });
+
+  it("mesh_board_get filters by pool; an invalid key refuses", async () => {
+    const { db, call } = setup();
+    await call("mesh_register", { name: "alice" }, "s1");
+    await call("mesh_register", { name: "bob" }, "s2");
+    await call("mesh_join", { pool: "team:x" }, "s2");
+    await call("mesh_board_set", { key: "task", value: "alice task" }, "s1");
+    await call("mesh_board_set", { key: "task", value: "bob task" }, "s2");
+    const out = String(await call("mesh_board_get", { pool: "team:x" }, "s1"));
+    expect(out).toContain("bob");
+    expect(out).not.toContain("alice task");
+    const bad = await call("mesh_board_set", { key: "free", value: "x" }, "s1");
+    expect(bad).toContain("error: key must be one of");
+    db.close();
+  });
+});
