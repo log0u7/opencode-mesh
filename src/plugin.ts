@@ -3,6 +3,8 @@ import { tool } from "@opencode-ai/plugin";
 import { createOpencodeClient } from "@opencode-ai/sdk/v2";
 import { Bonjour } from "bonjour-service";
 
+import { appendFileSync } from "node:fs";
+import { startOutboxSender } from "./lib/outbox.js";
 import { openMeshDb, type MeshDb } from "./lib/db.js";
 import { advertiseMesh, browseMesh, type AdvertiseHandle } from "./lib/discovery.js";
 import { upsertDiscoveredPeer } from "./lib/peers.js";
@@ -113,6 +115,12 @@ export const MeshPlugin: Plugin = async (input, rawOptions?: PluginOptions) => {
   // in-memory map is gone: mark dead pids before anything else uses the table.
   reconcileWorkers(db);
 
+  // The outbox sender (refonte P2.6): the background delivery of the queued
+  // remote sends — both plugins host the same mesh store.
+  const outboxSender = startOutboxSender(db, identity, () => {});
+  appendFileSync("/tmp/opencode/sender.log", "v1 main path atteint\n");
+  setInterval(() => appendFileSync("/tmp/opencode/sender.log", "v1 raw interval\n"), 1000);
+
   // Host capabilities: ONE 60 s cache shared by mesh_status, /status and
   // /metrics (a scrape never doubles the probes). No v1 running-set signal:
   // the execution event stream is a v2 host feature, sessionsRunning stays 0.
@@ -214,6 +222,7 @@ export const MeshPlugin: Plugin = async (input, rawOptions?: PluginOptions) => {
   return {
     ...hooks,
     dispose: async () => {
+      outboxSender?.stop();
       memorySyncPusher?.stop();
       stopAllWorkers(db);
       advertiseHandle?.close();

@@ -12,8 +12,14 @@ import {
   registerMailbox,
   unreadBoxCount,
 } from "./lib/mail.js";
-import { listPeers, upsertDiscoveredPeer } from "./lib/peers.js";
-import { loadOrCreateIdentity, type NodeIdentity } from "./lib/identity.js";
+import {
+  findSendablePeer,
+  listPeers,
+  resolvePeerTarget,
+  upsertDiscoveredPeer,
+} from "./lib/peers.js";
+import { loadOrCreateIdentity, pairingProof, type NodeIdentity } from "./lib/identity.js";
+import { sendMail } from "./lib/client.js";
 import { nodeSpawn, stopAllWorkers, type SpawnFn } from "./lib/spawn.js";
 import type { WorktreeClient } from "./lib/worktree.js";
 import { v2WorktreeDomainClient } from "./lib/worktree.js";
@@ -24,6 +30,7 @@ import { startMemorySyncPusher } from "./lib/memory-sync.js";
 import { createDurableStore } from "./lib/persist.js";
 import { createFanout } from "./lib/fanout.js";
 import { createHostCapa } from "./lib/capa.js";
+import { startOutboxSender, sweepOutbox } from "./lib/outbox.js";
 import { startWakeLoop, createExecutionTracker, type HostEvent } from "./lib/wake.js";
 import { startSessionLister } from "./lib/sessions.js";
 import { MESH_GUIDANCE } from "./lib/guidance.js";
@@ -275,8 +282,20 @@ export const MeshV2 = Plugin.define({
     // host, inject a prompt so the idle agent reacts without a human relaying.
     // Host-wide: one opencode process (e.g. `opencode serve`) hosts many
     // sessions, each with its own mailbox. Mid-turn sessions are skipped.
+    // The outbox sender (refonte P2.6): the due rows are claimed and
+    // delivered in the background — the peer conn is resolved FRESH at
+    // delivery (a moved peer, a fresh mDNS announce, a re-paired token are
+    // picked up without the asking agent ever knowing).
+    const outboxSender =
+      options.wake === false
+        ? undefined
+        : startOutboxSender(db, identity, () => browseHandle?.refresh());
+
     const wake = startWakeLoop({
       db,
+      onTick: async () => {
+        await sweepOutbox(db, identity, () => browseHandle?.refresh());
+      },
       ...(options.wake === false ? { intervalMs: 0 } : {}),
       ...(options.wakeIntervalMs !== undefined ? { intervalMs: options.wakeIntervalMs } : {}),
       ...(options.wakePools !== undefined ? { wakePools: options.wakePools } : {}),
@@ -403,6 +422,7 @@ export const MeshV2 = Plugin.define({
       if (disposed) return;
       disposed = true;
       wake.stop();
+      outboxSender?.stop();
       memorySyncPusher?.stop();
       liveSessions.stop();
       stopAllWorkers(db);

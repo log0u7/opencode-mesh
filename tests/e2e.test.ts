@@ -1,4 +1,11 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  appendFileSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -52,7 +59,7 @@ function input() {
 }
 
 describe("e2e: two plugin instances", () => {
-  it("pairs via token and delivers mail end to end", async () => {
+  it("pairs via token and delivers mail end to end", { timeout: 20_000 }, async () => {
     const a = await MeshPlugin(input(), { dataDir: `${dir}/a`, port: 0, advertise: false });
     const b = await MeshPlugin(input(), { dataDir: `${dir}/b`, port: 0, advertise: false });
 
@@ -93,10 +100,15 @@ describe("e2e: two plugin instances", () => {
         ctx("s-b"),
       ),
     );
-    expect(send).toContain("ok");
-
-    // A reads the message from its inbox.
-    const inbox = String(await a.tool?.mesh_inbox?.execute({}, ctx("s-a")));
+    // The outbox: the send queues; the background sender delivers within
+    // ~5s (the poll replaces the synchronous "ok" contract).
+    expect(send).toContain("queued:");
+    let inbox = "";
+    for (let i = 0; i < 40; i += 1) {
+      await new Promise((r) => setTimeout(r, 250));
+      inbox = String(await a.tool?.mesh_inbox?.execute({}, ctx("s-a")));
+      if (inbox.includes("handoff")) break;
+    }
     expect(inbox).toContain("handoff");
     expect(inbox).toContain("api done");
 
@@ -190,7 +202,9 @@ describe("e2e: two plugin instances", () => {
     await b.dispose?.();
   });
 
-  it("pairs via 6-digit code over TLS (TOFU pin) and delivers mail", async () => {
+  it("pairs via 6-digit code over TLS (TOFU pin) and delivers mail", {
+    timeout: 20_000,
+  }, async () => {
     const a = await MeshPlugin(input(), { dataDir: `${dir}/ca`, port: 0, advertise: false });
     const b = await MeshPlugin(input(), { dataDir: `${dir}/cb`, port: 0, advertise: false });
 
@@ -222,9 +236,13 @@ describe("e2e: two plugin instances", () => {
         ctx("s-b"),
       ),
     );
-    expect(send).toContain("ok");
-
-    const inbox = String(await a.tool?.mesh_inbox?.execute({}, ctx("s-a")));
+    expect(send).toContain("queued:");
+    let inbox = "";
+    for (let i = 0; i < 40; i += 1) {
+      await new Promise((r) => setTimeout(r, 250));
+      inbox = String(await a.tool?.mesh_inbox?.execute({}, ctx("s-a")));
+      if (inbox.includes("code-tls")) break;
+    }
     expect(inbox).toContain("code-tls");
     expect(inbox).toContain("via code");
 

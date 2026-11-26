@@ -107,6 +107,10 @@ export type WakeOptions = {
    * longer ago are re-claimed and the box is reminded. Doubled per mute
    * cycle by the fatigue guard. Default FATIGUE_MUTE_TTL_MS. */
   fatigueTtlMs?: number;
+  /** A per-tick hook (the refonte P2.6): the instance's own outbox sweep —
+   * the asker's own send fires its WAL watcher, the tick sweeps, and the
+   * delivery leaves immediately. */
+  onTick?: () => Promise<void>;
   /** Poll interval in ms. 0 disables the loop. Default 5000. */
   intervalMs?: number;
   /** DEPRECATED (0.32.0): inert — the flash single-flight arbitrates the
@@ -255,6 +259,7 @@ export function startWakeLoop(options: WakeOptions): WakeHandle {
       // The deadline sweeper (refonte P2): expired open tasks fail on their
       // own and the asker is notified — no intervention, no starvation.
       sweepTasks(options.db, Date.now());
+      if (options.onTick) await options.onTick();
       const statsByName = new Map(wakeBoxStats(options.db).map((s) => [s.box, s]));
       for (const box of listMailboxes(options.db)) {
         const stat = statsByName.get(box.name);

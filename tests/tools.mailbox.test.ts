@@ -7,6 +7,7 @@ import {
   inboxRows,
   joinPool,
   mailboxByName,
+  mergeFederatedRegistry,
   registerMailbox,
 } from "../src/lib/mail.js";
 import { pairWithToken } from "../src/lib/peers.js";
@@ -452,5 +453,60 @@ describe("P1.2 (refonte): the send kind defaults by target", () => {
     );
     expect(row?.kind).toBe("notify");
     expect(row?.wake).toBe(1);
+  });
+});
+
+describe("P2.6 (refonte): the outbox — the agent sees queued, never unreachable", () => {
+  it("a peer send queues instead of erroring on a missing address", async () => {
+    const { db, call } = setup();
+    await call("mesh_register", { name: "alice" }, "s1");
+    pairWithToken(db, {
+      node_id: "peer-1",
+      hostname: "laptop",
+      fingerprint: "ff00",
+      token: "tok-peer1",
+    });
+    // No address for the peer (mDNS churn, rebooted, whatever): the OLD path
+    // errored — the agent burned tokens retrying. The outbox queues.
+    const out = await call(
+      "mesh_send",
+      { peer: "peer-1", to: "bob", subject: "s", body: "b" },
+      "s1",
+    );
+    expect(out).toContain("queued:");
+    const row = db.conn.get<{ state: string; payload: string }>(
+      "SELECT state, payload FROM outbox",
+    )!;
+    expect(row.state).toBe("queued");
+    expect(JSON.parse(row.payload).to_box).toBe("bob");
+    // The effectively-once dedup rides origin_id in the payload.
+    expect(JSON.parse(row.payload).origin_id).toBeTruthy();
+    db.close();
+  });
+
+  it("a federated target queues for the owning peer", async () => {
+    const { db, call } = setup();
+    await call("mesh_register", { name: "alice" }, "s1");
+    mergeFederatedRegistry(
+      db,
+      [
+        {
+          name: "remote-dev",
+          session_id: "ses-remote",
+          role: "ops",
+          pools: "[]",
+          primary_pool: null,
+          registered_at: Date.now() - 1000,
+        },
+      ],
+      "peer-9",
+    );
+    const out = await call("mesh_send", { to: "remote-dev", subject: "s", body: "b" }, "s1");
+    expect(out).toContain("queued:");
+    const row = db.conn.get<{ payload: string }>("SELECT payload FROM outbox")!;
+    const payload = JSON.parse(row.payload);
+    expect(payload.node_id).toBe("peer-9");
+    expect(payload.to_box).toBe("remote-dev");
+    db.close();
   });
 });

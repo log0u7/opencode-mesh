@@ -9,6 +9,7 @@ import { buildOfferBlob, parseOfferBlob } from "./lib/offer-blob.js";
 import { listOwnAddresses, type AddressOptions } from "./lib/providers.js";
 import { pluginVersion } from "./lib/version.js";
 import { pairingProof, type NodeIdentity } from "./lib/identity.js";
+import { queueOutbox, sweepOutbox } from "./lib/outbox.js";
 import {
   deliverMessage,
   inboxRead,
@@ -242,6 +243,17 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
               addresses: p.addresses,
             })),
             plugin_version: pluginVersion(),
+            ...(await sweepOutbox(db, identity, () => {})),
+            outbox: {
+              queued:
+                db.conn.get<{ n: number }>(
+                  "SELECT COUNT(*) AS n FROM outbox WHERE state = 'queued'",
+                )?.n ?? 0,
+              failed:
+                db.conn.get<{ n: number }>(
+                  "SELECT COUNT(*) AS n FROM outbox WHERE state = 'failed'",
+                )?.n ?? 0,
+            },
             mailboxes: listMailboxes(db).map((b) => ({
               name: b.name,
               role: b.role,
@@ -526,31 +538,21 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
             if (result.error === "unknown_mailbox") {
               const federated = to === null ? null : federatedByName(db, to);
               if (federated && federated.node_id !== null) {
-                const target = findSendablePeer(db, federated.node_id);
-                if (target) {
-                  const conn = resolvePeerTarget(db, target.node_id);
-                  if (conn && !(conn.tls && conn.pk === null)) {
-                    const sent = await sendMail({
-                      url: conn.url,
-                      ...(conn.tls ? { tls: true } : {}),
-                      ...(conn.pk !== null ? { pk: conn.pk } : {}),
-                      token: target.token ?? "",
-                      from: identity.node_id,
-                      subject: String(args.subject),
-                      body: String(args.body),
-                      to: federated.name,
-                      ...(from_box !== null ? { from_box } : {}),
-                      ...(replyToFor(federated.name) !== null
-                        ? { reply_to: replyToFor(federated.name)! }
-                        : {}),
-                      proof: pairingProof(identity, target.token ?? ""),
-                    });
-                    if (sent === "unreachable") {
-                      mesh.rebrowse?.();
-                    }
-                    return `sent to ${target.node_id}: ${sent}`;
-                  }
-                }
+                const queued = queueOutbox(
+                  db,
+                  {
+                    node_id: federated.node_id,
+                    to_box: federated.name,
+                    from_box,
+                    subject: String(args.subject),
+                    body: String(args.body),
+                    reply_to: replyToFor(federated.name),
+                    origin_id: randomUUID(),
+                  },
+                  Date.now(),
+                );
+                await sweepOutbox(db, identity, () => mesh.rebrowse?.());
+                return `queued: ${queued.id.slice(0, 8)} — the background sender delivers it to the owning peer (retries with backoff)`;
               }
             }
             return result.error === "unknown_mailbox"
@@ -595,44 +597,36 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
           if (target === null) {
             return `error: no paired peer matching ${peer}; run mesh_status`;
           }
-          const conn = resolvePeerTarget(db, peer);
-          if (conn === null) {
-            return `error: peer ${target.node_id} has no known address with a port; have it run mesh_pair to share its address, or wait for discovery`;
-          }
-          // No silent TOFU on a token-authenticated channel: a TLS peer whose
-          // pinned key is missing (legacy pairing predating pinned keys)
-          // accepts ANY certificate, so the bearer token could be stolen by a
-          // MITM. Refuse the send; TOFU stays a pairing-code-only capability.
-          if (conn.tls && conn.pk === null) {
+          // The one NON-healable config error stays immediate: a TLS peer
+          // whose pinned key is missing accepts ANY certificate (a MITM
+          // could steal the bearer token). Everything else is the outbox's
+          // job — a stale address, a rebooted peer, a network blip: the
+          // background sender resolves the conn FRESH at delivery and
+          // retries with backoff; the agent sees "queued", never a failure.
+          const connNow = resolvePeerTarget(db, peer);
+          if (connNow?.tls && connNow.pk === null) {
             return `error: peer ${target.node_id} is TLS but has no pinned key — re-pair with mesh_pair`;
           }
-          // Every mail carries a pairing proof signed by this node's key: it is
-          // what lets the receiving side bind (or rotate) a pairing to us without
-          // trusting the bearer token alone.
-          const result = await sendMail({
-            url: conn.url,
-            ...(conn.tls ? { tls: true } : {}),
-            ...(conn.pk !== null ? { pk: conn.pk } : {}),
-            token: target.token ?? "",
-            from: identity.node_id,
-            subject: String(args.subject),
-            body: String(args.body),
-            proof: pairingProof(identity, target.token ?? ""),
-            ...(wake ? { wake: true } : {}),
-            ...extras,
-          });
-          const hint =
-            result === "pin-mismatch"
-              ? " — the peer's identity changed: re-pair with mesh_pair to refresh the pin"
-              : result === "plaintext-peer"
-                ? " — the peer answered in plaintext: version skew, the peer needs opencode-mesh >= 0.11 (TLS-only)"
-                : "";
-          // The usual cause of "unreachable" is a stale address (DHCP churn):
-          // a fresh mDNS browse lets the peer's announce replace it.
-          if (result === "unreachable") {
-            mesh.rebrowse?.();
-          }
-          return `sent to ${target.node_id}: ${result}${hint}`;
+          // The outbox (refonte P2.6): write and return. The delivery dedup
+          // rides origin_id (effectively-once at the receiver).
+          const queued = queueOutbox(
+            db,
+            {
+              node_id: target.node_id,
+              to_box: to ?? "",
+              from_box,
+              subject: String(args.subject),
+              body: String(args.body),
+              reply_to: to !== null ? replyToFor(to) : null,
+              origin_id: randomUUID(),
+            },
+            Date.now(),
+          );
+          // The first delivery attempt is INLINE: a reachable peer gets the
+          // mail in the same call; the unreachable case falls back to the
+          // background sender + the retries.
+          await sweepOutbox(db, identity, () => mesh.rebrowse?.());
+          return `queued: ${queued.id.slice(0, 8)} — the background sender delivers it (retries with backoff; the state rides mesh_status)`;
         }
         return await selfSendLocal();
       },
@@ -644,6 +638,11 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
         "List this session's unread mail (unregistered: legacy global feed) and mark it read.",
       fields: [bool("ack", "Mark read (default true)")],
       execute: async (args, context) => {
+        // The lazy outbox sweep (refonte P2.6): the delivery happens when
+        // someone looks — the background timer is a convenience, not the
+        // contract.
+        await sweepOutbox(db, identity, () => {});
+
         const sid = sessionID(context);
         touchMailbox(db, sid, Date.now());
         // Fetch + ack in one transaction: a process killed between them used

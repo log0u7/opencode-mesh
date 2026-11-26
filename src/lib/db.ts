@@ -15,7 +15,7 @@ export type MeshDb = {
 
 // Bump when a schema change needs a migration step; the version anchors future
 // migrations that cannot be expressed as idempotent `CREATE ... IF NOT EXISTS`.
-const SCHEMA_VERSION = 19;
+const SCHEMA_VERSION = 20;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS peers (
@@ -181,6 +181,24 @@ function migrate(conn: SqliteConn): void {
   // the responder mesh_reply's, the correlation is server-side (the asker's
   // notification fires on terminal/input_required states only). group_id
   // batches a collective ask into ONE digest.
+  // v20: the outbox (the refonte P2.6) — mesh_send writes and returns
+  // "queued"; the background sender delivers with ack and retries with
+  // backoff. The agent never sees "unreachable" again.
+  const outboxColumns = conn.all<{ name: string }>("PRAGMA table_info(outbox)").map((r) => r.name);
+  if (outboxColumns.length === 0) {
+    conn.exec(`
+      CREATE TABLE outbox (
+        id TEXT PRIMARY KEY,
+        payload TEXT NOT NULL,
+        state TEXT NOT NULL DEFAULT 'queued',
+        attempts INTEGER NOT NULL DEFAULT 0,
+        next_at INTEGER NOT NULL,
+        last_error TEXT,
+        created_at INTEGER NOT NULL
+      );
+      CREATE INDEX idx_outbox_state_next ON outbox(state, next_at);
+    `);
+  }
   const taskColumns = conn.all<{ name: string }>("PRAGMA table_info(tasks)").map((r) => r.name);
   if (taskColumns.length === 0) {
     conn.exec(`
