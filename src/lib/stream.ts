@@ -1,4 +1,5 @@
 import type { ServerResponse } from "node:http";
+import { pinCheck } from "./client.js";
 
 // The persistent stream (the refonte 3.1, SSE): each peer holds ONE
 // server-sent-events connection to every other node — the server pushes
@@ -111,6 +112,7 @@ export class StreamHub {
 
 import { request as httpRequest, type IncomingMessage } from "node:http";
 import { request as httpsRequest } from "node:https";
+import type { PeerCertificate } from "node:tls";
 
 export type StreamClientHooks = {
   /** Dispatch one received event (the same handling as the wire routes). */
@@ -134,56 +136,81 @@ export function openPeerStream(
   const connect = (): void => {
     timer = undefined;
     if (stopped) return;
-    const doRequest = target.tls ? httpsRequest : httpRequest;
-    const req = doRequest(
-      `${target.url}/stream`,
-      {
-        method: "GET",
-        headers: {
-          authorization: `Bearer ${target.token}`,
-          "x-mesh-sender": target.from,
-          "x-mesh-proof": target.proof,
-          accept: "text/event-stream",
-        },
+    // The TLS pinning (the refonte2-A2): the mesh certs are SELF-SIGNED —
+    // rejectUnauthorized off, the trust comes ENTIRELY from the SPKI pin
+    // (the same gabarit as the wire's tlsRequest). The pk passed and
+    // ignored before: the stream failed in TLS, silently, forever.
+    const isTls = target.tls === true || target.url.startsWith("https:");
+    const u = new URL(target.url);
+    const requestOpts: Record<string, unknown> = {
+      hostname: u.hostname,
+      ...(u.port !== "" ? { port: Number(u.port) } : {}),
+      path: "/stream",
+      method: "GET",
+      headers: {
+        authorization: `Bearer ${target.token}`,
+        "x-mesh-sender": target.from,
+        "x-mesh-proof": target.proof,
+        accept: "text/event-stream",
       },
-      (response) => {
-        res = response;
-        failures = 0;
-        let buffer = "";
-        response.on("data", (chunk: Buffer) => {
-          buffer += chunk.toString();
-          // The SSE frames: event: <type>\n data: <json>\n\n
-          for (;;) {
-            const sep = buffer.indexOf("\n\n");
-            if (sep < 0) break;
-            const frame = buffer.slice(0, sep);
-            buffer = buffer.slice(sep + 2);
-            const lines = frame.split("\n");
-            const type = lines
-              .find((l) => l.startsWith("event: "))
-              ?.slice(7)
-              .trim();
-            const data = lines
-              .find((l) => l.startsWith("data: "))
-              ?.slice(6)
-              .trim();
-            if (type && data && type !== "hb") {
-              try {
-                hooks.onEvent({ type: type as StreamEvent["type"], data: JSON.parse(data) });
-              } catch {}
-            }
+      ...(isTls
+        ? {
+            rejectUnauthorized: false,
+            checkServerIdentity: (_host: string, cert: PeerCertificate) =>
+              pinCheck(target.pk)(cert) ?? undefined,
           }
+        : {}),
+    };
+    const doRequest = isTls ? httpsRequest : httpRequest;
+    const req = doRequest(requestOpts, (response) => {
+      res = response;
+      failures = 0;
+      let buffer = "";
+      response.on("data", (chunk: Buffer) => {
+        buffer += chunk.toString();
+        // The SSE frames: event: <type>\n data: <json>\n\n
+        for (;;) {
+          const sep = buffer.indexOf("\n\n");
+          if (sep < 0) break;
+          const frame = buffer.slice(0, sep);
+          buffer = buffer.slice(sep + 2);
+          const lines = frame.split("\n");
+          const type = lines
+            .find((l) => l.startsWith("event: "))
+            ?.slice(7)
+            .trim();
+          const data = lines
+            .find((l) => l.startsWith("data: "))
+            ?.slice(6)
+            .trim();
+          if (type && data && type !== "hb") {
+            try {
+              hooks.onEvent({ type: type as StreamEvent["type"], data: JSON.parse(data) });
+            } catch {}
+          }
+        }
+      });
+      response.on("end", () => {
+        hooks.onDrop();
+        schedule();
+      });
+      response.on("error", () => {
+        hooks.onDrop();
+        schedule();
+      });
+    });
+    if (isTls) {
+      // The secureConnect guard: fires in EVERY case (including self-signed,
+      // where the default identity check is skipped) — the tlsRequest's
+      // double enforcement, copied.
+      req.on("socket", (socket) => {
+        socket.on("secureConnect", () => {
+          const tlsSocket = socket as import("node:tls").TLSSocket;
+          const err = pinCheck(target.pk)(tlsSocket.getPeerCertificate());
+          if (err) req.destroy(err);
         });
-        response.on("end", () => {
-          hooks.onDrop();
-          schedule();
-        });
-        response.on("error", () => {
-          hooks.onDrop();
-          schedule();
-        });
-      },
-    );
+      });
+    }
     req.on("error", () => schedule());
     req.end();
   };

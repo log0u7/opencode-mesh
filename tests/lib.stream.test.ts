@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { openMeshDb } from "../src/lib/db.js";
 import { startMeshServer } from "../src/lib/serve.js";
 import { StreamHub, openPeerStream } from "../src/lib/stream.js";
+import { buildTlsMaterial } from "../src/lib/tls.js";
 import { deliverMessage, registerMailbox } from "../src/lib/mail.js";
 import { pairWithToken } from "../src/lib/peers.js";
 import { loadOrCreateIdentity, pairingProof } from "../src/lib/identity.js";
@@ -185,5 +186,65 @@ describe("the stream hub: the multi-add (the heartbeat created once)", () => {
     drop2();
     expect(hub.isOpen("peer-1")).toBe(false);
     hub.stop();
+  });
+});
+
+describe("A2 (refonte2): the TLS pinning on the stream", () => {
+  it("the good pin connects; the wrong pin refuses", { timeout: 15_000 }, async () => {
+    const dir = mkdtempSync(join(tmpdir(), "stream-tls-"));
+    const db = openMeshDb(join(dir, "mesh.db"));
+    registerMailbox(db, { name: "alice", session_id: "s1", now: 1000 });
+    const identityA = loadOrCreateIdentity(join(dir, "id-a"));
+    const tlsA = buildTlsMaterial(identityA);
+    const { server, port, hub } = await startMeshServer({
+      db,
+      port: 0,
+      tls: true,
+      tlsMaterial: tlsA,
+      self: { node_id: "node-a", pk: identityA.public_key, hostname: "a" },
+    });
+    const identityB = loadOrCreateIdentity(join(dir, "id-b"));
+    pairWithToken(db, {
+      node_id: identityB.node_id,
+      hostname: "b",
+      fingerprint: "ff00",
+      token: "tok-b",
+      public_key: identityB.public_key,
+    });
+    // Le BON pin: la stream s'ouvre (hub enregistre).
+    const good = openPeerStream(
+      {
+        url: `https://127.0.0.1:${port}`,
+        tls: true,
+        pk: identityA.public_key,
+        token: "tok-b",
+        from: identityB.node_id,
+        proof: pairingProof(identityB, "tok-b"),
+      },
+      { onEvent: () => {}, onDrop: () => {} },
+    );
+    await new Promise((r) => setTimeout(r, 400));
+    expect(hub?.isOpen(identityB.node_id)).toBe(true);
+    good.stop();
+    // Le MAUVAIS pin: la connection refuse (le handshake rejette) — le hub
+    // ne enregistre JAMAIS la stream (le drop n'existe pas avant connexion).
+    const bad = openPeerStream(
+      {
+        url: `https://127.0.0.1:${port}`,
+        tls: true,
+        pk: identityB.public_key,
+        token: "tok-b",
+        from: identityB.node_id,
+        proof: pairingProof(identityB, "tok-b"),
+      },
+      { onEvent: () => {}, onDrop: () => {} },
+    );
+    await new Promise((r) => setTimeout(r, 600));
+    expect(hub?.isOpen(identityB.node_id)).toBe(false);
+    bad.stop();
+    hub?.stop();
+    server.close();
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
   });
 });

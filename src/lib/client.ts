@@ -452,7 +452,7 @@ function certSpki(cert: PeerCertificate | Record<string, never>): string | null 
 
 // SPKI pin: no pin (undefined) = TOFU, accept; a pin must match the presented
 // certificate exactly. Returns the rejection error, or null when accepted.
-function pinCheck(pk: string | undefined): (cert: PeerCertificate) => Error | null {
+export function pinCheck(pk: string | undefined): (cert: PeerCertificate) => Error | null {
   if (pk === undefined) {
     return () => null;
   }
