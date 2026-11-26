@@ -55,6 +55,9 @@ describe("smoke: plugin module", () => {
     const hooks = await MeshPlugin(fakeInput(), { dataDir: dir, port: 0, advertise: false });
     expect(Object.keys(hooks).sort()).toEqual(["dispose", "tool"]);
     expect(Object.keys(hooks.tool ?? {}).sort()).toEqual([
+      "mesh_ask",
+      "mesh_board_get",
+      "mesh_board_set",
       "mesh_inbox",
       "mesh_join",
       "mesh_journal",
@@ -63,11 +66,12 @@ describe("smoke: plugin module", () => {
       "mesh_pair",
       "mesh_pools",
       "mesh_register",
+      "mesh_reply",
       "mesh_send",
       "mesh_spawn",
       "mesh_status",
+      "mesh_tasks",
       "mesh_unlock",
-      "mesh_wait",
       "mesh_worker_logs",
       "mesh_worker_remove",
       "mesh_worker_stop",

@@ -9,17 +9,26 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { request } from "node:http";
 import { connect } from "node:net";
 
+import { sendMail, getPools } from "../src/lib/client.js";
 import { openMeshDb } from "../src/lib/db.js";
 import {
   inboxRows,
   MESSAGE_TTL_MS,
+  mergeFederatedRegistry,
   receiveMessage,
+  joinPool,
   registerMailbox,
   unreadMessages,
 } from "../src/lib/mail.js";
-import { pairingProof, pairingProofPayload, signPairingProof } from "../src/lib/identity.js";
+import {
+  loadOrCreateIdentity,
+  pairingProof,
+  pairingProofPayload,
+  signPairingProof,
+} from "../src/lib/identity.js";
 import { pairWithToken, upsertDiscoveredPeer, createPairingToken } from "../src/lib/peers.js";
 import { pairCodeThrottled, startMeshServer } from "../src/lib/serve.js";
+import { buildTlsMaterial } from "../src/lib/tls.js";
 import type { HostCapa } from "../src/lib/capa.js";
 
 let dir: string;
@@ -827,6 +836,218 @@ describe("GET /metrics", () => {
     expect(body.node_id).toBe("peer1");
     expect(body.capa?.ram.totalMb).toBe(16000);
 
+    server.close();
+    db.close();
+  });
+});
+
+describe("the task wire routes (refonte P2.5)", () => {
+  it("POST /task-ask creates the mirror + delivers the task message; POST /task-reply applies back home", async () => {
+    const { db, server, url } = await start();
+    registerMailbox(db, { name: "alice", session_id: "s-alice", now: 1000 });
+    pairWithToken(db, {
+      node_id: "peer-1",
+      hostname: "laptop",
+      fingerprint: "ff00",
+      token: "tok-peer1",
+    });
+    // 401: le proof manque.
+    const unauthorized = await post(url, "/task-ask", { task: { id: "t1", to_box: "alice" } });
+    expect(unauthorized.status).toBe(401);
+    // 400: la payload mal forme.
+    const bad = await post(url, "/task-ask", { task: {} }, "tok-peer1");
+    expect(bad.status).toBe(400);
+    // Le happy path: le miroir + le message dans la box locale.
+    const ok = await post(
+      url,
+      "/task-ask",
+      {
+        from_box: "alice",
+        task: {
+          id: "task-abc",
+          to_box: "alice",
+          question: "quel etat?",
+          group_id: null,
+          deadline: null,
+        },
+      },
+      "tok-peer1",
+    );
+    expect(ok.status).toBe(200);
+    const mirror = db.conn.get<{ state: string; from_box: string }>(
+      "SELECT state, from_box FROM tasks WHERE id = 'task-abc'",
+    )!;
+    expect(mirror.state).toBe("submitted");
+    expect(mirror.from_box).toBe("peer-1/alice");
+    expect(
+      db.conn.get<{ n: number }>("SELECT COUNT(*) AS n FROM deliveries WHERE to_box = 'alice'")?.n,
+    ).toBe(1);
+    // La row federated bob-remote depuis peer-1 (le PROPRIETAIRE du to_box
+    // — l'owner check du refonte2-P3 l'exige).
+    mergeFederatedRegistry(
+      db,
+      [
+        {
+          name: "bob-remote",
+          session_id: "ses-b",
+          role: null,
+          pools: "[]",
+          primary_pool: null,
+          registered_at: Date.now() - 1000,
+          epoch: 2,
+        },
+      ],
+      "peer-1",
+    );
+    // 404: la reply sur une tache inconnue.
+    const unknown = await post(
+      url,
+      "/task-reply",
+      { task: { id: "task-nope", result: "x", state: "completed" } },
+      "tok-peer1",
+    );
+    expect(unknown.status).toBe(404);
+    // Le happy path reply: la row originale appliquee.
+    db.conn.run(
+      `INSERT INTO tasks (id, from_box, to_box, question, state, created_at, updated_at)
+       VALUES ('task-xyz', 'alice', 'bob-remote', 'q', 'submitted', 1, 1)`,
+    );
+    const reply = await post(
+      url,
+      "/task-reply",
+      { task: { id: "task-xyz", result: "tout vert", state: "completed" } },
+      "tok-peer1",
+    );
+    expect(reply.status).toBe(200);
+    const applied = db.conn.get<{ state: string }>(
+      "SELECT state FROM tasks WHERE id = 'task-xyz'",
+    )!;
+    expect(applied.state).toBe("completed");
+    // La notification locale (l'asker alice est sur CE node).
+    expect(
+      db.conn.get<{ n: number }>("SELECT COUNT(*) AS n FROM deliveries WHERE to_box = 'alice'")?.n,
+    ).toBe(2);
+    server.close();
+  });
+});
+
+describe("the wire client's error branches (the refonte coverage)", () => {
+  it("sendMail maps the auth failure to unauthorized and the server error to error", async () => {
+    const { db, server, url } = await start();
+    // Le mauvais token: 401 -> "unauthorized".
+    const unauthorized = await sendMail({
+      url,
+      token: "wrong-token",
+      from: "node-x",
+      subject: "s",
+      body: "b",
+    });
+    expect(unauthorized).toBe("unauthorized");
+    // La DB fermee: la route 500 -> "error".
+    db.close();
+    const error = await sendMail({
+      url,
+      token: "tok-peer1",
+      from: "node-x",
+      subject: "s",
+      body: "b",
+    });
+    expect(error).toBe("error");
+    // Le port mort: "unreachable".
+    const dead = await sendMail({
+      url: "http://127.0.0.1:1",
+      token: "t",
+      from: "node-x",
+      subject: "s",
+      body: "b",
+    });
+    expect(dead).toBe("unreachable");
+    server.close();
+  });
+
+  it("getPools: null on unreachable, the pools on a valid peer", async () => {
+    const { db, server, url } = await start();
+    pairWithToken(db, {
+      node_id: "peer-1",
+      hostname: "laptop",
+      fingerprint: "ff00",
+      token: "tok-peer1",
+    });
+    registerMailbox(db, { name: "alice", session_id: "s-a", now: 1000 });
+    joinPool(db, "alice", "team:x");
+    const pools = await getPools({
+      url,
+      token: "tok-peer1",
+    });
+    expect(pools).not.toBeNull();
+    const dead = await getPools({ url: "http://127.0.0.1:1", token: "t" });
+    expect(dead).toBeNull();
+    server.close();
+  });
+});
+
+describe("the wire client: the TLS paths (the refonte coverage)", () => {
+  it("sendMail over TLS: ok, unauthorized, and the pin mismatch branches", {
+    timeout: 10_000,
+  }, async () => {
+    const identityA = loadOrCreateIdentity(join(dir, "id-a"));
+    const tlsA = buildTlsMaterial(identityA);
+    const db = openMeshDb(join(dir, "mesh.db"));
+    registerMailbox(db, { name: "alice", session_id: "s-a", now: 1000 });
+    const { server, port } = await startMeshServer({
+      db,
+      port: 0,
+      tls: true,
+      tlsMaterial: tlsA,
+      self: { node_id: "node-a", pk: identityA.public_key, hostname: "a" },
+    });
+    // Le mauvais token sur TLS: "unauthorized".
+    const unauthorized = await sendMail({
+      url: `https://127.0.0.1:${port}`,
+      tls: true,
+      pk: identityA.public_key,
+      token: "wrong",
+      from: "node-x",
+      subject: "s",
+      body: "b",
+    });
+    expect(unauthorized).toBe("unauthorized");
+    // Le mauvais pin (une autre cle): "pin-mismatch".
+    const identityX = loadOrCreateIdentity(join(dir, "id-x"));
+    const pinMismatch = await sendMail({
+      url: `https://127.0.0.1:${port}`,
+      tls: true,
+      pk: identityX.public_key,
+      token: "tok-a",
+      from: "node-x",
+      subject: "s",
+      body: "b",
+    });
+    expect(pinMismatch).toBe("pin-mismatch");
+    // Le bon pin + le bon token: "ok" — le mail atterrit. Le sender doit
+    // etre un pair PAIRED (le bearer token identifie le peer).
+    pairWithToken(db, {
+      node_id: "node-x",
+      hostname: "x",
+      fingerprint: "ff00",
+      token: "tok-a",
+      public_key: identityX.public_key,
+    });
+    const ok = await sendMail({
+      url: `https://127.0.0.1:${port}`,
+      tls: true,
+      pk: identityA.public_key,
+      token: "tok-a",
+      from: "node-x",
+      to: "alice",
+      subject: "tls-mail",
+      body: "b",
+    });
+    expect(ok).toBe("ok");
+    const landed = db.conn.get<{ n: number }>(
+      "SELECT COUNT(*) AS n FROM deliveries WHERE to_box = 'alice'",
+    )?.n;
+    expect(landed).toBe(1);
     server.close();
     db.close();
   });

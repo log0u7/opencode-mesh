@@ -452,7 +452,7 @@ function certSpki(cert: PeerCertificate | Record<string, never>): string | null 
 
 // SPKI pin: no pin (undefined) = TOFU, accept; a pin must match the presented
 // certificate exactly. Returns the rejection error, or null when accepted.
-function pinCheck(pk: string | undefined): (cert: PeerCertificate) => Error | null {
+export function pinCheck(pk: string | undefined): (cert: PeerCertificate) => Error | null {
   if (pk === undefined) {
     return () => null;
   }
@@ -474,6 +474,62 @@ function pinCheck(pk: string | undefined): (cert: PeerCertificate) => Error | nu
  * rows to a paired peer's /registry-sync endpoint (the same TLS + token +
  * proof machinery as /mail). Returns "ok" or the transport failure string —
  * the caller treats a failure as non-fatal (the next rebind retries). */
+/** POST /task-ask or /task-reply (refonte P2.5): the task payloads travel
+ * with the same pairing auth as /mail. Returns "ok" or the error string. */
+export async function postTaskWire(target: {
+  url: string;
+  token: string;
+  from: string;
+  proof: string;
+  tls?: boolean;
+  pk?: string;
+  payload: {
+    type?: string;
+    to_box?: string;
+    from_box?: string | null;
+    origin_id?: string;
+    task?: unknown;
+  };
+}): Promise<string> {
+  const endpoint = target.payload.type === "task-ask" ? "/task-ask" : "/task-reply";
+  const headers = {
+    "content-type": "application/json",
+    authorization: `Bearer ${target.token}`,
+    "x-mesh-sender": target.from,
+    "x-mesh-proof": target.proof,
+  };
+  const body = JSON.stringify({
+    from: target.from,
+    ...(target.payload.from_box ? { from_box: target.payload.from_box } : {}),
+    to_box: target.payload.to_box,
+    origin_id: target.payload.origin_id,
+    task: target.payload.task,
+  });
+  try {
+    const response = isTls(target)
+      ? await tlsRequest({
+          url: `${target.url}${endpoint}`,
+          ...(target.pk !== undefined ? { pk: target.pk } : {}),
+          method: "POST",
+          headers,
+          body,
+          timeoutMs: 5000,
+        })
+      : await plainRequest(`${target.url}${endpoint}`, {
+          method: "POST",
+          headers,
+          body,
+          timeoutMs: 5000,
+        });
+    if (response.status === 200) {
+      return "ok";
+    }
+    return `error ${response.status}`;
+  } catch {
+    return "unreachable";
+  }
+}
+
 export async function postRegistrySync(target: {
   url: string;
   token: string;

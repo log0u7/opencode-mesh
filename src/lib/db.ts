@@ -15,7 +15,7 @@ export type MeshDb = {
 
 // Bump when a schema change needs a migration step; the version anchors future
 // migrations that cannot be expressed as idempotent `CREATE ... IF NOT EXISTS`.
-const SCHEMA_VERSION = 17;
+const SCHEMA_VERSION = 24;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS peers (
@@ -171,6 +171,86 @@ function migrate(conn: SqliteConn): void {
     .map((row) => row.name);
   if (!deliveryColumns.includes("flashed_at")) {
     conn.exec("ALTER TABLE deliveries ADD COLUMN flashed_at INTEGER");
+  }
+  // v22: mailboxes.epoch — the LOGICAL clock per name (the refonte 3.2):
+  // incremented at each rebind, replaces registered_at (wall clock, the
+  // clock-skew class) in the federation LWW. Legacy rows backfill to 1.
+  if (!mailboxColumns.includes("epoch")) {
+    conn.exec("ALTER TABLE mailboxes ADD COLUMN epoch INTEGER");
+    conn.exec("UPDATE mailboxes SET epoch = 1 WHERE epoch IS NULL");
+  }
+  // v18: messages.kind — notify (wakes per the wake rules) vs fyi (never
+  // wakes: read at the next drain or flash). Legacy rows read as notify.
+  if (!messageColumns.includes("kind")) {
+    conn.exec("ALTER TABLE messages ADD COLUMN kind TEXT NOT NULL DEFAULT 'notify'");
+  }
+  // v19: tasks — the A2A task lifecycle (the refonte P2): mesh_ask submits,
+  // the responder mesh_reply's, the correlation is server-side (the asker's
+  // notification fires on terminal/input_required states only). group_id
+  // batches a collective ask into ONE digest.
+  // v20: the outbox (the refonte P2.6) — mesh_send writes and returns
+  // "queued"; the background sender delivers with ack and retries with
+  // backoff. The agent never sees "unreachable" again.
+  const outboxColumns = conn.all<{ name: string }>("PRAGMA table_info(outbox)").map((r) => r.name);
+  if (outboxColumns.length === 0) {
+    conn.exec(`
+      CREATE TABLE outbox (
+        id TEXT PRIMARY KEY,
+        payload TEXT NOT NULL,
+        state TEXT NOT NULL DEFAULT 'queued',
+        attempts INTEGER NOT NULL DEFAULT 0,
+        next_at INTEGER NOT NULL,
+        last_error TEXT,
+        created_at INTEGER NOT NULL
+      );
+      CREATE INDEX idx_outbox_state_next ON outbox(state, next_at);
+    `);
+  }
+  // v24: outbox.origin_id + the index (the refonte2-P1): the /ack resolves
+  // WITHOUT the full json_extract scan, and the mark filters the node.
+  if (!outboxColumns.includes("origin_id")) {
+    conn.exec("ALTER TABLE outbox ADD COLUMN origin_id TEXT");
+    conn.exec("UPDATE outbox SET origin_id = json_extract(payload, '$.origin_id')");
+    conn.exec("CREATE INDEX idx_outbox_origin ON outbox(origin_id)");
+  }
+  // v21: the board (the refonte P4) — the SHARED status state, not DMs:
+  // box + key + value, the keys fixed (task/blocker/state/eta), written
+  // WITHOUT waking anyone, read compactly by whoever needs it.
+  const boardColumns = conn.all<{ name: string }>("PRAGMA table_info(board)").map((r) => r.name);
+  if (boardColumns.length === 0) {
+    conn.exec(`
+      CREATE TABLE board (
+        box TEXT NOT NULL,
+        key TEXT NOT NULL,
+        value TEXT NOT NULL,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY (box, key)
+      );
+    `);
+  }
+  const taskColumns = conn.all<{ name: string }>("PRAGMA table_info(tasks)").map((r) => r.name);
+  if (taskColumns.length === 0) {
+    conn.exec(`
+      CREATE TABLE tasks (
+        id TEXT PRIMARY KEY,
+        from_box TEXT,
+        to_box TEXT NOT NULL,
+        group_id TEXT,
+        question TEXT NOT NULL,
+        result TEXT,
+        state TEXT NOT NULL DEFAULT 'submitted',
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        deadline INTEGER
+      );
+      CREATE INDEX idx_tasks_to_state ON tasks(to_box, state);
+      CREATE INDEX idx_tasks_group ON tasks(group_id);
+    `);
+  }
+  // v23: tasks.group_notified_at (the refonte2-C1): the group digest fires
+  // ONCE — the later transitions notify individually.
+  if (!taskColumns.includes("group_notified_at")) {
+    conn.exec("ALTER TABLE tasks ADD COLUMN group_notified_at INTEGER");
   }
   // v5: messages.origin_id (cross-host broadcast dedup).
   if (!messageColumns.includes("origin_id")) {

@@ -7,16 +7,11 @@ import {
   inboxRows,
   joinPool,
   mailboxByName,
+  mergeFederatedRegistry,
   registerMailbox,
 } from "../src/lib/mail.js";
 import { pairWithToken } from "../src/lib/peers.js";
-import {
-  buildToolSpecs,
-  buildWaitTimeoutMessage,
-  meshWaitClamp,
-  type MeshContext,
-  type ToolSpec,
-} from "../src/tools.js";
+import { buildToolSpecs, type MeshContext, type ToolSpec } from "../src/tools.js";
 import type { HostCapa } from "../src/lib/capa.js";
 
 function setup(capa?: () => Promise<HostCapa>) {
@@ -155,8 +150,8 @@ describe("mesh_send", () => {
     expect(bobInbox).toHaveLength(1);
     expect(bobInbox[0]!.from_box).toBe("alice");
     expect(bobInbox[0]!.subject).toBe("hi");
-    // 0.29.0: delivery_id left the agent view (an internal key; mesh_wait
-    // matches on reply_to).
+    // 0.29.0: delivery_id left the agent view (an internal key; the reply
+    // correlation is reply_to).
     expect("delivery_id" in bobInbox[0]!).toBe(false);
 
     // The cross-drain killer is dead: the sender's session sees nothing.
@@ -203,72 +198,6 @@ describe("mesh_inbox", () => {
     expect(inbox[0]!.id).toBe(sent.id);
     // Acked through the legacy message path.
     expect(await call("mesh_inbox", {}, "s-unreg")).toBe("inbox empty");
-  });
-});
-
-describe("mesh_wait", () => {
-  it("returns a reply delivered mid-poll and acks it", async () => {
-    const { db, call } = setup();
-    await call("mesh_register", { name: "alice" }, "s1");
-    await call("mesh_register", { name: "bob" }, "s2");
-    const out = await call("mesh_send", { to: "bob", subject: "q", body: "?" }, "s1");
-    const sent = JSON.parse(out) as { id: string };
-
-    const waiting = call("mesh_wait", { id: sent.id, timeout: 2 }, "s1");
-    setTimeout(() => {
-      deliverMessage(db, {
-        from: "n1",
-        from_box: "bob",
-        to_box: "alice",
-        subject: "a",
-        body: "!",
-        reply_to: sent.id,
-      });
-    }, 300);
-    const row = JSON.parse(await waiting) as { reply_to: string; from_box: string | null };
-    expect(row.reply_to).toBe(sent.id);
-    expect(row.from_box).toBe("bob");
-    expect(await call("mesh_inbox", {}, "s1")).toBe("inbox empty");
-  });
-
-  it("times out with the timeout message", async () => {
-    const { call } = setup();
-    await call("mesh_register", { name: "alice" }, "s1");
-    expect(await call("mesh_wait", { id: "nope", timeout: 1 }, "s1")).toBe(
-      "timeout: no reply to nope within 1s",
-    );
-  });
-
-  it("times out cleanly for an unregistered session (mailboxBySession null, global-only path)", async () => {
-    const { call } = setup();
-    expect(await call("mesh_wait", { id: "nope", timeout: 1 }, "s-unreg")).toBe(
-      "timeout: no reply to nope within 1s",
-    );
-  });
-
-  it("on timeout, lists the uncorrelated replies sitting in the box (the wake-path answers, 0.30.1)", async () => {
-    const { db, call } = setup();
-    await call("mesh_register", { name: "alice" }, "s1");
-    await call("mesh_register", { name: "bob" }, "s2");
-    await call("mesh_register", { name: "carol" }, "s3");
-    const out = await call("mesh_send", { to: "bob", subject: "q", body: "?" }, "s1");
-    const sent = JSON.parse(out) as { id: string };
-    // A reply from a THIRD box: not the request's recipient, so the sender
-    // match cannot fire — the wait reaches its timeout and lists the stray.
-    deliverMessage(db, {
-      from: "n1",
-      from_box: "carol",
-      to_box: "alice",
-      subject: "re: q",
-      body: "!",
-      created_at: Date.now() + 10,
-    });
-    const result = await call("mesh_wait", { id: sent.id, timeout: 1 }, "s1");
-    expect(result).toContain(`timeout: no reply to ${sent.id} within 1s`);
-    expect(result).toContain("uncorrelated");
-    expect(result).toContain("carol");
-    expect(result).toContain("re: q");
-    expect(result).toContain("mesh_inbox");
   });
 });
 
@@ -321,52 +250,6 @@ describe("P3 (0.31.0): the reply correlation is server-side", () => {
       "SELECT reply_to FROM messages WHERE from_box = 'bob'",
     );
     expect(row?.reply_to).toBeNull();
-  });
-});
-
-describe("P4 (0.31.0): mesh_wait is bounded and correlates on the sender", () => {
-  it("a reply that bypassed the auto-fill still returns the wait (sender match)", async () => {
-    const { db, call } = setup();
-    await call("mesh_register", { name: "alice" }, "s1");
-    await call("mesh_register", { name: "bob" }, "s2");
-    const out = await call("mesh_send", { to: "bob", subject: "q", body: "?" }, "s1");
-    const sent = JSON.parse(out) as { id: string };
-    const t0 = Date.now();
-    const waiting = call("mesh_wait", { id: sent.id, timeout: 5 }, "s1");
-    // DB-level delivery: the answer bypasses mesh_send, so NO auto-fill —
-    // reply_to stays NULL (a legacy/wire-path reply). The wait must still
-    // return on the sender + arrival-after-request match.
-    setTimeout(() => {
-      deliverMessage(db, {
-        from: "n1",
-        from_box: "bob",
-        to_box: "alice",
-        subject: "re: q",
-        body: "!",
-      });
-    }, 300);
-    const row = JSON.parse(await waiting) as { from_box: string | null; subject: string };
-    expect(Date.now() - t0).toBeLessThan(4500);
-    expect(row.from_box).toBe("bob");
-    expect(row.subject).toBe("re: q");
-  });
-
-  it("the timeout message names the clamp — the caller never reads an unexplained early death (the orq repro, 0.32.0)", () => {
-    // orq: timeout 60 requested, the result said "within 30s" with no word
-    // about the clamp — read as a mechanical abort or an agent silence.
-    const msg = buildWaitTimeoutMessage("id-x", 30, 60, []);
-    expect(msg).toContain("within 30s");
-    expect(msg).toContain("requested 60s");
-    expect(msg).toContain("clamped");
-    // An explicit short timeout: no clamp note.
-    const plain = buildWaitTimeoutMessage("id-y", 5, 5, []);
-    expect(plain).not.toContain("clamped");
-  });
-
-  it("the clamp caps the requested timeout at 30s", () => {
-    expect(meshWaitClamp(300)).toBe(30);
-    expect(meshWaitClamp(undefined)).toBe(30);
-    expect(meshWaitClamp(5)).toBe(5);
   });
 });
 
@@ -532,6 +415,228 @@ describe("mesh_status", () => {
     expect(out).toBe(
       "error: peer legacy-peer is TLS but has no pinned key — re-pair with mesh_pair",
     );
+    db.close();
+  });
+});
+
+describe("P1.2 (refonte): the send kind defaults by target", () => {
+  it("a DM defaults to notify, a pool to fyi, an explicit fyi DM stays silent", async () => {
+    const { db, call } = setup();
+    await call("mesh_register", { name: "alice" }, "s1");
+    await call("mesh_register", { name: "bob" }, "s2");
+    await call("mesh_join", { pool: "team:x" }, "s1");
+    await call("mesh_join", { pool: "team:x" }, "s2");
+    await call("mesh_send", { to: "bob", subject: "dm", body: "?" }, "s1");
+    await call("mesh_send", { to: "team:x", subject: "pool", body: "!" }, "s1");
+    await call("mesh_send", { to: "bob", subject: "fyi dm", body: "fyi", kind: "fyi" }, "s1");
+    const kinds = db.conn
+      .all<{ subject: string; kind: string; wake: number }>(
+        "SELECT subject, kind, wake FROM messages WHERE subject IN ('dm', 'pool', 'fyi dm')",
+      )
+      .reduce<Record<string, { kind: string; wake: number }>>((acc, r) => {
+        acc[r.subject] = { kind: r.kind, wake: r.wake };
+        return acc;
+      }, {});
+    expect(kinds["dm"]).toEqual({ kind: "notify", wake: 0 });
+    expect(kinds["pool"]).toEqual({ kind: "fyi", wake: 0 });
+    expect(kinds["fyi dm"]).toEqual({ kind: "fyi", wake: 0 });
+  });
+
+  it("an explicit notify on a pool is the deliberate broadcast (it wakes)", async () => {
+    const { db, call } = setup();
+    await call("mesh_register", { name: "alice" }, "s1");
+    await call("mesh_register", { name: "bob" }, "s2");
+    await call("mesh_join", { pool: "team:x" }, "s2");
+    await call("mesh_send", { to: "team:x", subject: "alerte", body: "!", kind: "notify" }, "s1");
+    const row = db.conn.get<{ kind: string; wake: number }>(
+      "SELECT kind, wake FROM messages WHERE subject = 'alerte'",
+    );
+    expect(row?.kind).toBe("notify");
+    expect(row?.wake).toBe(1);
+  });
+});
+
+describe("P2.6 (refonte): the outbox — the agent sees queued, never unreachable", () => {
+  it("a peer send queues instead of erroring on a missing address", async () => {
+    const { db, call } = setup();
+    await call("mesh_register", { name: "alice" }, "s1");
+    pairWithToken(db, {
+      node_id: "peer-1",
+      hostname: "laptop",
+      fingerprint: "ff00",
+      token: "tok-peer1",
+    });
+    // No address for the peer (mDNS churn, rebooted, whatever): the OLD path
+    // errored — the agent burned tokens retrying. The outbox queues.
+    const out = await call(
+      "mesh_send",
+      { peer: "peer-1", to: "bob", subject: "s", body: "b" },
+      "s1",
+    );
+    expect(out).toContain("queued:");
+    const row = db.conn.get<{ state: string; payload: string }>(
+      "SELECT state, payload FROM outbox",
+    )!;
+    expect(row.state).toBe("queued");
+    expect(JSON.parse(row.payload).to_box).toBe("bob");
+    // The effectively-once dedup rides origin_id in the payload.
+    expect(JSON.parse(row.payload).origin_id).toBeTruthy();
+    db.close();
+  });
+
+  it("a federated target queues for the owning peer", async () => {
+    const { db, call } = setup();
+    await call("mesh_register", { name: "alice" }, "s1");
+    mergeFederatedRegistry(
+      db,
+      [
+        {
+          name: "remote-dev",
+          session_id: "ses-remote",
+          role: "ops",
+          pools: "[]",
+          primary_pool: null,
+          registered_at: Date.now() - 1000,
+        },
+      ],
+      "peer-9",
+    );
+    const out = await call("mesh_send", { to: "remote-dev", subject: "s", body: "b" }, "s1");
+    expect(out).toContain("queued:");
+    const row = db.conn.get<{ payload: string }>("SELECT payload FROM outbox")!;
+    const payload = JSON.parse(row.payload);
+    expect(payload.node_id).toBe("peer-9");
+    expect(payload.to_box).toBe("remote-dev");
+    db.close();
+  });
+});
+
+describe("P4 (refonte): the blackboard — status is shared state, not DMs", () => {
+  it("mesh_board_set writes without waking; mesh_board_get reads one line per box", async () => {
+    const { db, call } = setup();
+    await call("mesh_register", { name: "alice" }, "s1");
+    await call("mesh_register", { name: "bob" }, "s2");
+    await call("mesh_board_set", { key: "task", value: "build 2025" }, "s1");
+    await call("mesh_board_set", { key: "state", value: "working" }, "s1");
+    await call("mesh_board_set", { key: "task", value: "DNS record" }, "s2");
+    // No wake: the board is not a message (no deliveries, no wakeable rows).
+    expect(db.conn.get<{ n: number }>("SELECT COUNT(*) AS n FROM deliveries")?.n).toBe(0);
+    const out = String(await call("mesh_board_get", {}, "s1"));
+    expect(out).toContain("alice");
+    expect(out).toContain("build 2025");
+    expect(out).toContain("bob");
+    expect(out).toContain("DNS record");
+    db.close();
+  });
+
+  it("mesh_board_get filters by pool; an invalid key refuses", async () => {
+    const { db, call } = setup();
+    await call("mesh_register", { name: "alice" }, "s1");
+    await call("mesh_register", { name: "bob" }, "s2");
+    await call("mesh_join", { pool: "team:x" }, "s2");
+    await call("mesh_board_set", { key: "task", value: "alice task" }, "s1");
+    await call("mesh_board_set", { key: "task", value: "bob task" }, "s2");
+    const out = String(await call("mesh_board_get", { pool: "team:x" }, "s1"));
+    expect(out).toContain("bob");
+    expect(out).not.toContain("alice task");
+    const bad = await call("mesh_board_set", { key: "free", value: "x" }, "s1");
+    expect(bad).toContain("error: key must be one of");
+    db.close();
+  });
+});
+
+describe("P2 (refonte): the ask/reply tools — the federated ask queues, the cross reply queues back", () => {
+  it("mesh_ask to a federated box queues task-ask; mesh_reply on the mirror queues task-reply", async () => {
+    const { db, call } = setup();
+    await call("mesh_register", { name: "alice" }, "s1");
+    mergeFederatedRegistry(
+      db,
+      [
+        {
+          name: "bob-remote",
+          session_id: "ses-b",
+          role: "ops",
+          pools: "[]",
+          primary_pool: null,
+          registered_at: Date.now() - 1000,
+          epoch: 2,
+        },
+      ],
+      "node-b",
+    );
+    const out = await call("mesh_ask", { to: "bob-remote", body: "quel etat?" }, "s1");
+    const parsed = JSON.parse(out) as { task_id: string; queued_for: string };
+    expect(parsed.queued_for).toBe("node-b");
+    // La row task-ask dans l'outbox.
+    const askRow = db.conn.get<{ payload: string }>(
+      "SELECT payload FROM outbox WHERE json_extract(payload,'$.type') = 'task-ask'",
+    )!;
+    expect(JSON.parse(askRow.payload).task.id).toBe(parsed.task_id);
+
+    // NOTE: le miroir + la reply cross vivent sur l'AUTRE node (l'id est le
+    // meme par design) — le round-trip complet est couvre par
+    // tests/lib.outbox.test.ts (le cross-host describe).
+    db.close();
+  });
+
+  it("mesh_tasks lists the asked and received tasks; mesh_board get/set round trip", async () => {
+    const { db, call } = setup();
+    await call("mesh_register", { name: "alice" }, "s1");
+    await call("mesh_register", { name: "bob" }, "s2");
+    const out = await call("mesh_ask", { to: "bob", body: "q?" }, "s1");
+    const parsed = JSON.parse(out) as { task_id: string };
+    const listed = String(await call("mesh_tasks", {}, "s1"));
+    expect(listed).toContain(parsed.task_id.slice(0, 8));
+    expect(listed).toContain("submitted");
+    // mesh_board: le set sans reveil, le get une ligne.
+    await call("mesh_board_set", { key: "state", value: "live" }, "s1");
+    const board = String(await call("mesh_board_get", {}, "s1"));
+    expect(board).toContain("alice");
+    expect(board).toContain("state=live");
+    db.close();
+  });
+});
+
+describe("B4 (refonte2): the tools NEVER block on the outbox sweeps", () => {
+  it("mesh_send to a BLACK-HOLE peer answers in well under 1s (no sweep await)", {
+    timeout: 10_000,
+  }, async () => {
+    const net = await import("node:net");
+    // Le black-hole: accepte la connexion, ne repond JAMAIS — le sendMail
+    // tient son timeout (10s): le await sweep du OLD code gelait le tour
+    // pendant ce temps. Le NEW: queue + trigger, la reponse immediate.
+    const blackHole = net.createServer((socket) => {
+      socket.on("data", () => {}); // accepte, ignore
+    });
+    await new Promise<void>((r) => blackHole.listen(0, "127.0.0.1", r));
+    const holePort = (blackHole.address() as { port: number }).port;
+    const { db, call } = setup();
+    await call("mesh_register", { name: "alice" }, "s1");
+    pairWithToken(db, {
+      node_id: "dead-peer",
+      hostname: "dead",
+      fingerprint: "ff",
+      token: "tok-dead",
+      public_key: "test-pk",
+      addresses: [`127.0.0.1:${holePort}`],
+    });
+    const t0 = Date.now();
+    const out = await call("mesh_send", { peer: "dead-peer", subject: "s", body: "b" }, "s1");
+    const dt = Date.now() - t0;
+    expect(out).toContain("queued:");
+    expect(dt).toBeLessThan(1000);
+    blackHole.close();
+    db.close();
+  });
+});
+
+describe("D (refonte2): the board shows the age", () => {
+  it("mesh_board_get includes the entry age", async () => {
+    const { db, call } = setup();
+    await call("mesh_register", { name: "alice" }, "s1");
+    await call("mesh_board_set", { key: "task", value: "build 2025" }, "s1");
+    const out = String(await call("mesh_board_get", {}, "s1"));
+    expect(out).toMatch(/task=build 2025 \(\d+[smh]\)/);
     db.close();
   });
 });

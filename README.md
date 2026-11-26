@@ -34,7 +34,7 @@ flowchart LR
 ## Highlights
 
 - **Named mailboxes, one per agent hat.** `mesh_register` binds a session to a named box; one session can wear several hats (one box per role); a restart re-binds the stamped boxes automatically, and re-registering a name from another session is a handoff (last binder wins).
-- **Team pools with broadcast.** `team:*` pools carry announcements (`status:` / `decision:` / `alert:`), while discussion stays in DMs; `mesh_wait(id, timeout)` closes a request/response within one turn.
+- **Team pools with broadcast.** `team:*` pools carry announcements (`status:` / `decision:` / `alert:`), while discussion stays in DMs; `mesh_ask` submits a task and returns immediately — the answer arrives as a wake, a group answers as ONE digest.
 - **Wake idle agents.** A host-side loop watches mailboxes (5 s poll, 60 s per-mailbox cooldown) and injects a prompt into idle sessions, so an agent reacts to incoming work without a human relaying the message.
 - **Multi-host federation.** Pair hosts with a 6-digit code; `team:*` broadcasts fan out to paired peers with anti-loop `via[]` and `origin_id` dedup, and each host keeps master of its own boxes and wake.
 - **Anchored shared memory.** The fleet ledger lives in [opencode-memory](https://www.npmjs.com/package/@log0u7/opencode-memory) 0.11+: epics and tasks anchored to the code they touch self-stale when the code moves, and `supersedes` (0.12+) keeps one truth per decision instead of stacking duplicates.
@@ -111,7 +111,11 @@ mesh_send(to="reviewer", subject="build done", body="...")   # targeted mail (th
 mesh_send(to="team:build", subject="status", body="...")   # pool broadcast (quiet)
 mesh_send(to="team:build", subject="build done", body="...", wake=true)   # deliberate broadcast: wakes every member
 mesh_inbox()                       # only YOUR mailbox (plus legacy global mail), ack
-mesh_wait(id="...", timeout=120)   # block until a reply_to lands, then return it
+mesh_ask(to="...", body="...")     # submit a task, get task_id, NEVER blocks
+mesh_reply(task_id="...", result="...")  # answer a task from your box
+mesh_tasks()                       # list your tasks (read-only)
+mesh_board_set(key="task", value="...")  # status = shared state, not a DM
+mesh_board_get()                   # one line per box, the fleet's state
 mesh_join(pool="team:build") / mesh_leave(pool="...") / mesh_pools()
 mesh_lock(path="src/api.ts", ttl=300)   # claim a file before editing (this machine only)
 mesh_unlock(path="src/api.ts")
@@ -191,7 +195,7 @@ draining the inbox ate everyone's messages. Mailboxes fix the routing:
   members on paired hosts (fanout with anti-loop `via[]` and `origin_id`
   dedup); each host keeps its own boxes and wake. See
   [ORGANIZATION.md](docs/ORGANIZATION.md), Model 5.
-- `mesh_wait(id, timeout)` completes a request/response within one turn: it
+- `mesh_ask`/`mesh_reply` complete a request/response WITHOUT blocking: the ask returns a task id, the reply wakes the asker on the terminal or input_required state (the correlation is server-side):
   blocks the agent turn until a message with `reply_to: id` arrives.
 - Presence: every tool interaction refreshes the mailbox `last_seen`;
   `mesh_status` lists mailboxes with role, pools and age.
@@ -215,7 +219,11 @@ and the role prompts plus the enrollment lifecycle in
 | `mesh_pair` | `code?`, `address?`, `offer?`, `node_id?`, `token?`, `pk?` | No args: emit a 6-digit pairing code (30 min). `code=`: complete pairing — LAN autodiscovers the address, cross-subnet adds `address=`; both sides end up paired. `offer=`: complete a `MESH1-` blob. Legacy `node_id`/`token` accepted. |
 | `mesh_send` | `peer?`, `to?`, `subject`, `body`, `reply_to?` | Deliver mail: `to` a mailbox / `team:<pool>` / `all` locally, and/or `peer` on another node. |
 | `mesh_inbox` | `ack?` | Fetch unread messages addressed to this session's mailbox; ack marks them read. |
-| `mesh_wait` | `id`, `timeout?` | Block until a reply (`reply_to`) to message `id` arrives, return it. |
+| `mesh_ask` | `to`, `body`, `group?`, `deadline?` | Submit a task, return the task id immediately (never blocks); the answer arrives as a wake. |
+| `mesh_reply` | `task_id`, `result`, `state?` | Answer a task from your box; the asker is notified on terminal and input_required states. |
+| `mesh_tasks` | `group?` | List your tasks, newest first, read-only. |
+| `mesh_board_set` | `key`, `value` | Write one status key (task/blocker/state/eta) — no wake. |
+| `mesh_board_get` | `pool?` | Read the board: one line per box. |
 | `mesh_journal` | `since?`, `mailbox?`, `limit?`, `pool?` | Read-only journal of the traffic this machine saw: who, what, to whom, when (metadata only — bodies stay in `mesh_inbox`). |
 | `mesh_join` / `mesh_leave` | `pool` | Add / remove this mailbox from a broadcast pool. |
 | `mesh_pools` | | List pools with their member mailboxes. |

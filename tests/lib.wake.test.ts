@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { openMeshDb } from "../src/lib/db.js";
 import {
   claimFlash,
+  claimFlashWithContent,
   deliverMessage,
   inboxRead,
   joinPool,
@@ -129,7 +130,15 @@ describe("createExecutionTracker (the host's real session-status events)", () =>
   it("passes a stable generated messageID to the prompt (the transport-retry idempotency key)", async () => {
     const { db, prompt, sessionKnown } = setup(["s1"]);
     registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
-    deliverMessage(db, { from: "n", to_box: "a", subject: "s", body: "b", created_at: 1000 });
+    // An OVERSIZED body: the compact path keeps the mail UNREAD, so the
+    // reminder has something to re-claim (the content path consumes).
+    deliverMessage(db, {
+      from: "n",
+      to_box: "a",
+      subject: "s",
+      body: "x".repeat(700),
+      created_at: 1000,
+    });
     const handle = startWakeLoop({
       db,
       prompt,
@@ -155,7 +164,15 @@ describe("createExecutionTracker (the host's real session-status events)", () =>
     try {
       const { db, prompt, prompts, sessionKnown } = setup(["s1"]);
       registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
-      deliverMessage(db, { from: "n", to_box: "a", subject: "s", body: "b", created_at: 1000 });
+      // An OVERSIZED body: the compact path keeps the mail UNREAD — the
+      // content path would consume it and there would be nothing to starve.
+      deliverMessage(db, {
+        from: "n",
+        to_box: "a",
+        subject: "s",
+        body: "x".repeat(700),
+        created_at: 1000,
+      });
       const handle = startWakeLoop({
         db,
         prompt,
@@ -206,7 +223,9 @@ describe("wake collapse gate (at most one prompt in flight per session)", () => 
     await new Promise((r) => setTimeout(r, 200));
     handle.stop();
     expect(prompts.length).toBe(first + 1);
-    expect(prompts[prompts.length - 1]?.text).toContain("2 unread");
+    expect(prompts[prompts.length - 1]?.text).toContain('<mesh-mail kind="notify" subject="s2">');
+    expect(prompts[prompts.length - 1]?.text).toContain("s2 — b2");
+    expect(prompts[prompts.length - 1]?.text).toContain("s3 — b3");
   });
 
   it("clears the in-flight gate when the delivered prompt's turn runs", async () => {
@@ -240,7 +259,13 @@ describe("wake collapse gate (at most one prompt in flight per session)", () => 
     try {
       const { db, prompt, prompts, sessionKnown } = setup(["s1"]);
       registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
-      deliverMessage(db, { from: "n", to_box: "a", subject: "s", body: "b", created_at: 1000 });
+      deliverMessage(db, {
+        from: "n",
+        to_box: "a",
+        subject: "s",
+        body: "x".repeat(700),
+        created_at: 1000,
+      });
       const handle = startWakeLoop({
         db,
         prompt,
@@ -269,9 +294,32 @@ describe("wake collapse gate (at most one prompt in flight per session)", () => 
 });
 
 describe("wake loop", () => {
-  it("uses the documented defaults", () => {
-    expect(DEFAULT_WAKE_INTERVAL_MS).toBe(5000);
+  it("uses the documented defaults (the safety tick is 30s: the WAL watcher is the fast path)", () => {
+    expect(DEFAULT_WAKE_INTERVAL_MS).toBe(30_000);
     expect(DEFAULT_WAKE_COOLDOWN_MS).toBe(60000);
+  });
+
+  it("the WAL watcher flashes immediately, without any timer (the event-driven wake)", async () => {
+    // A REAL file db: the watcher watches mesh.db-wal (:memory: has none).
+    const dir = mkdtempSync(join(tmpdir(), "wake-event-"));
+    const db = openMeshDb(join(dir, "mesh.db"));
+    const prompts: Array<{ sessionID: string; text: string }> = [];
+    registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
+    const handle = startWakeLoop({
+      db,
+      prompt: async (sessionID, text) => {
+        prompts.push({ sessionID, text });
+      },
+      sessionKnown: () => true,
+      intervalMs: 30_000, // the safety tick: 30s away — NO timer delivers this
+    });
+    deliverMessage(db, { from: "n", to_box: "a", subject: "s", body: "b", created_at: 1000 });
+    // Well under the 30s safety tick: only the WAL watcher can have fired.
+    await new Promise((r) => setTimeout(r, 150));
+    handle.stop();
+    expect(prompts.length).toBe(1);
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
   });
 
   it("is inert with intervalMs <= 0", async () => {
@@ -295,7 +343,9 @@ describe("wake loop", () => {
 
     expect(prompt).toHaveBeenCalledTimes(1);
     expect(prompts[0]?.sessionID).toBe("s1");
-    expect(prompts[0]?.text).toContain('mesh: 1 unread — "s"');
+    // The content path: the <mesh-mail> envelope carries the mail (acked).
+    expect(prompts[0]?.text).toContain('<mesh-mail kind="notify" subject="s">');
+    expect(prompts[0]?.text).toContain("s — b");
 
     db.close();
   });
@@ -447,7 +497,13 @@ describe("fatigue guard", () => {
     try {
       const { db, prompt, prompts } = setup(["s1"]);
       registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
-      deliverMessage(db, { from: "n", to_box: "a", subject: "s", body: "b", created_at: 1000 });
+      deliverMessage(db, {
+        from: "n",
+        to_box: "a",
+        subject: "s",
+        body: "x".repeat(700),
+        created_at: 1000,
+      });
       const handle = startWakeLoop({
         db,
         prompt,
@@ -557,7 +613,7 @@ describe("wake flag (0.17.0 Slack model)", () => {
     handle.stop();
 
     expect(prompts.map((p) => p.sessionID).sort()).toEqual(["s2", "s3"]);
-    expect(prompts[0]?.text).toContain('mesh: 1 unread — "r8 go: build is green"');
+    expect(prompts[0]?.text).toContain('<mesh-mail kind="notify" subject="r8 go: build is green">');
     db.close();
   });
 
@@ -766,7 +822,13 @@ describe("token economy (0.16.0)", () => {
     handle.stop();
 
     expect(prompt).toHaveBeenCalledTimes(1);
-    expect(prompts[0]?.text).toBe('mesh: 2 unread — "status: pool broadcast"');
+    // The content path: the first line keeps the compact grammar, the
+    // payload carries the mail (acked — no drain turn).
+    expect(prompts[0]?.text).toContain(
+      '<mesh-mail kind="notify" subject="status: pool broadcast">',
+    );
+    expect(prompts[0]?.text).toContain("status: pool broadcast — b");
+    expect(prompts[0]?.text).toContain("dm — b");
     db.close();
   });
 
@@ -793,7 +855,10 @@ describe("token economy (0.16.0)", () => {
     handle.stop();
 
     expect(prompt).toHaveBeenCalledTimes(1);
-    expect(prompts[0]?.text).toBe('mesh: 1 unread — "status: pool broadcast"');
+    expect(prompts[0]?.text).toContain(
+      '<mesh-mail kind="notify" subject="status: pool broadcast">',
+    );
+    expect(prompts[0]?.text).toContain("status: pool broadcast — b");
     db.close();
   });
 
@@ -824,7 +889,13 @@ describe("token economy (0.16.0)", () => {
     await new Promise((r) => setTimeout(r, 60));
     handle.stop();
 
-    expect(prompts[0]?.text).toBe('mesh: 2 unread — "status: quota config transmise"');
+    expect(prompts[0]?.text).toContain(
+      '<mesh-mail kind="notify" subject="status: quota config transmise">',
+    );
+    expect(prompts[0]?.text).toContain("status: quota config transmise — b");
+    expect(prompts[0]?.text).toContain("later mail — b");
+    expect(prompts[0]?.text).toContain("status: quota config transmise — b");
+    expect(prompts[0]?.text).toContain("later mail — b");
     db.close();
   });
 
@@ -849,7 +920,9 @@ describe("token economy (0.16.0)", () => {
     await new Promise((r) => setTimeout(r, 60));
     handle.stop();
 
-    expect(prompts[0]?.text).toBe(`mesh: 1 unread — "${"x".repeat(59)}…"`);
+    expect(prompts[0]?.text).toContain(`mesh-mail`);
+    expect(prompts[0]?.text).toContain("x".repeat(70));
+    expect(prompts[0]?.text).toContain("x".repeat(70));
     db.close();
   });
 });
@@ -863,10 +936,18 @@ describe("phantom unread counter (0.24.6): the displayed count is the database's
       prompt,
       sessionKnown: () => true,
       intervalMs: 10,
-      cooldownMs: 0,
+      fatigueTtlMs: 30,
     });
-    // The repro: one delivery → the flash shows 1.
-    deliverMessage(db, { from: "n", to_box: "a", subject: "virtio", body: "b", created_at: 1000 });
+    // The repro, on the COMPACT path (oversized body: the mail stays unread
+    // after the flash — the content path would have consumed it): one
+    // delivery → the flash shows 1.
+    deliverMessage(db, {
+      from: "n",
+      to_box: "a",
+      subject: "virtio",
+      body: "x".repeat(700),
+      created_at: 1000,
+    });
     await new Promise((r) => setTimeout(r, 40));
     expect(prompts.length).toBeGreaterThanOrEqual(1);
     expect(prompts[0]?.text).toContain("mesh: 1 unread");
@@ -885,12 +966,15 @@ describe("phantom unread counter (0.24.6): the displayed count is the database's
   it("quotes the fresh count, not the one retained from an earlier flash", async () => {
     const { db, prompt, prompts } = setup(["s1"]);
     registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
+    // Three OVERSIZED mails: the batch exceeds the budget → the compact path
+    // claims without consuming (the mail stays unread, the drain scenario
+    // exists).
     for (let i = 0; i < 3; i += 1) {
       deliverMessage(db, {
         from: "n",
         to_box: "a",
         subject: `m${i}`,
-        body: "b",
+        body: "x".repeat(300),
         created_at: 1000 + i,
       });
     }
@@ -906,19 +990,27 @@ describe("phantom unread counter (0.24.6): the displayed count is the database's
     const beforeAck = prompts.length;
     const threes = prompts.filter((p) => p.text.includes("mesh: 3 unread")).length;
     expect(threes).toBeGreaterThanOrEqual(1);
-    // The agent acks 2 of the 3 (partial drain) → the next flash quotes the
-    // database's 1, never the retained 3.
+    // The agent acks 2 of the 3 (partial drain) → the reminder re-claims the
+    // last unread row and the flash quotes the database's 1, never the
+    // retained 3.
     db.conn.run(
       "UPDATE deliveries SET status = 'read' WHERE id IN (SELECT id FROM deliveries WHERE to_box = 'a' ORDER BY created_at ASC LIMIT 2)",
     );
-    await new Promise((r) => setTimeout(r, 60));
+    await new Promise((r) => setTimeout(r, 80));
     handle.stop();
-    expect(unreadBoxCount(db, "a")).toBe(1);
+    // The reminder re-claimed the LAST unread row: a single 300c mail fits
+    // the budget → the content path CONSUMED it (the prompt carried the
+    // mail — no drain turn). The database's 0 IS the truth here; the
+    // contract under test is the QUOTED count (1, never the retained 3).
+    expect(unreadBoxCount(db, "a")).toBe(0);
     expect(prompts.filter((p) => p.text.includes("mesh: 3 unread")).length).toBe(threes);
     const afterAck = prompts.slice(beforeAck);
     expect(afterAck.length).toBeGreaterThanOrEqual(1);
+    // Le rappel a repris m2 SEUL (300c <= le budget): le chemin CONTENU —
+    // l'enveloppe porte le mail, jamais le compte retenu 3.
     for (const p of afterAck) {
-      expect(p.text).toContain("mesh: 1 unread");
+      expect(p.text).toContain('<mesh-mail kind="notify" subject="m2">');
+      expect(p.text).toContain("m2 — ");
       expect(p.text).not.toContain("mesh: 3 unread");
     }
     db.close();
@@ -948,7 +1040,15 @@ describe("the active escalation (0.30.0)", () => {
       const { db, prompt, sessionKnown } = setup(["s1"]);
       registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
       registerMailbox(db, { name: "orq", session_id: "s-orq", now: 1000 });
-      deliverMessage(db, { from: "n", to_box: "a", subject: "s", body: "b", created_at: 1000 });
+      // OVERSIZED: the compact path keeps the mail unread — the starvation
+      // the escalation exercises cannot happen on a consumed (content) mail.
+      deliverMessage(db, {
+        from: "n",
+        to_box: "a",
+        subject: "s",
+        body: "x".repeat(700),
+        created_at: 1000,
+      });
       const handle = startWakeLoop({
         db,
         prompt,
@@ -990,8 +1090,15 @@ describe("the active escalation (0.30.0)", () => {
       const dir = mkdtempSync(join(tmpdir(), "wake-escalate-"));
       const db = openMeshDb(join(dir, "mesh.db"));
       registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
-      // NO orq mailbox on this node: the escalation skips.
-      deliverMessage(db, { from: "n", to_box: "a", subject: "s", body: "b", created_at: 1000 });
+      // NO orq mailbox on this node: the escalation skips. OVERSIZED body:
+      // the compact path keeps the mail unread (the escalation subject).
+      deliverMessage(db, {
+        from: "n",
+        to_box: "a",
+        subject: "s",
+        body: "x".repeat(700),
+        created_at: 1000,
+      });
       const handle = startWakeLoop({
         db,
         prompt: async () => {},
@@ -1124,6 +1231,64 @@ describe("single-flight flash (0.32.0): the claim lives in the DB, not in instan
     deliverMessage(db, { from: "n", to_box: "a", subject: "dm", body: "b", created_at: 1000 });
     inboxRead(db, "s1", true);
     expect(claimFlash(db, "a", Date.now(), 0).claimed).toBe(0);
+    db.close();
+  });
+});
+
+describe("P1.1 (refonte): the flash carries the content — one turn instead of two", () => {
+  it("claimFlashWithContent: a small batch is claimed, READ and returned in one shot", () => {
+    const db = openMeshDb(":memory:");
+    registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
+    deliverMessage(db, {
+      from: "n",
+      from_box: "x",
+      to_box: "a",
+      subject: "s1",
+      body: "body one",
+      created_at: 1000,
+    });
+    deliverMessage(db, {
+      from: "n",
+      from_box: "y",
+      to_box: "a",
+      subject: "s2",
+      body: "body two",
+      created_at: 1001,
+    });
+    const res = claimFlashWithContent(db, "a", Date.now(), 10 * 60 * 1000, 600);
+    expect(res.claimed).toBe(2);
+    expect(res.content).not.toBeNull();
+    expect(res.content).toContain("s1");
+    expect(res.content).toContain("body one");
+    expect(res.content).toContain("s2");
+    expect(res.content).toContain("body two");
+    // The same UPDATE marked the batch READ: the drain after the flash is
+    // EMPTY — the -1 turn is the whole point.
+    expect(unreadBoxCount(db, "a")).toBe(0);
+    const rows = db.conn.all<{ flashed_at: number | null }>(
+      "SELECT flashed_at FROM deliveries WHERE to_box = 'a'",
+    );
+    for (const row of rows) expect(row.flashed_at).not.toBeNull();
+    db.close();
+  });
+
+  it("claimFlashWithContent: an oversized batch claims WITHOUT content (the compact path)", () => {
+    const db = openMeshDb(":memory:");
+    registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
+    deliverMessage(db, {
+      from: "n",
+      from_box: "x",
+      to_box: "a",
+      subject: "big",
+      body: "x".repeat(700),
+      created_at: 1000,
+    });
+    const res = claimFlashWithContent(db, "a", Date.now(), 10 * 60 * 1000, 600);
+    expect(res.claimed).toBe(1);
+    expect(res.content).toBeNull();
+    // The compact path: claimed (flashed) but NOT read — mesh_inbox carries
+    // the body at the next turn.
+    expect(unreadBoxCount(db, "a")).toBe(1);
     db.close();
   });
 });

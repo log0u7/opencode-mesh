@@ -53,6 +53,9 @@ describe("mesh plugin", () => {
     });
 
     expect(Object.keys(hooks.tool ?? {}).sort()).toEqual([
+      "mesh_ask",
+      "mesh_board_get",
+      "mesh_board_set",
       "mesh_inbox",
       "mesh_join",
       "mesh_journal",
@@ -61,11 +64,12 @@ describe("mesh plugin", () => {
       "mesh_pair",
       "mesh_pools",
       "mesh_register",
+      "mesh_reply",
       "mesh_send",
       "mesh_spawn",
       "mesh_status",
+      "mesh_tasks",
       "mesh_unlock",
-      "mesh_wait",
       "mesh_worker_logs",
       "mesh_worker_remove",
       "mesh_worker_stop",
@@ -186,7 +190,10 @@ describe("mesh plugin tool branches", () => {
       { peer: "foreign-node", subject: "s", body: "b" },
       ctx("s1"),
     );
-    expect(noAddress).toContain("no known address");
+    // The outbox contract (refonte P2.6): a peer without an address QUEUES —
+    // the background sender retries; the visibility rides mesh_status's
+    // outbox counters (the agent never burns tokens on "unreachable").
+    expect(noAddress).toContain("queued:");
 
     const notLocked = await tools.mesh_unlock?.execute({ path: "never-locked.ts" }, ctx("s1"));
     expect(notLocked).toContain("was not locked");

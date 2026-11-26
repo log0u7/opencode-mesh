@@ -186,7 +186,9 @@ describe("mesh plugin with advertise enabled", () => {
       { peer: "manual", subject: "s", body: "b" },
       ctx("s1"),
     );
-    expect(result).toContain("sent to peer-by-host");
+    // The outbox: queued — the state rides mesh_status; the delivery is the
+    // background sender's job.
+    expect(result).toContain("queued:");
 
     await hooks.dispose?.();
   });

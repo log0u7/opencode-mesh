@@ -22,6 +22,9 @@ export type Mailbox = {
    * registry pushed at its rebind) — addressing-only, never a delivery
    * target, never woken. */
   node_id: string | null;
+  /** The LOGICAL clock per name (the refonte 3.2): incremented at each
+   * rebind, the federation LWW resolves on it instead of the wall clock. */
+  epoch: number;
 };
 
 export type RegisterMailboxInput = {
@@ -44,6 +47,9 @@ export type DeliverInput = {
   subject: string;
   body: string;
   reply_to?: string | null;
+  /** notify (default) wakes per the wake rules; fyi NEVER wakes — read at
+   * the next drain or flash (the silent DM). */
+  kind?: "notify" | "fyi";
   /** Cross-host dedup: the origin message's id. When a message with this
    * origin_id already exists locally, the delivery is skipped (the fanout
    * can hand the same broadcast to a node through several paths). */
@@ -121,6 +127,7 @@ function rowToMailbox(row: MailboxRow): Mailbox {
   return {
     name: row.name,
     session_id: row.session_id,
+    epoch: row.epoch ?? 1,
     role: row.role ?? null,
     pools: parsePools(row.pools),
     bind_key: row.bind_key ?? null,
@@ -133,6 +140,7 @@ function rowToMailbox(row: MailboxRow): Mailbox {
 type MailboxRow = {
   name: string;
   node_id: string | null;
+  epoch?: number;
   session_id: string;
   role: string | null;
   pools: string;
@@ -156,19 +164,26 @@ type MessageRow = {
 // ---- registration and presence ----
 
 export function registerMailbox(db: MeshDb, input: RegisterMailboxInput): Mailbox {
+  // The "/" is the node/box composite separator (the refonte P2.5): a local
+  // box named "a/b" would be indistinguishable from a cross-host mirror
+  // reference. Refuse at the boundary.
+  if (input.name.includes("/")) {
+    throw new Error('a mailbox name cannot contain "/"');
+  }
   // A session may own SEVERAL mailboxes (one TUI, several agent hats).
   // Re-registering an existing name rebinds it to this session (handoff).
   // A re-register without a primary keeps the declared one (identity trait,
   // same lifetime as bind_key).
   db.conn.run(
-    `INSERT INTO mailboxes (name, session_id, role, pools, bind_key, primary_pool, last_seen, created_at, registered_at)
-     VALUES (?, ?, ?, '[]', ?, ?, ?, ?, ?)
+    `INSERT INTO mailboxes (name, session_id, role, pools, bind_key, primary_pool, last_seen, created_at, registered_at, epoch)
+     VALUES (?, ?, ?, '[]', ?, ?, ?, ?, ?, 1)
      ON CONFLICT(name) DO UPDATE SET session_id = excluded.session_id,
        role = excluded.role,
        bind_key = COALESCE(excluded.bind_key, mailboxes.bind_key),
        primary_pool = COALESCE(excluded.primary_pool, mailboxes.primary_pool),
        last_seen = excluded.last_seen,
        registered_at = excluded.registered_at,
+       epoch = COALESCE(mailboxes.epoch, 0) + 1,
        node_id = NULL`,
     [
       input.name,
@@ -361,8 +376,8 @@ export function deliverMessage(db: MeshDb, input: DeliverInput): DeliverResult {
   }
 
   db.conn.run(
-    `INSERT INTO messages (id, origin_id, from_node, from_box, subject, body, reply_to, wake, status, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO messages (id, origin_id, from_node, from_box, subject, body, reply_to, wake, kind, status, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       id,
       input.origin_id ?? id,
@@ -372,6 +387,7 @@ export function deliverMessage(db: MeshDb, input: DeliverInput): DeliverResult {
       input.body,
       input.reply_to ?? null,
       input.wake === true ? 1 : 0,
+      input.kind ?? "notify",
       global ? "unread" : "delivered",
       created_at,
     ],
@@ -608,51 +624,6 @@ export function inboxRead(db: MeshDb, session_id: string, ack: boolean): InboxRo
   });
 }
 
-/**
- * First unread reply for mesh_wait, with the same atomic fetch+ack as
- * inboxRead (same hot-swap race, same fix, same residual window).
- */
-export function waitReplyRead(db: MeshDb, reply_to: string, session_id: string): InboxRow | null {
-  return withTransaction(db, () => {
-    const row = firstReply(db, reply_to, session_id);
-    if (row) ackReply(db, row);
-    return row;
-  });
-}
-
-/** The wait matcher (0.31.0): the exact reply_to match first, then the
- * sender match — ANY message from the request's recipient box that arrived
- * after the request. A reply that bypassed the auto-fill (a legacy wire
- * path, a DB-level write) still returns the waiter: the correlation no
- * longer depends on anyone's discipline. The matched row is acked. */
-export function waitReplyBroad(db: MeshDb, reply_to: string, session_id: string): InboxRow | null {
-  return withTransaction(db, () => {
-    const exact = firstReply(db, reply_to, session_id);
-    if (exact) {
-      ackReply(db, exact);
-      return exact;
-    }
-    const request = db.conn.get<{ created_at: number }>(
-      "SELECT created_at FROM messages WHERE id = ?",
-      [reply_to],
-    );
-    const delivery = db.conn.get<{ to_box: string }>(
-      "SELECT to_box FROM deliveries WHERE message_id = ? ORDER BY created_at DESC LIMIT 1",
-      [reply_to],
-    );
-    const box = mailboxBySession(db, session_id);
-    if (!request || !delivery || !box) return null;
-    const stray = deliveryRows(db, box.name).find(
-      (r) => r.from_box === delivery.to_box && r.created_at > request.created_at,
-    );
-    if (stray) {
-      ackReply(db, stray);
-      return stray;
-    }
-    return null;
-  });
-}
-
 /** The unread rows that do NOT answer `reply_to` — the wake-path replies
  * (bare, reply_to NULL: the flash carries the subject, not the id) that would
  * otherwise starve a mesh_wait caller to its full timeout. Listed in the
@@ -741,7 +712,8 @@ export function wakeBoxStats(db: MeshDb): WakeBoxStat[] {
     .all<{ box: string; unread: number; wakeable: number; subject: string }>(
       `SELECT d.to_box AS box,
               COUNT(*) AS unread,
-              MAX(CASE WHEN m.wake = 1
+              MAX(CASE WHEN m.kind = 'fyi' THEN 0
+                        WHEN m.wake = 1
                         OR ((m.origin_id IS NULL OR m.origin_id = m.id)
                             AND (SELECT COUNT(*) FROM deliveries d2 WHERE d2.message_id = m.id) <= 1)
                        THEN 1 ELSE 0 END) AS wakeable,
@@ -798,6 +770,9 @@ export type FederatedRegistryRow = {
   pools: string;
   primary_pool: string | null;
   registered_at: number;
+  /** The LOGICAL clock per name (the refonte 3.2): the LWW resolves on it
+   * when present; absent = a pre-3.2 peer, the legacy wall-clock rules. */
+  epoch?: number;
 };
 
 /**
@@ -889,9 +864,11 @@ export function mergeFederatedRegistry(
         registered_at: number | null;
         last_seen: number;
         bind_key: string | null;
-      }>("SELECT node_id, registered_at, last_seen, bind_key FROM mailboxes WHERE name = ?", [
-        row.name,
-      ]);
+        epoch: number | null;
+      }>(
+        "SELECT node_id, registered_at, last_seen, bind_key, epoch FROM mailboxes WHERE name = ?",
+        [row.name],
+      );
       if (local) {
         if (local.node_id === null || local.node_id === "") {
           // This node owns the name. Three guards before a takeover: (1) a LIVE
@@ -903,18 +880,27 @@ export function mergeFederatedRegistry(
           // explicit rebind on the other side transferred it).
           if (local.bind_key !== null && local.bind_key !== "") continue;
           if (local.last_seen > now - LIVE_LOCAL_LAST_SEEN_MS) continue;
-          const localAt = local.registered_at ?? 0;
-          if (row.registered_at <= localAt) continue;
+          // The EPOCH first (the refonte 3.2): the logical clock per name —
+          // a wall clock can lie (the clock-skew class), an epoch cannot.
+          // The TRANSITIONAL guard: an epoch-less inbound (a pre-3.2 peer)
+          // NEVER takes a local name — the takeover requires the new
+          // protocol; the legacy wall-clock transfer is retired.
+          if ((row.epoch ?? 0) === 0) continue;
+          const localEpoch = local.epoch ?? 0;
+          if ((row.epoch ?? 0) <= localEpoch) continue;
         } else if (local.node_id !== senderNodeId) {
           // A federated row owned by a THIRD node: the sender must be the owner
           // to update it — the third-party re-broadcast never overwrites.
           continue;
+        } else if ((row.epoch ?? 0) > 0) {
+          if ((row.epoch ?? 0) <= (local.epoch ?? 0)) continue;
         } else if ((local.registered_at ?? 0) >= row.registered_at) {
           continue;
         }
         db.conn.run(
           `UPDATE mailboxes SET session_id = ?, role = ?, pools = ?, primary_pool = ?,
-         registered_at = ?, last_seen = ?, bind_key = NULL, node_id = ? WHERE name = ?`,
+         registered_at = ?, last_seen = ?, bind_key = NULL, node_id = ?,
+         epoch = ? WHERE name = ?`,
           [
             row.session_id,
             row.role,
@@ -923,13 +909,14 @@ export function mergeFederatedRegistry(
             row.registered_at,
             Date.now(),
             senderNodeId,
+            row.epoch ?? (local.epoch ?? 0) + 1,
             row.name,
           ],
         );
       } else {
         db.conn.run(
-          `INSERT INTO mailboxes (name, session_id, role, pools, bind_key, primary_pool, last_seen, created_at, registered_at, node_id)
-         VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)`,
+          `INSERT INTO mailboxes (name, session_id, role, pools, bind_key, primary_pool, last_seen, created_at, registered_at, node_id, epoch)
+         VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?)`,
           [
             row.name,
             row.session_id,
@@ -940,6 +927,7 @@ export function mergeFederatedRegistry(
             Date.now(),
             row.registered_at,
             senderNodeId,
+            row.epoch ?? 1,
           ],
         );
       }
@@ -1003,10 +991,315 @@ export function claimFlash(
  * the next tick re-claims them — a claimed-but-never-announced delivery is
  * the silent-starvation class (the flash died, the mail looks announced). */
 export function releaseFlash(db: MeshDb, box: string, at: number): void {
-  db.conn.run("UPDATE deliveries SET flashed_at = NULL WHERE to_box = ? AND flashed_at = ?", [
-    box,
-    at,
+  // Restore the PRE-claim state: NULL flashed_at AND unread. The
+  // content-bearing flash CONSUMES the rows (status read in the claim
+  // UPDATE) — a failed prompt must un-consume them, or the re-claim
+  // (WHERE status = 'unread') never sees them again: silent loss.
+  db.conn.run(
+    "UPDATE deliveries SET flashed_at = NULL, status = 'unread' WHERE to_box = ? AND flashed_at = ?",
+    [box, at],
+  );
+}
+
+/** The content-bearing flash (0.33 refonte P1.1): claim the box's
+ * announceable unreads AND, when the whole batch fits the character budget,
+ * CONSUME it in the same UPDATE (flashed_at set, status read) and return the
+ * payload. The wake prompt then carries the mail itself: the agent reads the
+ * content in the flash and skips the mesh_inbox turn — one turn per wake
+ * instead of two. An oversized batch claims WITHOUT content (the compact
+ * flash path: mesh_inbox carries the bodies at the next turn). Atomic: the
+ * read, the budget check and the claim+consume happen in one transaction. */
+export function claimFlashWithContent(
+  db: MeshDb,
+  box: string,
+  now: number,
+  staleAfterMs: number,
+  maxChars: number,
+): { claimed: number; at: number; content: string | null } {
+  return withTransaction(db, () => {
+    const rows = db.conn.all<{
+      id: string;
+      from_box: string | null;
+      subject: string;
+      body: string;
+    }>(
+      `SELECT m.id, m.from_box, m.subject, m.body
+         FROM deliveries d JOIN messages m ON m.id = d.message_id
+         WHERE d.to_box = ? AND d.status = 'unread'
+           AND (d.flashed_at IS NULL OR d.flashed_at <= ?)
+         ORDER BY d.created_at ASC`,
+      [box, now - staleAfterMs],
+    );
+    const content = rows
+      .map((r) => `[${r.id.slice(0, 8)}] ${r.from_box ?? "?"}: ${r.subject} — ${r.body}`)
+      .join("\n");
+    const fits = content.length <= maxChars;
+    const res = db.conn.run(
+      `UPDATE deliveries SET flashed_at = ?${fits ? ", status = 'read'" : ""}
+       WHERE to_box = ? AND status = 'unread'
+         AND (flashed_at IS NULL OR flashed_at <= ?)`,
+      [now, box, now - staleAfterMs],
+    );
+    return { claimed: res.changes, at: now, content: fits ? content : null };
+  });
+}
+
+// ---- tasks (the refonte P2: the A2A lifecycle, server-side correlation) ----
+
+export type TaskState =
+  | "submitted"
+  | "working"
+  | "input_required"
+  | "completed"
+  | "failed"
+  | "canceled";
+
+export const TASK_OPEN_STATES = ["submitted", "working", "input_required"] as const;
+
+export type TaskRow = {
+  id: string;
+  from_box: string | null;
+  to_box: string;
+  group_id: string | null;
+  question: string;
+  result: string | null;
+  state: TaskState;
+  created_at: number;
+  updated_at: number;
+  deadline: number | null;
+};
+
+function rowToTask(row: Record<string, unknown>): TaskRow {
+  return row as unknown as TaskRow;
+}
+
+/** mesh_ask: submit a task — the row lands and the responder is notified
+ * (a notify message carrying the task id and the reply instruction). The
+ * correlation is server-side: the reply comes through mesh_reply(task_id),
+ * reply_to is no longer part of the contract. Returns immediately. */
+export function askTask(
+  db: MeshDb,
+  input: {
+    from_box: string | null;
+    to_box: string;
+    question: string;
+    group_id?: string | null;
+    deadline?: number | null;
+  },
+): TaskRow {
+  const id = randomUUID();
+  const now = Date.now();
+  db.conn.run(
+    `INSERT INTO tasks (id, from_box, to_box, group_id, question, result, state, created_at, updated_at, deadline)
+     VALUES (?, ?, ?, ?, ?, NULL, 'submitted', ?, ?, ?)`,
+    [
+      id,
+      input.from_box,
+      input.to_box,
+      input.group_id ?? null,
+      input.question,
+      now,
+      now,
+      input.deadline ?? null,
+    ],
+  );
+  const id8 = id.slice(0, 8);
+  // A FEDERATED target (refonte P2.5): the ask travels through the outbox
+  // (the tools layer queues task-ask) — a local delivery would sink into an
+  // addressing-only row.
+  if (!mailboxByName(db, input.to_box)) {
+    const row = getTask(db, id);
+    if (!row) throw new Error("the task row vanished after the insert");
+    return row;
+  }
+  deliverMessage(db, {
+    from: "mesh-tasks",
+    from_box: input.from_box,
+    to_box: input.to_box,
+    subject: `task ${id8}: ${input.question.slice(0, 60)}`,
+    body:
+      `${input.question}\n\n` +
+      `Reply with: mesh_reply(task_id="${id}", result="...", state="completed") ` +
+      `— state also accepts "failed" and "input_required". The asker is notified on terminal and input_required states.`,
+    kind: "notify",
+  });
+  return {
+    id,
+    from_box: input.from_box,
+    to_box: input.to_box,
+    group_id: input.group_id ?? null,
+    question: input.question,
+    result: null,
+    state: "submitted",
+    created_at: now,
+    updated_at: now,
+    deadline: input.deadline ?? null,
+  };
+}
+
+/** The task by id (or null). */
+export function getTask(db: MeshDb, id: string): TaskRow | null {
+  const row = db.conn.get<Record<string, unknown>>("SELECT * FROM tasks WHERE id = ?", [id]);
+  return row ? rowToTask(row) : null;
+}
+
+/** Is the group fully answered (every task terminal or input_required)? */
+function groupReady(db: MeshDb, groupId: string): boolean {
+  const open = db.conn.get<{ n: number }>(
+    `SELECT COUNT(*) AS n FROM tasks WHERE group_id = ? AND state NOT IN ('completed','failed','canceled','input_required')`,
+    [groupId],
+  );
+  return (open?.n ?? 0) === 0;
+}
+
+/** The digest for a group: one line per task. */
+function groupDigest(db: MeshDb, groupId: string): string {
+  const rows = db.conn.all<{ id: string; state: string; result: string | null; question: string }>(
+    "SELECT id, state, result, question FROM tasks WHERE group_id = ? ORDER BY created_at ASC",
+    [groupId],
+  );
+  return rows
+    .map((r) => `[${r.id.slice(0, 8)}] ${r.state}: ${r.result ?? r.question.slice(0, 60)}`)
+    .join("\n");
+}
+
+/** mesh_reply: the responder answers a task. ONLY the task's to_box owner
+ * may reply. Terminal states (and input_required) notify the asker; a
+ * group notifies ONCE, when ALL its tasks are answered (the digest — the
+ * collective ask costs one wake instead of one per task). */
+export function replyTask(
+  db: MeshDb,
+  taskId: string,
+  replyingBox: string,
+  result: string,
+  state: TaskState = "completed",
+): { ok: boolean; error?: string; notified: boolean; cross?: boolean } {
+  // BEGIN IMMEDIATE (the refonte2-C1): the concurrent replies to the same
+  // group serialize — two simultaneous last-replies cannot both fire the
+  // digest (the duplicate class); the sweep racing a reply serializes too.
+  db.conn.exec("BEGIN IMMEDIATE");
+  try {
+    const out = replyTaskInner(db, taskId, replyingBox, result, state);
+    db.conn.exec("COMMIT");
+    return out;
+  } catch (error) {
+    try {
+      db.conn.exec("ROLLBACK");
+    } catch {}
+    throw error;
+  }
+}
+
+function replyTaskInner(
+  db: MeshDb,
+  taskId: string,
+  replyingBox: string,
+  result: string,
+  state: TaskState = "completed",
+): { ok: boolean; error?: string; notified: boolean; cross?: boolean } {
+  const task = getTask(db, taskId);
+  if (!task) return { ok: false, error: "unknown task", notified: false };
+  if (task.to_box !== replyingBox)
+    return { ok: false, error: "only the task's target mailbox may reply", notified: false };
+  if (["completed", "failed", "canceled"].includes(task.state))
+    return { ok: false, error: `the task is already ${task.state}`, notified: false };
+  const now = Date.now();
+  db.conn.run("UPDATE tasks SET result = ?, state = ?, updated_at = ? WHERE id = ?", [
+    result,
+    state,
+    now,
+    taskId,
   ]);
+  // The asker notification: terminal states always; input_required too (a
+  // pause is a deliberate answer the asker must see). "working" never wakes.
+  // The asker notification: terminal states always; input_required too (a
+  // pause is a deliberate answer the asker must see). working/submitted never.
+  const notifyNow = ["completed", "failed", "canceled", "input_required"].includes(state);
+  if (!notifyNow) return { ok: true, notified: false };
+  // The MIRROR tasks (the cross-host): the group gate does NOT apply — the
+  // group's other tasks live on the ASKER'S node, the replies cross
+  // individually and the ASKER aggregates the digest.
+  if (task.group_id && !task.from_box?.includes("/") && !groupReady(db, task.group_id))
+    return { ok: true, notified: false };
+  if (!task.from_box) return { ok: true, notified: false };
+  // The MIRROR detection (refonte P2.5): the asker's box is not a LOCAL box
+  // — the task came from another node. The reply crosses BACK through the
+  // outbox (the tools layer queues task-reply); no local notification.
+  if (!mailboxByName(db, task.from_box)) return { ok: true, notified: false, cross: true };
+  // The GROUP digest fires ONCE (the refonte2-C1): group_notified_at marks
+  // the moment — the LATER transitions (input_required -> completed, a
+  // second failure...) notify INDIVIDUALLY, never re-digest (the duplicate
+  // class: the digest re-firing at every transition).
+  if (task.group_id) {
+    const groupNotified = db.conn.get<{ n: number }>(
+      "SELECT COUNT(*) AS n FROM tasks WHERE group_id = ? AND group_notified_at IS NOT NULL",
+      [task.group_id],
+    )?.n;
+    if (groupNotified !== undefined && groupNotified > 0) {
+      deliverMessage(db, {
+        from: "mesh-tasks",
+        from_box: task.to_box,
+        to_box: task.from_box,
+        subject: `task ${task.id.slice(0, 8)} ${state}`,
+        body: `${result}\n(task ${task.id.slice(0, 8)}, state: ${state})`,
+        kind: "notify",
+      });
+      return { ok: true, notified: true };
+    }
+    db.conn.run("UPDATE tasks SET group_notified_at = ? WHERE group_id = ?", [now, task.group_id]);
+  }
+  const body = task.group_id
+    ? `The group is answered:\n${groupDigest(db, task.group_id)}`
+    : `${result}\n(task ${taskId.slice(0, 8)}, state: ${state})`;
+  deliverMessage(db, {
+    from: "mesh-tasks",
+    from_box: task.to_box,
+    to_box: task.from_box,
+    subject: `task ${taskId.slice(0, 8)} ${state}`,
+    body,
+    kind: "notify",
+  });
+  return { ok: true, notified: true };
+}
+
+/** The deadline sweeper: expired open tasks fail WITHOUT intervention and
+ * the asker is notified (the group rules apply). Returns the swept count. */
+export function sweepTasks(db: MeshDb, now: number): number {
+  // BEGIN IMMEDIATE (the refonte2-C1): the sweep races a reply — the
+  // serialization kills the double-digest / double-notification class.
+  db.conn.exec("BEGIN IMMEDIATE");
+  try {
+    const expired = db.conn.all<{ id: string }>(
+      `SELECT id FROM tasks WHERE deadline IS NOT NULL AND deadline < ? AND state IN ('submitted','working','input_required')`,
+      [now],
+    );
+    for (const row of expired) {
+      const task = getTask(db, row.id);
+      if (!task) continue;
+      replyTaskInner(db, row.id, task.to_box, "deadline exceeded", "failed");
+    }
+    db.conn.exec("COMMIT");
+    return expired.length;
+  } catch (error) {
+    try {
+      db.conn.exec("ROLLBACK");
+    } catch {}
+    throw error;
+  }
+}
+
+/** mesh_tasks: the compact listing (no blocking). group filters; the caller's
+ * boxes see the tasks they asked OR are asked. */
+export function listTasks(db: MeshDb, boxes: string[], groupId?: string): TaskRow[] {
+  if (boxes.length === 0) return [];
+  const placeholders = boxes.map(() => "?").join(",");
+  const rows = db.conn.all<Record<string, unknown>>(
+    `SELECT * FROM tasks WHERE (from_box IN (${placeholders}) OR to_box IN (${placeholders}))${
+      groupId ? " AND group_id = ?" : ""
+    } ORDER BY created_at DESC LIMIT 50`,
+    groupId ? [...boxes, ...boxes, groupId] : [...boxes, ...boxes],
+  );
+  return rows.map(rowToTask);
 }
 
 /** The local registry rows this node owns (for the /registry-sync push). */
@@ -1017,7 +1310,70 @@ export function localRegistryRows(db: MeshDb): FederatedRegistryRow[] {
   // the peers (the PO fix 6).
   return db.conn
     .all<FederatedRegistryRow>(
-      "SELECT name, session_id, role, pools, primary_pool, registered_at FROM mailboxes WHERE node_id IS NULL",
+      "SELECT name, session_id, role, pools, primary_pool, registered_at, epoch FROM mailboxes WHERE node_id IS NULL",
     )
-    .map((r) => ({ ...r, registered_at: r.registered_at ?? 0 }));
+    .map((r) => ({ ...r, registered_at: r.registered_at ?? 0, epoch: r.epoch ?? 1 }));
+}
+
+// ---- the retention (the refonte2-D: the tables grow without bounds) ----
+
+export const RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+
+/** Purge the delivered history: the SENT outbox rows and the TERMINAL tasks
+ * older than 7 days. The queued/failed outbox rows and the open tasks stay
+ * (the live state). Called from the wake tick (the cheap indexed scans). */
+export function purgeDeliveredHistory(db: MeshDb, now: number): { outbox: number; tasks: number } {
+  const outbox = db.conn.run(
+    "DELETE FROM outbox WHERE state IN ('sent','failed') AND next_at < ?",
+    [now - RETENTION_MS],
+  ).changes;
+  const tasks = db.conn.run(
+    `DELETE FROM tasks WHERE state IN ('completed','failed','canceled') AND updated_at < ?`,
+    [now - RETENTION_MS],
+  ).changes;
+  return { outbox, tasks };
+}
+
+// ---- the board (the refonte P4: the shared status state, not DMs) ----
+
+export const BOARD_KEYS = ["task", "blocker", "state", "eta"] as const;
+export type BoardKey = (typeof BOARD_KEYS)[number];
+
+/** mesh_board_set: write ONE status key for the box. NO wake — the board is
+ * shared state: nobody is interrupted by an update, whoever needs it reads
+ * it (mesh_board_get). The keys are FIXED (the schema above) so the reads
+ * stay comparable across the fleet. */
+export function boardSet(db: MeshDb, box: string, key: BoardKey, value: string, now: number): void {
+  db.conn.run(
+    `INSERT INTO board (box, key, value, updated_at) VALUES (?, ?, ?, ?)
+     ON CONFLICT(box, key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+    [box, key, value, now],
+  );
+}
+
+/** mesh_board_get: the compact read — ONE line per box, the keys in the
+ * fixed order. The pool filter keeps the boxes carrying that pool. */
+export function boardGet(db: MeshDb, pool?: string): Array<{ box: string; line: string }> {
+  const boxes = listLocalOnlyMailboxes(db).filter((b) => !pool || b.pools.includes(pool));
+  const out: Array<{ box: string; line: string }> = [];
+  for (const box of boxes) {
+    const rows = db.conn.all<{ key: string; value: string; updated_at: number }>(
+      "SELECT key, value, updated_at FROM board WHERE box = ? ORDER BY updated_at DESC",
+      [box.name],
+    );
+    if (rows.length === 0) continue;
+    const order = new Map(BOARD_KEYS.map((k, i) => [k, i]));
+    rows.sort(
+      (a, b) => (order.get(a.key as BoardKey) ?? 99) - (order.get(b.key as BoardKey) ?? 99),
+    );
+    const age = (now: number) => {
+      const s = Math.round((Date.now() - now) / 1000);
+      return s < 90 ? `${s}s` : s < 5400 ? `${Math.round(s / 60)}m` : `${Math.round(s / 3600)}h`;
+    };
+    out.push({
+      box: box.name,
+      line: rows.map((r) => `${r.key}=${r.value} (${age(r.updated_at)})`).join("; "),
+    });
+  }
+  return out;
 }

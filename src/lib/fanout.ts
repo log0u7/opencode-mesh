@@ -51,18 +51,6 @@ export function createFanout(options: FanoutOptions): Fanout {
   const ttl = options.poolsCacheTtlMs ?? 60_000;
   const cache = new Map<string, { pools: Record<string, string[]>; at: number }>();
 
-  const localPools = (): Record<string, string[]> => {
-    const pools: Record<string, string[]> = {};
-    for (const box of listLocalOnlyMailboxes(options.db)) {
-      for (const pool of box.pools) {
-        const members = pools[pool] ?? [];
-        members.push(box.name);
-        pools[pool] = members;
-      }
-    }
-    return pools;
-  };
-
   const peerPools = async (peer: FanoutPeer): Promise<Record<string, string[]> | null> => {
     const cached = cache.get(peer.node_id);
     if (cached && Date.now() - cached.at < ttl) {

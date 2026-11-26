@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { Plugin } from "@opencode/plugin";
 import { Bonjour } from "bonjour-service";
 
@@ -5,15 +6,25 @@ import { openMeshDb, type MeshDb } from "./lib/db.js";
 import { advertiseMesh, browseMesh, type AdvertiseHandle } from "./lib/discovery.js";
 import { listLocks } from "./lib/locks.js";
 import {
+  deliverMessage,
+  getTask,
   listMailboxes,
   mailboxByBindKey,
   mailboxByName,
   mailboxesBySession,
   registerMailbox,
+  replyTask,
+  type TaskState,
   unreadBoxCount,
 } from "./lib/mail.js";
-import { listPeers, upsertDiscoveredPeer } from "./lib/peers.js";
-import { loadOrCreateIdentity, type NodeIdentity } from "./lib/identity.js";
+import {
+  findSendablePeer,
+  listPeers,
+  resolvePeerTarget,
+  upsertDiscoveredPeer,
+} from "./lib/peers.js";
+import { loadOrCreateIdentity, pairingProof, type NodeIdentity } from "./lib/identity.js";
+import { sendMail } from "./lib/client.js";
 import { nodeSpawn, stopAllWorkers, type SpawnFn } from "./lib/spawn.js";
 import type { WorktreeClient } from "./lib/worktree.js";
 import { v2WorktreeDomainClient } from "./lib/worktree.js";
@@ -24,6 +35,8 @@ import { startMemorySyncPusher } from "./lib/memory-sync.js";
 import { createDurableStore } from "./lib/persist.js";
 import { createFanout } from "./lib/fanout.js";
 import { createHostCapa } from "./lib/capa.js";
+import { handleTaskAsk, startOutboxSender, sweepOutbox } from "./lib/outbox.js";
+import { ackEvent, openPeerStream } from "./lib/stream.js";
 import { startWakeLoop, createExecutionTracker, type HostEvent } from "./lib/wake.js";
 import { startSessionLister } from "./lib/sessions.js";
 import { MESH_GUIDANCE } from "./lib/guidance.js";
@@ -133,7 +146,7 @@ export const MeshV2 = Plugin.define({
     // TLS material is derived from the node identity: the cert presents the
     // very key peers already pin, so TLS adds zero new trust.
     const tlsMaterial = nodeTlsMaterial(dataDir);
-    const { server, port, address, insecureServer } = await startMeshServer({
+    const { server, port, address, insecureServer, hub } = await startMeshServer({
       db,
       port: options.port ?? DEFAULT_PORT,
       ...(options.bind !== undefined ? { bind: options.bind } : {}),
@@ -275,8 +288,172 @@ export const MeshV2 = Plugin.define({
     // host, inject a prompt so the idle agent reacts without a human relaying.
     // Host-wide: one opencode process (e.g. `opencode serve`) hosts many
     // sessions, each with its own mailbox. Mid-turn sessions are skipped.
+    // The outbox sender (refonte P2.6): the due rows are claimed and
+    // delivered in the background — the peer conn is resolved FRESH at
+    // delivery (a moved peer, a fresh mDNS announce, a re-paired token are
+    // picked up without the asking agent ever knowing).
+    // The stream client + the hub (refonte 3.1): the SSE streams per peer —
+    // the receive side never polls; the outbox pushes over the open streams.
+    const dispatch = (eventPeerNodeId: string) => (event: { type: string; data: unknown }) => {
+      const d = event.data as {
+        from?: string;
+        from_box?: string;
+        to?: string;
+        subject?: string;
+        body?: string;
+        reply_to?: string;
+        kind?: "notify" | "fyi";
+        origin_id?: string;
+        task?: {
+          id: string;
+          group_id?: string | null;
+          deadline?: number | null;
+          result?: string;
+          state?: string;
+        };
+      };
+      if (event.type === "registry") return; // the registry rides its own pusher
+      if (event.type === "task-reply" && d.task?.id) {
+        const task = getTask(db, d.task.id);
+        if (task) {
+          // The owner check (the refonte2-P3): the event's from must be the
+          // task's owning node (the responder) — the spoof dropped.
+          if (d.from !== task.from_box?.split("/")[0]) return;
+          const VALID_STATES = ["working", "input_required", "completed", "failed", "canceled"];
+          const state = (d.task.state ?? "completed") as TaskState;
+          if (!VALID_STATES.includes(state)) return;
+          replyTask(db, d.task.id, task.to_box, d.task.result ?? "", state);
+        }
+        return;
+      }
+      if (event.type === "task-ask" && d.task?.id) {
+        handleTaskAsk(db, {
+          node_id: d.from ?? "",
+          to_box: d.to ?? "",
+          from_box: d.from_box ?? null,
+          subject: d.subject ?? "",
+          body: d.body ?? "",
+          origin_id: d.origin_id ?? "",
+          type: "task-ask",
+          task: {
+            id: d.task.id,
+            // The asker's remote reference: node/box (the /task-ask
+            // composite — the mirror detection + the reply routing read it).
+            from_box: `${d.from ?? ""}/${d.from_box ?? ""}`,
+            to_box: d.to ?? "",
+            question: d.body ?? "",
+            group_id: d.task.group_id ?? null,
+            deadline: d.task.deadline ?? null,
+            ...(d.task.result !== undefined ? { result: d.task.result } : {}),
+            state: (d.task.state ?? "completed") as TaskState,
+          },
+        });
+        return;
+      }
+      // The SAME validation as /mail (the refonte2-C7): the events arrive
+      // over the stream OPENED TO an authenticated peer — its events carry
+      // ITS node id; anything else is a spoof, dropped.
+      if (d.from !== undefined && d.from !== eventPeerNodeId) return;
+      // The applied origin_id returns: the stream client ACKs it (the
+      // refonte2-P1 — the push alone is at-most-once).
+      const applied = deliverMessage(db, {
+        from: d.from ?? "",
+        from_box: d.from_box ?? null,
+        to_box: d.to ?? null,
+        subject: d.subject ?? "",
+        body: d.body ?? "",
+        reply_to: d.reply_to ?? null,
+        kind: d.kind ?? "notify",
+        origin_id: d.origin_id ?? null,
+      });
+      return applied.ok ? (d.origin_id ?? null) : null;
+    };
+    // The client lifecycle (the refonte2-A3): ONE client per pair EVER —
+    // the client manages its own reconnection; openStreams creates only if
+    // absent AND never created (a dropped client keeps reconnecting alone:
+    // a fresh client on the next tick would multiply the loops on an
+    // unstable link). everClients holds EVERY handle ever created — the
+    // dispose stops them all (the dropped ones are not in the live map).
+    const everClients = new Map<string, { stop(): void }>();
+    const streamClients = new Map<string, { stop(): void }>();
+    // The client KEY (the refonte2-P5): node + url + pk + the token hash —
+    // a RE-PAIRED peer (a new token) or a moved peer (a new url/key)
+    // INVALIDATES the old client: stop it, create a fresh one (the old one
+    // looped on 401/pin-mismatch forever until restart).
+    const clientKey = (nodeId: string, conn: { url: string; pk: string | null }, token: string) =>
+      `${nodeId}|${conn.url}|${conn.pk ?? ""}|${createHash("sha256").update(token).digest("hex").slice(0, 16)}`;
+    const openStreams = (): void => {
+      for (const peer of listPeers(db)) {
+        if (!peer.paired) continue;
+        const conn = resolvePeerTarget(db, peer.node_id);
+        if (!conn) continue;
+        const token = findSendablePeer(db, peer.node_id)?.token ?? "";
+        const key = clientKey(peer.node_id, conn, token);
+        const existing: { stop(): void; key?: string } | undefined = streamClients.get(
+          peer.node_id,
+        );
+        if (existing && existing.key === key) continue;
+        // The key CHANGED (a re-pair, a move): stop the stale client — its
+        // reconnect loop would hit 401/pin-mismatch forever.
+        if (existing) {
+          existing.stop();
+          streamClients.delete(peer.node_id);
+        }
+        const client: { stop(): void; key?: string } = openPeerStream(
+          {
+            url: conn.url,
+            ...(conn.tls ? { tls: true } : {}),
+            ...(conn.pk !== null ? { pk: conn.pk } : {}),
+            token,
+            from: identity.node_id,
+            proof: pairingProof(identity, token),
+          },
+          {
+            onEvent: dispatch(peer.node_id),
+            ack: (originId: string) =>
+              void ackEvent(
+                {
+                  url: conn.url,
+                  ...(conn.tls ? { tls: true } : {}),
+                  ...(conn.pk !== null ? { pk: conn.pk } : {}),
+                  token,
+                  from: identity.node_id,
+                  proof: pairingProof(identity, token),
+                },
+                originId,
+              ),
+            onDrop: () => streamClients.delete(peer.node_id),
+          },
+        );
+        client.key = key;
+        everClients.set(peer.node_id, client);
+        streamClients.set(peer.node_id, client);
+      }
+    };
+    openStreams();
+
+    const outboxSender =
+      options.wake === false
+        ? undefined
+        : startOutboxSender(
+            db,
+            identity,
+            () => {
+              browseHandle?.refresh();
+              openStreams();
+            },
+            1_000,
+            hub,
+          );
+
     const wake = startWakeLoop({
       db,
+      onTick: async () => {
+        // The outbox sweep: GONE from the tick (the refonte2-B4 — the
+        // background sender owns the delivery; the queueOutbox nudge wakes
+        // it). The tick keeps: the streams for the new pairings.
+        openStreams();
+      },
       ...(options.wake === false ? { intervalMs: 0 } : {}),
       ...(options.wakeIntervalMs !== undefined ? { intervalMs: options.wakeIntervalMs } : {}),
       ...(options.wakePools !== undefined ? { wakePools: options.wakePools } : {}),
@@ -284,13 +461,22 @@ export const MeshV2 = Plugin.define({
       sessionKnown: (sessionID) => sessionsSeen.has(sessionID) || liveSessions.has(sessionID),
       sessionRunning: (sessionID) => running.has(sessionID),
       escalateTo: options.escalateTo ?? "orq",
-      prompt: (sessionID, text, messageID) => {
-        // The server reads the prompt's explicit id (packages/core/src/session/session.ts:
-        // input.id ?? create) — the transport-retry idempotency key (0.28.1):
-        // every retry of this call reconciles to the same message and no
-        // ghost turn re-fires. The key is `id` (SessionPromptInput) — NOT
-        // `messageID` (that key lives on the plugin HOOK type, a different
-        // surface; an effect-schema input strips unknown keys).
+      prompt: (sessionID, text, messageID, description, kind) => {
+        // The refonte2-C4: the SYNTHETIC delivery when the host supports it
+        // (opencode >= 2.4: a synthetic message, not a user one; the
+        // transport-retry idempotency key = the explicit id, unchanged).
+        // notify: delivery "steer" + resume true (the session wakes now);
+        // fyi: resume FALSE (delivered at the next run, ZERO turns).
+        if (typeof ctx.session.synthetic === "function") {
+          return ctx.session.synthetic({
+            sessionID,
+            id: messageID,
+            text,
+            description: description ?? null,
+            delivery: "steer",
+            resume: kind !== "fyi",
+          });
+        }
         const input = { sessionID, id: messageID, text, delivery: "queue" as const };
         return ctx.session.prompt(input);
       },
@@ -403,6 +589,11 @@ export const MeshV2 = Plugin.define({
       if (disposed) return;
       disposed = true;
       wake.stop();
+      outboxSender?.stop();
+      hub?.stop();
+      // EVERY client ever created stops: the live ones AND the dropped ones
+      // still reconnecting on their own loop.
+      for (const s of everClients.values()) s.stop();
       memorySyncPusher?.stop();
       liveSessions.stop();
       stopAllWorkers(db);

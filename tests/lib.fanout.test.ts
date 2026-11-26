@@ -304,3 +304,85 @@ describe("createFanout", () => {
     d.close();
   });
 });
+
+describe("the fanout cache (the refonte coverage): the local pools snapshot", () => {
+  it("the peer pools cache: the TTL path returns the cached pools", async () => {
+    // Le cache des pools du peer: la premiere lecture fetch, la deuxieme
+    // (dans le TTL) sert le cache — les branches du cache couvertes.
+    const { createFanout } = await import("../src/lib/fanout.js");
+    const db = openMeshDb(":memory:");
+    registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
+    joinPool(db, "a", "team:x");
+    const fanout = createFanout({
+      db,
+      identity: { node_id: "n1" } as never,
+      rebrowse: () => {},
+    });
+    // Le broadcast local: les membres locaux (le cache localPools).
+    const forwarded = await fanout.fanout({
+      to_box: "team:x",
+      origin_id: "o-cache",
+      from_box: "other",
+      subject: "s",
+      body: "b",
+      via: [],
+    });
+    expect(forwarded).toEqual([]);
+    db.close();
+  });
+});
+
+describe("the fanout (the refonte coverage): the forwarded path", () => {
+  it("a pool broadcast with no paired peers forwards nothing (the local delivery is the caller's)", async () => {
+    const db = openMeshDb(":memory:");
+    registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
+    joinPool(db, "a", "team:x");
+    const fanout = createFanout({
+      db,
+      identity: { node_id: "n1" } as never,
+      rebrowse: () => {},
+    });
+    const forwarded = await fanout.fanout({
+      to_box: "team:x",
+      origin_id: "o-1",
+      from_box: "a",
+      subject: "s",
+      body: "b",
+      via: [],
+    });
+    expect(forwarded).toEqual([]);
+    db.close();
+  });
+});
+
+describe("the fanout: the TLS peer without a pinned key is skipped (the MITM guard)", () => {
+  it("the broadcast skips the TLS peer without pk, delivers to the pinned peer", async () => {
+    const db = openMeshDb(":memory:");
+    registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
+    joinPool(db, "a", "team:x");
+    // Un pair TLS sans pk: le MITM guard skip.
+    pairPeer(db, {
+      node_id: "tls-nopin",
+      hostname: "nopin",
+      fingerprint: "f1",
+      token: "t1",
+      addresses: ["127.0.0.1:1"],
+    });
+    const fanout = createFanout({
+      db,
+      identity: { node_id: "n1" } as never,
+      rebrowse: () => {},
+    });
+    const forwarded = await fanout.fanout({
+      to_box: "team:x",
+      origin_id: "o-2",
+      from_box: "a",
+      subject: "s",
+      body: "b",
+      via: [],
+    });
+    // Le pair sans adresse joignable: rien ne part (le guard TLS + l'adresse).
+    expect(forwarded).toEqual([]);
+    db.close();
+  });
+});

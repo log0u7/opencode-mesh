@@ -129,6 +129,9 @@ function fakeCtx(
 }
 
 const TOOL_NAMES = [
+  "mesh_ask",
+  "mesh_board_get",
+  "mesh_board_set",
   "mesh_inbox",
   "mesh_join",
   "mesh_journal",
@@ -137,11 +140,12 @@ const TOOL_NAMES = [
   "mesh_pair",
   "mesh_pools",
   "mesh_register",
+  "mesh_reply",
   "mesh_send",
   "mesh_spawn",
   "mesh_status",
+  "mesh_tasks",
   "mesh_unlock",
-  "mesh_wait",
   "mesh_worker_logs",
   "mesh_worker_remove",
   "mesh_worker_stop",
@@ -265,8 +269,11 @@ describe("opencode-mesh v2 setup", () => {
       }
       for (const required of [
         "mesh_register",
+        "mesh_ask",
         "mesh_inbox",
-        "mesh_wait",
+        "mesh_ask",
+        "mesh_reply",
+        "mesh_tasks",
         "mesh_send",
         "mesh_journal",
       ]) {
@@ -371,7 +378,8 @@ describe("opencode-mesh v2 setup", () => {
     for (let i = 0; i < 60 && prompts.length === 0; i += 1) {
       await new Promise((r) => setTimeout(r, 25));
     }
-    expect(prompts.some((t) => t.includes('mesh: 1 unread — "ping"'))).toBe(true);
+    expect(prompts.some((t) => t.includes('<mesh-mail kind="notify" subject="ping">'))).toBe(true);
+    expect(prompts.some((t) => t.includes("ping — wake up"))).toBe(true);
 
     // The transport-retry idempotency key (0.28.1): the prompt input carries
     // the generated id under the key the server reads (`id`), so a retried
@@ -449,7 +457,8 @@ describe("opencode-mesh v2 setup", () => {
 
     await vi.waitFor(
       () => {
-        expect(prompts.some((t) => t.includes('mesh: 1 unread — "s"'))).toBe(true);
+        expect(prompts.some((t) => t.includes('<mesh-mail kind="notify" subject="s">'))).toBe(true);
+        expect(prompts.some((t) => t.includes("s — b"))).toBe(true);
       },
       { timeout: 5000 },
     );
@@ -502,7 +511,8 @@ describe("opencode-mesh v2 setup", () => {
     expect(MESH_GUIDANCE).toContain("drain the whole inbox first");
     expect(MESH_GUIDANCE).toContain("process the set in one pass");
     expect(MESH_GUIDANCE).toContain("re-check the inbox before any decisive reply");
-    expect(MESH_GUIDANCE).toContain("a mesh_wait timeout is not proof of loss");
+    expect(MESH_GUIDANCE).toContain("mesh_wait no longer exists");
+    expect(MESH_GUIDANCE).toContain("mesh_ask (NEVER blocks)");
 
     await cleanup?.();
   });

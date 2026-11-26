@@ -239,3 +239,49 @@ describe("defaultDataDir", () => {
     expect(defaultDataDir().startsWith("/.local")).toBe(false);
   });
 });
+
+describe("the option validation branches (the refonte coverage)", () => {
+  it("each malformed option throws with its name; each valid option passes", async () => {
+    const { parseOptions } = await import("../src/options.js");
+    const cases: Array<Record<string, unknown>> = [
+      { wakeIntervalMs: -1 },
+      { wakeIntervalMs: 1.5 },
+      { wakeIntervalMs: "x" },
+      { wakePools: "x" },
+      { debugWake: "x" },
+      { escalateTo: "" },
+      { spawnMax: 0 },
+      { spawnMax: 1.5 },
+      { acceptSpawn: "x" },
+      { spawnQuotaPeer: 0 },
+      { spawnWorktreeBase: 5 },
+      { tls: "x" },
+      { insecureHttp: "x" },
+      { port: "x" },
+      { bind: 5 },
+      { advertise: "x" },
+    ];
+    for (const bad of cases) {
+      const key = Object.keys(bad)[0];
+      expect(() => parseOptions(bad as never)).toThrow(key);
+    }
+    // Les valides passent.
+    const ok = parseOptions({
+      wakeIntervalMs: 100,
+      wakePools: true,
+      debugWake: true,
+      escalateTo: "orq",
+      spawnMax: 2,
+      acceptSpawn: true,
+      spawnQuotaPeer: 1,
+      spawnWorktreeBase: "/w",
+      tls: false,
+      insecureHttp: true,
+      port: 4399,
+      bind: "lan",
+      advertise: false,
+    } as never);
+    expect(ok.wakeIntervalMs).toBe(100);
+    expect(ok.bind).toBe("lan");
+  });
+});

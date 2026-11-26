@@ -293,6 +293,7 @@ describe("presence and purge", () => {
         role: "manager",
         pools: ["team:x"],
         bind_key: null,
+        epoch: 1,
         primary_pool: null,
         last_seen: 1000,
       },

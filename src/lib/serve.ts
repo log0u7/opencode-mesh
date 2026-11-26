@@ -19,15 +19,22 @@ import {
   type SpawnReplayStore,
 } from "./distant-spawn.js";
 import { countRunningSpawnedByPeer } from "./workers.js";
+import { handleTaskAsk, markOutboxSentByOrigin } from "./outbox.js";
+import { StreamHub } from "./stream.js";
 import {
   deliverMessage,
+  federatedByName,
+  getTask,
   listMailboxes,
+  mailboxByName,
   MESSAGE_TTL_MS,
   purgeExpired,
   receiveMessage,
   mergeFederatedRegistry,
+  replyTask,
   unreadCount,
   withTransaction,
+  type TaskState,
 } from "./mail.js";
 import type { Fanout } from "./fanout.js";
 import { receiveMemorySync } from "./memory-sync.js";
@@ -51,6 +58,10 @@ const MEMORY_SYNC_BODY_LIMIT = 1024 * 1024;
 const DEFAULT_BIND = "127.0.0.1";
 
 export type MeshServerOptions = {
+  /** The stream hub (the refonte 3.1): the open peer streams — set at
+   * creation, read by the /stream route inside handle(). */
+  hub?: StreamHub;
+
   db: MeshDb;
   port: number;
   bind?: "loopback" | "lan";
@@ -104,6 +115,7 @@ export type MeshServer = {
   server: Server;
   port: number;
   address: string;
+  hub?: StreamHub;
   /** The insecure side channel, when insecureHttp was requested. */
   insecureServer?: Server;
   insecurePort?: number;
@@ -140,6 +152,7 @@ export async function startMeshServer(options: MeshServerOptions): Promise<MeshS
       json(res, 500, { error: "internal error" });
     });
   };
+  options.hub = new StreamHub();
   const server = tls
     ? createHttpsServer(
         { key: options.tlsMaterial!.keyPem, cert: options.tlsMaterial!.certPem },
@@ -161,6 +174,7 @@ export async function startMeshServer(options: MeshServerOptions): Promise<MeshS
     server,
     port,
     address: host,
+    hub: options.hub,
     ...(insecureServer !== undefined && insecurePort !== undefined
       ? { insecureServer, insecurePort }
       : {}),
@@ -280,6 +294,179 @@ async function handle(
       json(res, 200, { accepted });
     } catch {
       json(res, 500, { error: "memory-sync storage failed" });
+    }
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/ack") {
+    // Refonte2-C6: the receiver APPLIED an event and acks its origin — the
+    // outbox row goes sent (the push alone is at-most-once; the ack makes
+    // it effectively-once).
+    const from = String(req.headers["x-mesh-sender"] ?? "");
+    const proof = String(req.headers["x-mesh-proof"] ?? "");
+    const peer = authenticate(db, req, from, proof);
+    if (!peer) {
+      json(res, 401, { error: "unauthorized" });
+      return;
+    }
+    const body = await readBody(req, 64 * 1024);
+    if ("error" in body) {
+      json(res, 400, { error: "body too large" });
+      return;
+    }
+    try {
+      const parsed = JSON.parse(body.body) as { origin_id?: string };
+      if (!parsed.origin_id) {
+        json(res, 400, { error: "origin_id required" });
+        return;
+      }
+      const applied = markOutboxSentByOrigin(db, parsed.origin_id, Date.now());
+      json(res, 200, { ok: true, applied });
+    } catch {
+      json(res, 500, { error: "ack failed" });
+    }
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/stream") {
+    // The persistent stream (refonte 3.1, SSE): the peer holds ONE
+    // connection per direction; the server pushes the mail / the task
+    // states / the registry the moment they exist. The auth: the pairing
+    // headers (a GET has no body).
+    const from = String(req.headers["x-mesh-sender"] ?? "");
+    const proof = String(req.headers["x-mesh-proof"] ?? "");
+    const peer = authenticate(db, req, from, proof);
+    if (!peer) {
+      json(res, 401, { error: "unauthorized" });
+      return;
+    }
+    options.hub?.add(peer.node_id, res);
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/task-ask") {
+    // Refonte P2.5: a peer's ask creates a MIRROR task row (the same id —
+    // the reply correlation is the id) and delivers the task message to the
+    // local responder's box. The auth = the pairing machinery like /mail.
+    const body = await readBody(req, 256 * 1024);
+    if ("error" in body) {
+      json(res, body.error === "too_large" ? 413 : 400, { error: "body too large" });
+      return;
+    }
+    // The auth rides the HEADERS (the task payloads carry no mail-shaped
+    // proof field — postTaskWire signs the headers like /mail does).
+    const from = String(req.headers["x-mesh-sender"] ?? "");
+    const proof = String(req.headers["x-mesh-proof"] ?? "");
+    const peer = authenticate(db, req, from, proof);
+    if (!peer) {
+      json(res, 401, { error: "unauthorized" });
+      return;
+    }
+    try {
+      const parsed = JSON.parse(body.body) as {
+        from_box?: string;
+        task?: {
+          id: string;
+          to_box: string;
+          question: string;
+          group_id?: string | null;
+          deadline?: number | null;
+        };
+      };
+      if (!parsed.task?.id || !parsed.task.to_box) {
+        json(res, 400, { error: "task payload malformed" });
+        return;
+      }
+      // The asker's remote reference: node/box composite — the replyTask's
+      // mirror detection reads it as non-local, and the reply crosses back
+      // to this node id.
+      const askerBox = `${peer.node_id}/${parsed.from_box ?? ""}`;
+      handleTaskAsk(db, {
+        node_id: peer.node_id,
+        to_box: parsed.task.to_box,
+        from_box: askerBox,
+        subject: `task ${parsed.task.id.slice(0, 8)}`,
+        body: parsed.task.question ?? "",
+        origin_id: parsed.task.id,
+        type: "task-ask",
+        task: {
+          id: parsed.task.id,
+          from_box: askerBox,
+          to_box: parsed.task.to_box,
+          question: parsed.task.question,
+          group_id: parsed.task.group_id ?? null,
+          deadline: parsed.task.deadline ?? null,
+        },
+      });
+      json(res, 200, { ok: true });
+    } catch {
+      json(res, 500, { error: "task-ask failed" });
+    }
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/task-reply") {
+    // Refonte P2.5: a peer's reply applies to the ORIGINAL task row (the
+    // source of truth) and notifies the local asker (the group digest rules).
+    const body = await readBody(req, 256 * 1024);
+    if ("error" in body) {
+      json(res, body.error === "too_large" ? 413 : 400, { error: "body too large" });
+      return;
+    }
+    const from = String(req.headers["x-mesh-sender"] ?? "");
+    const proof = String(req.headers["x-mesh-proof"] ?? "");
+    const peer = authenticate(db, req, from, proof);
+    if (!peer) {
+      // The token/proof VALUES never hit the log: the presence and the
+      // length only (a valid token with a bad proof must not leak its
+      // prefix onto disk).
+      console.warn(
+        `[task-reply 401] from present=${from.length > 0} proof.len=${proof.length} auth present=${"authorization" in req.headers}`,
+      );
+      json(res, 401, { error: "unauthorized" });
+      return;
+    }
+    try {
+      const parsed = JSON.parse(body.body) as {
+        task?: { id: string; result?: string; state?: string };
+      };
+      if (!parsed.task?.id) {
+        json(res, 400, { error: "task payload malformed" });
+        return;
+      }
+      const task = getTask(db, parsed.task.id);
+      if (!task) {
+        json(res, 404, { error: "unknown task" });
+        return;
+      }
+      // The owner check (the refonte2-P3): the authenticated peer must own
+      // the task's TARGET box (the responder) — a third-party peer cannot
+      // answer someone else's task.
+      // The owner check (the refonte2-P3): the target box may be LOCAL
+      // (this node's own session) or FEDERATED (the remote responder) —
+      // both registries consulted; a third-party node mismatched = 403.
+      const targetMailbox = mailboxByName(db, task.to_box) ?? federatedByName(db, task.to_box);
+      if (targetMailbox?.node_id !== peer.node_id) {
+        json(res, 403, { error: "only the task's owning node may reply" });
+        return;
+      }
+      // The state enum (the refonte2-P3): a bogus state would block the
+      // task open-and-terminal forever (the sweeper ignores it).
+      const VALID_STATES = ["working", "input_required", "completed", "failed", "canceled"];
+      if (!VALID_STATES.includes(parsed.task.state ?? "completed")) {
+        json(res, 400, { error: `state must be one of ${VALID_STATES.join(" | ")}` });
+        return;
+      }
+      replyTask(
+        db,
+        parsed.task.id,
+        task.to_box,
+        parsed.task.result ?? "",
+        (parsed.task.state ?? "completed") as TaskState,
+      );
+      json(res, 200, { ok: true });
+    } catch {
+      json(res, 500, { error: "task-reply failed" });
     }
     return;
   }

@@ -2,7 +2,12 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   ackMessages,
+  askTask,
   deliverMessage,
+  getTask,
+  purgeDeliveredHistory,
+  replyTask,
+  sweepTasks,
   inboxRead,
   joinPool,
   receiveMessage,
@@ -10,7 +15,6 @@ import {
   unreadBoxCount,
   unreadCount,
   unreadMessages,
-  waitReplyRead,
   wakeBoxStats,
   ackInbox,
   withTransaction,
@@ -168,30 +172,6 @@ describe("transactional inbox read (0.16.1 hot-swap race fix)", () => {
 
     // The rollback means no delivery was read-marked: both rows are served.
     expect(inboxRead(db, "s1", true).map((r) => r.subject)).toEqual(["one", "two"]);
-    db.close();
-  });
-
-  it("waitReplyRead returns the reply and marks it read atomically (mesh_wait path)", () => {
-    const db = boxDb();
-    const q = deliverMessage(db, {
-      from: "n",
-      to_box: "a",
-      subject: "question",
-      body: "?",
-      created_at: 2000,
-    });
-    if (!q.ok) throw new Error("delivery failed");
-    deliverMessage(db, {
-      from: "n",
-      to_box: "a",
-      subject: "re: question",
-      body: "answer",
-      reply_to: q.id,
-      created_at: 3000,
-    });
-
-    expect(waitReplyRead(db, q.id, "s1")?.subject).toBe("re: question");
-    expect(waitReplyRead(db, q.id, "s1")).toBeNull();
     db.close();
   });
 });
@@ -817,8 +797,11 @@ describe("registry federation (0.30.0)", () => {
           role: "ops",
           pools: "[]",
           primary_pool: null,
-          // The strictly newer registration: the ownership transfers.
+          // The strictly higher epoch (the refonte 3.2: the logical clock —
+          // the wall-clock transfer is retired, a pre-3.2 row never takes a
+          // name): the ownership transfers.
           registered_at: Date.now() - 500,
+          epoch: 2,
         },
       ],
       "node-ricinus",
@@ -969,6 +952,306 @@ describe("P2 (0.31.0): the registry merge is hardened", () => {
       "node-b",
     );
     expect(applied).toBe(0);
+    db.close();
+  });
+});
+
+describe("P1.2 (refonte): message kinds — a fyi DM never wakes", () => {
+  it("a DM with kind fyi is never wakeable (the silent DM)", () => {
+    const db = openMeshDb(":memory:");
+    registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
+    deliverMessage(db, {
+      from: "n",
+      from_box: "x",
+      to_box: "a",
+      subject: "fyi only",
+      body: "b",
+      kind: "fyi",
+      created_at: 1000,
+    });
+    const stat = wakeBoxStats(db).find((s) => s.box === "a");
+    // The box holds mail but nothing may interrupt its session: the flash
+    // waits for the next drain (or a later notify mail rides along).
+    expect(stat?.unread).toBe(1);
+    expect(stat?.wakeable).toBe(false);
+    db.close();
+  });
+
+  it("a plain DM stays wakeable (the notify default)", () => {
+    const db = openMeshDb(":memory:");
+    registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
+    deliverMessage(db, {
+      from: "n",
+      from_box: "x",
+      to_box: "a",
+      subject: "s",
+      body: "b",
+      created_at: 1000,
+    });
+    expect(wakeBoxStats(db).find((s) => s.box === "a")?.wakeable).toBe(true);
+    db.close();
+  });
+});
+
+describe("P2 (refonte): the tasks core — server-side correlation, one wake for a group", () => {
+  it("mesh_ask submits and notifies the responder with the task id (no reply_to in the contract)", () => {
+    const db = openMeshDb(":memory:");
+    registerMailbox(db, { name: "alice", session_id: "s1", now: 1000 });
+    registerMailbox(db, { name: "bob", session_id: "s2", now: 1000 });
+    const task = askTask(db, { from_box: "alice", to_box: "bob", question: "quel etat du build?" });
+    expect(task.state).toBe("submitted");
+    expect(task.to_box).toBe("bob");
+    // The responder's box holds a notify message carrying the task id.
+    const row = db.conn.get<{ subject: string; body: string; kind: string }>(
+      "SELECT m.subject, m.body, m.kind FROM messages m JOIN deliveries d ON d.message_id = m.id WHERE d.to_box = 'bob'",
+    )!;
+    expect(row.kind).toBe("notify");
+    expect(row.subject).toContain(task.id.slice(0, 8));
+    expect(row.body).toContain("quel etat du build?");
+    expect(row.body).toContain(`mesh_reply(task_id="${task.id}"`);
+    db.close();
+  });
+
+  it("mesh_reply completes and notifies the asker; only the target mailbox may reply", () => {
+    const db = openMeshDb(":memory:");
+    registerMailbox(db, { name: "alice", session_id: "s1", now: 1000 });
+    registerMailbox(db, { name: "bob", session_id: "s2", now: 1000 });
+    const task = askTask(db, { from_box: "alice", to_box: "bob", question: "q" });
+    // A foreign box cannot reply.
+    const foreign = replyTask(db, task.id, "mallory", "hack", "completed");
+    expect(foreign.ok).toBe(false);
+    // The right box replies: the asker gets the result.
+    const rep = replyTask(db, task.id, "bob", "build vert", "completed");
+    expect(rep.ok).toBe(true);
+    expect(rep.notified).toBe(true);
+    const got = db.conn.get<{ subject: string; body: string }>(
+      "SELECT m.subject, m.body FROM messages m JOIN deliveries d ON d.message_id = m.id WHERE d.to_box = 'alice'",
+    )!;
+    expect(got.subject).toContain("completed");
+    expect(got.body).toContain("build vert");
+    expect(getTask(db, task.id)?.state).toBe("completed");
+    // Double reply: refused.
+    expect(replyTask(db, task.id, "bob", "again", "completed").ok).toBe(false);
+    db.close();
+  });
+
+  it("the group digest: ONE notification when all the group's tasks are answered", () => {
+    const db = openMeshDb(":memory:");
+    registerMailbox(db, { name: "alice", session_id: "s1", now: 1000 });
+    registerMailbox(db, { name: "bob", session_id: "s2", now: 1000 });
+    const t1 = askTask(db, { from_box: "alice", to_box: "bob", question: "q1", group_id: "g1" });
+    const t2 = askTask(db, { from_box: "alice", to_box: "bob", question: "q2", group_id: "g1" });
+    // The first answer: nothing reaches the asker yet (the group is open).
+    const r1 = replyTask(db, t1.id, "bob", "reponse 1", "completed");
+    expect(r1.notified).toBe(false);
+    expect(
+      db.conn.get<{ n: number }>(
+        "SELECT COUNT(*) AS n FROM messages m JOIN deliveries d ON d.message_id = m.id WHERE d.to_box = 'alice'",
+      )?.n,
+    ).toBe(0);
+    // The second answer: ONE digest with both results.
+    const r2 = replyTask(db, t2.id, "bob", "reponse 2", "completed");
+    expect(r2.notified).toBe(true);
+    const got = db.conn.get<{ body: string }>(
+      "SELECT m.body FROM messages m JOIN deliveries d ON d.message_id = m.id WHERE d.to_box = 'alice'",
+    )!;
+    expect(got.body).toContain("The group is answered");
+    expect(got.body).toContain("reponse 1");
+    expect(got.body).toContain("reponse 2");
+    db.close();
+  });
+
+  it("input_required notifies the asker immediately (a pause is a deliberate answer)", () => {
+    const db = openMeshDb(":memory:");
+    registerMailbox(db, { name: "alice", session_id: "s1", now: 1000 });
+    registerMailbox(db, { name: "bob", session_id: "s2", now: 1000 });
+    const t = askTask(db, { from_box: "alice", to_box: "bob", question: "q" });
+    const r = replyTask(db, t.id, "bob", "il me manque la zone DNS", "input_required");
+    expect(r.notified).toBe(true);
+    expect(getTask(db, t.id)?.state).toBe("input_required");
+    db.close();
+  });
+
+  it("the deadline sweeper fails expired tasks and notifies the asker", () => {
+    const db = openMeshDb(":memory:");
+    registerMailbox(db, { name: "alice", session_id: "s1", now: 1000 });
+    registerMailbox(db, { name: "bob", session_id: "s2", now: 1000 });
+    const t = askTask(db, {
+      from_box: "alice",
+      to_box: "bob",
+      question: "q",
+      deadline: Date.now() - 1000,
+    });
+    const swept = sweepTasks(db, Date.now());
+    expect(swept).toBe(1);
+    expect(getTask(db, t.id)?.state).toBe("failed");
+    const got = db.conn.get<{ body: string }>(
+      "SELECT m.body FROM messages m JOIN deliveries d ON d.message_id = m.id WHERE d.to_box = 'alice'",
+    )!;
+    expect(got.body).toContain("deadline exceeded");
+    db.close();
+  });
+});
+
+describe("3.2 (refonte): the registry anti-entropy — the logical epoch per name", () => {
+  it("registerMailbox increments the epoch at each rebind; a new box starts at 1", () => {
+    const db = openMeshDb(":memory:");
+    const r1 = registerMailbox(db, { name: "orq", session_id: "s1", now: 1000 });
+    expect(r1.epoch).toBe(1);
+    // The rebind (a new session takes the name): the epoch grows.
+    const r2 = registerMailbox(db, { name: "orq", session_id: "s2", now: 2000 });
+    expect(r2.epoch).toBe(2);
+    db.close();
+  });
+
+  it("the merge resolves on (epoch, node_id): a higher epoch wins even with an older wall clock", () => {
+    const db = openMeshDb(":memory:");
+    registerMailbox(db, { name: "orq", session_id: "s1", now: 1000 });
+    // The local epoch is 1. An inbound row with epoch 5 and a registered_at
+    // OLDER than the local one: the EPOCH wins (the wall clock lied — the
+    // clock-skew class), the ownership transfers.
+    const applied = mergeFederatedRegistry(
+      db,
+      [
+        {
+          name: "orq",
+          session_id: "ses-foreign",
+          role: "po",
+          pools: "[]",
+          primary_pool: null,
+          registered_at: Date.now() - 60 * 60 * 1000,
+          epoch: 5,
+        },
+      ],
+      "node-b",
+    );
+    expect(applied).toBe(1);
+    expect(federatedByName(db, "orq")).not.toBeNull();
+    db.close();
+  });
+
+  it("the push carries the epoch; the receiver without it keeps its name (the epoch guard)", () => {
+    const db = openMeshDb(":memory:");
+    registerMailbox(db, { name: "orq", session_id: "s1", now: 1000 });
+    // An inbound row WITHOUT an epoch (a pre-3.2 peer): the legacy LWW rules
+    // apply (the live-session guard) — no blind takeover.
+    const applied = mergeFederatedRegistry(
+      db,
+      [
+        {
+          name: "orq",
+          session_id: "ses-foreign",
+          role: "po",
+          pools: "[]",
+          primary_pool: null,
+          registered_at: Date.now() - 1000,
+        },
+      ],
+      "node-b",
+    );
+    expect(applied).toBe(0);
+    db.close();
+  });
+});
+
+describe("3.2 (refonte): the composite separator guard", () => {
+  it("registerMailbox refuses a name containing '/'", () => {
+    const db = openMeshDb(":memory:");
+    expect(() => registerMailbox(db, { name: "a/b", session_id: "s1", now: 1000 })).toThrow(
+      'a mailbox name cannot contain "/"',
+    );
+    db.close();
+  });
+});
+
+describe("C1 (refonte2): the digest fires ONCE — the later transitions notify individually", () => {
+  it("the group digest once; the later transitions deliver individual notifications", () => {
+    const db = openMeshDb(":memory:");
+    registerMailbox(db, { name: "alice", session_id: "s1", now: 1000 });
+    registerMailbox(db, { name: "bob", session_id: "s2", now: 1000 });
+    const t1 = askTask(db, { from_box: "alice", to_box: "bob", question: "q1", group_id: "g2" });
+    const t2 = askTask(db, { from_box: "alice", to_box: "bob", question: "q2", group_id: "g2" });
+    // Les deux reponses: le digest part UNE fois (la 2e reponse ferme le groupe).
+    replyTask(db, t1.id, "bob", "rep 1", "completed");
+    const r2 = replyTask(db, t2.id, "bob", "rep 2", "input_required");
+    expect(r2.notified).toBe(true);
+    const digestCount = db.conn.all<{ subject: string }>(
+      "SELECT subject FROM messages WHERE body LIKE 'The group is answered%'",
+    ).length;
+    expect(digestCount).toBe(1);
+    // La transition ULTERIEURE de t2 (input_required -> completed): la
+    // notification INDIVIDUELLE, jamais un second digest.
+    db.conn.run("UPDATE tasks SET state = 'input_required', updated_at = ? WHERE id = ?", [
+      Date.now(),
+      t2.id,
+    ]);
+    const r3 = replyTask(db, t2.id, "bob", "rep 2 final", "completed");
+    expect(r3.notified).toBe(true);
+    const digestCount2 = db.conn.all<{ subject: string }>(
+      "SELECT subject FROM messages WHERE body LIKE 'The group is answered%'",
+    ).length;
+    expect(digestCount2).toBe(1);
+    const individual = db.conn.get<{ body: string }>(
+      "SELECT m.body FROM messages m WHERE m.subject LIKE 'task % completed' ORDER BY m.created_at DESC",
+    )!;
+    expect(individual.body).toContain("rep 2 final");
+    db.close();
+  });
+});
+
+describe("D (refonte2): the retention purges the delivered history", () => {
+  it("the SENT outbox and the TERMINAL tasks purge after 7 days; the live state stays", () => {
+    const db = openMeshDb(":memory:");
+    const now = Date.now();
+    registerMailbox(db, { name: "alice", session_id: "s1", now: 1000 });
+    registerMailbox(db, { name: "bob", session_id: "s2", now: 1000 });
+    // L'outbox: sent ancien (purge), sent recent (reste), queued (reste).
+    db.conn.run(
+      `INSERT INTO outbox (id, payload, state, attempts, next_at, created_at) VALUES ('o-old', '{}', 'sent', 1, ?, ?)`,
+      [now - 8 * 24 * 3600 * 1000, now - 8 * 24 * 3600 * 1000],
+    );
+    db.conn.run(
+      `INSERT INTO outbox (id, payload, state, attempts, next_at, created_at) VALUES ('o-new', '{}', 'sent', 1, ?, ?)`,
+      [now - 1000, now - 1000],
+    );
+    db.conn.run(
+      `INSERT INTO outbox (id, payload, state, attempts, next_at, created_at) VALUES ('o-q', '{}', 'queued', 0, ?, ?)`,
+      [now - 8 * 24 * 3600 * 1000, now - 8 * 24 * 3600 * 1000],
+    );
+    // Les tasks: completed ancienne (purge), failed recente (reste), submitted (reste).
+    db.conn.run(
+      `INSERT INTO tasks (id, from_box, to_box, question, state, created_at, updated_at) VALUES ('t-old', 'alice', 'bob', 'q', 'completed', ?, ?)`,
+      [now - 8 * 24 * 3600 * 1000, now - 8 * 24 * 3600 * 1000],
+    );
+    db.conn.run(
+      `INSERT INTO tasks (id, from_box, to_box, question, state, created_at, updated_at) VALUES ('t-new', 'alice', 'bob', 'q', 'failed', ?, ?)`,
+      [now - 1000, now - 1000],
+    );
+    db.conn.run(
+      `INSERT INTO tasks (id, from_box, to_box, question, state, created_at, updated_at) VALUES ('t-open', 'alice', 'bob', 'q', 'submitted', ?, ?)`,
+      [now - 8 * 24 * 3600 * 1000, now - 8 * 24 * 3600 * 1000],
+    );
+    const res = purgeDeliveredHistory(db, now);
+    expect(res.outbox).toBe(1);
+    expect(res.tasks).toBe(1);
+    expect(
+      db.conn.get<{ n: number }>("SELECT COUNT(*) AS n FROM outbox WHERE id = 'o-old'")!.n,
+    ).toBe(0);
+    expect(
+      db.conn.get<{ n: number }>("SELECT COUNT(*) AS n FROM outbox WHERE id = 'o-new'")!.n,
+    ).toBe(1);
+    expect(db.conn.get<{ n: number }>("SELECT COUNT(*) AS n FROM outbox WHERE id = 'o-q'")!.n).toBe(
+      1,
+    );
+    expect(
+      db.conn.get<{ n: number }>("SELECT COUNT(*) AS n FROM tasks WHERE id = 't-old'")!.n,
+    ).toBe(0);
+    expect(
+      db.conn.get<{ n: number }>("SELECT COUNT(*) AS n FROM tasks WHERE id = 't-new'")!.n,
+    ).toBe(1);
+    expect(
+      db.conn.get<{ n: number }>("SELECT COUNT(*) AS n FROM tasks WHERE id = 't-open'")!.n,
+    ).toBe(1);
     db.close();
   });
 });

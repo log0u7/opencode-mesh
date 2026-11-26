@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { appendFileSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -115,7 +115,9 @@ describe("two-node integration", () => {
     b.db.close();
   });
 
-  it("reaches a peer discovered on an ephemeral port through mesh_send", async () => {
+  it("reaches a peer discovered on an ephemeral port through mesh_send", {
+    timeout: 20_000,
+  }, async () => {
     // No requested port, so the receiver lands on whatever the OS picks: the
     // address a peer relays must already carry its own port.
     const { MeshPlugin } = await import("../src/plugin.js");
@@ -159,7 +161,19 @@ describe("two-node integration", () => {
         ctx(),
       ),
     );
-    expect(sent).toContain("ok");
+    // The outbox: queued, then the background sender delivers. The poll
+    // captures the inbox AT the matching read (a re-read after the ack is
+    // empty).
+    expect(sent).toContain("queued:");
+    let inbox = "";
+    for (let i = 0; i < 120; i += 1) {
+      inbox = String(await a.tool?.mesh_inbox?.execute({}, ctx()));
+      if (inbox.includes('"s"')) break;
+      await new Promise((r) => setTimeout(r, 250));
+    }
+    expect(inbox).toContain('"s"');
+
+    expect(inbox).toContain('"s"');
 
     await a.dispose?.();
     await b.dispose?.();

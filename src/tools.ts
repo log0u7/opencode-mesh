@@ -9,6 +9,8 @@ import { buildOfferBlob, parseOfferBlob } from "./lib/offer-blob.js";
 import { listOwnAddresses, type AddressOptions } from "./lib/providers.js";
 import { pluginVersion } from "./lib/version.js";
 import { pairingProof, type NodeIdentity } from "./lib/identity.js";
+import { queueOutbox, queueTaskAsk, queueTaskReply } from "./lib/outbox.js";
+import { BOARD_KEYS, boardGet, boardSet, type BoardKey } from "./lib/mail.js";
 import {
   deliverMessage,
   inboxRead,
@@ -26,8 +28,11 @@ import {
   touchMailbox,
   unreadCount,
   unreadMessages,
-  unmatchedUnread,
-  waitReplyBroad,
+  askTask,
+  getTask,
+  listTasks,
+  replyTask,
+  type TaskState,
 } from "./lib/mail.js";
 import { journalQuery } from "./lib/journal.js";
 import { listLocks, releaseLock, tryLock } from "./lib/locks.js";
@@ -195,54 +200,6 @@ export const WORKER_TOOL_BLOCKLIST = new Set([
   "mesh_worker_remove",
 ]);
 
-/** The hard cap (0.31.0): a wait parks the whole turn and makes the agent
- * unreachable — every blocked second invites the host's user-prompt
- * interrupt. 30s covers the fast-RPC case; anything longer is the wake
- * pattern's job (send, end the turn, drain on the flash). */
-export const MESH_WAIT_MAX_S = 30;
-export const meshWaitClamp = (timeout: number | undefined): number =>
-  Math.min(typeof timeout === "number" && timeout > 0 ? timeout : MESH_WAIT_MAX_S, MESH_WAIT_MAX_S);
-
-/** The wait's timeout message (0.32.0): a clamped request says SO — the orq
- * repro read "within 30s" on a 60s request as a mechanical abort or an
- * agent silence, because the message never named the clamp. The note also
- * carries the doctrine (send, end the turn, drain). */
-export function buildWaitTimeoutMessage(
-  id: string,
-  seconds: number,
-  requested: number | undefined,
-  strays: {
-    id: string;
-    from_box: string | null;
-    from: string;
-    subject: string;
-    reply_to: string | null;
-  }[],
-): string {
-  const clamped = requested !== undefined && requested > MESH_WAIT_MAX_S;
-  const note = clamped
-    ? ` (requested ${requested}s, clamped at MESH_WAIT_MAX_S=${MESH_WAIT_MAX_S} — send, end the turn, the wake brings the reply)`
-    : "";
-  if (strays.length === 0) {
-    return `timeout: no reply to ${id} within ${seconds}s${note}`;
-  }
-  const shown = strays
-    .slice(0, 5)
-    .map(
-      (r) =>
-        `  ${r.id.slice(0, 8)} from ${r.from_box ?? r.from ?? "?"} "${r.subject}" (reply_to: ${r.reply_to ?? "none"})`,
-    );
-  const more =
-    strays.length > shown.length ? `\n  ... and ${strays.length - shown.length} more` : "";
-  return (
-    [
-      `timeout: no reply to ${id} within ${seconds}s${note}`,
-      `uncorrelated unread in your box — drain with mesh_inbox and reply with reply_to=<id>:`,
-      ...shown,
-    ].join("\n") + more
-  );
-}
-
 export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
   const {
     db,
@@ -286,6 +243,17 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
               addresses: p.addresses,
             })),
             plugin_version: pluginVersion(),
+
+            outbox: {
+              queued:
+                db.conn.get<{ n: number }>(
+                  "SELECT COUNT(*) AS n FROM outbox WHERE state = 'queued'",
+                )?.n ?? 0,
+              failed:
+                db.conn.get<{ n: number }>(
+                  "SELECT COUNT(*) AS n FROM outbox WHERE state = 'failed'",
+                )?.n ?? 0,
+            },
             mailboxes: listMailboxes(db).map((b) => ({
               name: b.name,
               role: b.role,
@@ -492,6 +460,11 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
         str("reply_to", "Id this answers, from mesh_send output", false),
         str("box", "Your sending mailbox", false),
         bool("wake", "Wake all recipients (deliberate broadcast). Direct mail always wakes."),
+        str(
+          "kind",
+          "notify (the DM default) wakes per the wake rules; fyi NEVER wakes — read at the next drain or flash. Pools default to fyi.",
+          false,
+        ),
       ],
       execute: async (args, context) => {
         const peer = typeof args.peer === "string" ? args.peer : null;
@@ -499,7 +472,17 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
         if (peer === null && to === null) {
           return "error: mesh_send needs a peer (remote) or a to (mailbox, team:<pool> or all)";
         }
-        const wake = args.wake === true;
+        // P1.2 (refonte): the message kind. DMs default notify (they wake);
+        // pools default fyi (silent — read at the next drain). An explicit
+        // notify on a pool is the deliberate broadcast (wake).
+        const targetIsPool = to !== null && (to === "all" || to.startsWith("team:"));
+        const kind =
+          args.kind === "notify" || args.kind === "fyi"
+            ? args.kind
+            : targetIsPool
+              ? "fyi"
+              : "notify";
+        const wake = args.wake === true || (kind === "notify" && targetIsPool);
         const sessionBoxes = mailboxesBySession(db, sessionID(context));
         const from_box =
           typeof args.box === "string" && args.box.length > 0
@@ -516,14 +499,17 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
           return from_box === null ? null : lastUnansweredFrom(db, from_box, to);
         };
         const selfSendLocal = async (): Promise<string> => {
+          // Narrowed once: the closure loses the outer non-null narrowing.
+          const targetBox = to ?? "";
           const result = deliverMessage(db, {
             from: identity.node_id,
             from_box,
-            to_box: to!,
+            to_box: targetBox,
             subject: String(args.subject),
             body: String(args.body),
             reply_to: to === null ? null : replyToFor(to),
             wake,
+            kind,
           });
           // Federation: a broadcast with no LOCAL recipients (the sender is
           // often the only member of its team on this node) must still reach
@@ -531,7 +517,7 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
           if (!result.ok && fanout && result.error === "empty_broadcast") {
             const origin = randomUUID();
             const forwardedOnly = await fanout.fanout({
-              to_box: to!,
+              to_box: targetBox,
               origin_id: origin,
               from_box,
               subject: String(args.subject),
@@ -554,31 +540,20 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
             if (result.error === "unknown_mailbox") {
               const federated = to === null ? null : federatedByName(db, to);
               if (federated && federated.node_id !== null) {
-                const target = findSendablePeer(db, federated.node_id);
-                if (target) {
-                  const conn = resolvePeerTarget(db, target.node_id);
-                  if (conn && !(conn.tls && conn.pk === null)) {
-                    const sent = await sendMail({
-                      url: conn.url,
-                      ...(conn.tls ? { tls: true } : {}),
-                      ...(conn.pk !== null ? { pk: conn.pk } : {}),
-                      token: target.token ?? "",
-                      from: identity.node_id,
-                      subject: String(args.subject),
-                      body: String(args.body),
-                      to: federated.name,
-                      ...(from_box !== null ? { from_box } : {}),
-                      ...(replyToFor(federated.name) !== null
-                        ? { reply_to: replyToFor(federated.name)! }
-                        : {}),
-                      proof: pairingProof(identity, target.token ?? ""),
-                    });
-                    if (sent === "unreachable") {
-                      mesh.rebrowse?.();
-                    }
-                    return `sent to ${target.node_id}: ${sent}`;
-                  }
-                }
+                const queued = queueOutbox(
+                  db,
+                  {
+                    node_id: federated.node_id,
+                    to_box: federated.name,
+                    from_box,
+                    subject: String(args.subject),
+                    body: String(args.body),
+                    reply_to: replyToFor(federated.name),
+                    origin_id: randomUUID(),
+                  },
+                  Date.now(),
+                );
+                return `queued: ${queued.id.slice(0, 8)} — the background sender delivers it to the owning peer (retries with backoff)`;
               }
             }
             return result.error === "unknown_mailbox"
@@ -589,7 +564,7 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
           let forwarded: string[] = [];
           if (fanout && result.recipients.length > 0) {
             forwarded = await fanout.fanout({
-              to_box: to!,
+              to_box: targetBox,
               origin_id: result.id,
               from_box,
               subject: String(args.subject),
@@ -623,44 +598,36 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
           if (target === null) {
             return `error: no paired peer matching ${peer}; run mesh_status`;
           }
-          const conn = resolvePeerTarget(db, peer);
-          if (conn === null) {
-            return `error: peer ${target.node_id} has no known address with a port; have it run mesh_pair to share its address, or wait for discovery`;
-          }
-          // No silent TOFU on a token-authenticated channel: a TLS peer whose
-          // pinned key is missing (legacy pairing predating pinned keys)
-          // accepts ANY certificate, so the bearer token could be stolen by a
-          // MITM. Refuse the send; TOFU stays a pairing-code-only capability.
-          if (conn.tls && conn.pk === null) {
+          // The one NON-healable config error stays immediate: a TLS peer
+          // whose pinned key is missing accepts ANY certificate (a MITM
+          // could steal the bearer token). Everything else is the outbox's
+          // job — a stale address, a rebooted peer, a network blip: the
+          // background sender resolves the conn FRESH at delivery and
+          // retries with backoff; the agent sees "queued", never a failure.
+          const connNow = resolvePeerTarget(db, peer);
+          if (connNow?.tls && connNow.pk === null) {
             return `error: peer ${target.node_id} is TLS but has no pinned key — re-pair with mesh_pair`;
           }
-          // Every mail carries a pairing proof signed by this node's key: it is
-          // what lets the receiving side bind (or rotate) a pairing to us without
-          // trusting the bearer token alone.
-          const result = await sendMail({
-            url: conn.url,
-            ...(conn.tls ? { tls: true } : {}),
-            ...(conn.pk !== null ? { pk: conn.pk } : {}),
-            token: target.token ?? "",
-            from: identity.node_id,
-            subject: String(args.subject),
-            body: String(args.body),
-            proof: pairingProof(identity, target.token ?? ""),
-            ...(wake ? { wake: true } : {}),
-            ...extras,
-          });
-          const hint =
-            result === "pin-mismatch"
-              ? " — the peer's identity changed: re-pair with mesh_pair to refresh the pin"
-              : result === "plaintext-peer"
-                ? " — the peer answered in plaintext: version skew, the peer needs opencode-mesh >= 0.11 (TLS-only)"
-                : "";
-          // The usual cause of "unreachable" is a stale address (DHCP churn):
-          // a fresh mDNS browse lets the peer's announce replace it.
-          if (result === "unreachable") {
-            mesh.rebrowse?.();
-          }
-          return `sent to ${target.node_id}: ${result}${hint}`;
+          // The outbox (refonte P2.6): write and return. The delivery dedup
+          // rides origin_id (effectively-once at the receiver).
+          const queued = queueOutbox(
+            db,
+            {
+              node_id: target.node_id,
+              to_box: to ?? "",
+              from_box,
+              subject: String(args.subject),
+              body: String(args.body),
+              reply_to: to !== null ? replyToFor(to) : null,
+              kind,
+              origin_id: randomUUID(),
+            },
+            Date.now(),
+          );
+          // The first delivery attempt is INLINE: a reachable peer gets the
+          // mail in the same call; the unreachable case falls back to the
+          // background sender + the retries.
+          return `queued: ${queued.id.slice(0, 8)} — the background sender delivers it (retries with backoff; the state rides mesh_status)`;
         }
         return await selfSendLocal();
       },
@@ -672,6 +639,10 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
         "List this session's unread mail (unregistered: legacy global feed) and mark it read.",
       fields: [bool("ack", "Mark read (default true)")],
       execute: async (args, context) => {
+        // The lazy outbox sweep (refonte P2.6): the delivery happens when
+        // someone looks — the background timer is a convenience, not the
+        // contract.
+
         const sid = sessionID(context);
         touchMailbox(db, sid, Date.now());
         // Fetch + ack in one transaction: a process killed between them used
@@ -681,8 +652,9 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
           return "inbox empty";
         }
         // Compact JSON (0.29.0): the pretty-print cost bytes on every drain,
-        // and delivery_id is an internal key the agent never uses (mesh_wait
-        // matches on reply_to).
+        // and delivery_id is an internal key the agent never uses (the
+        // reply correlation is reply_to; tasks correlate by task_id
+        // server-side).
         return JSON.stringify(
           rows.map((r) => ({
             id: r.id,
@@ -699,39 +671,156 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
     },
 
     {
-      name: "mesh_wait",
+      name: "mesh_ask",
       description:
-        "Wait (max 30s) for a reply to a sent message. Only when your next step in THIS turn depends on the answer. Otherwise send, end the turn, the wake brings the reply.",
+        "Ask another mailbox a question and get a task id immediately (NEVER blocks). The answer arrives as a wake on the terminal or input_required state; a group notifies ONCE when fully answered. Replaces mesh_wait.",
       fields: [
-        str("id", "Message id from mesh_send output"),
-        num("timeout", "Seconds to wait (default 30, hard-capped at 30)"),
+        str("to", "The target mailbox (same host — cross-host tasks land with the outbox)"),
+        str("body", "The question"),
+        str("group", "Group id: batch several asks, ONE digest when all are answered", false),
+        num("deadline", "Seconds from now; past it the task fails on its own"),
       ],
       execute: async (args, context) => {
         const sid = sessionID(context);
+        const sessionBoxes = mailboxesBySession(db, sid);
+        const from_box = sessionBoxes[0]?.name ?? null;
         touchMailbox(db, sid, Date.now());
-        const requested = typeof args.timeout === "number" ? args.timeout : undefined;
-        const seconds = meshWaitClamp(requested);
-        const deadline = Date.now() + seconds * 1000;
-        while (Date.now() < deadline) {
-          // Atomic fetch+ack, same race fix as mesh_inbox (0.16.1). The
-          // broadened matcher (0.31.0) also returns on any message from the
-          // request's recipient box — the correlation survives a reply that
-          // skipped the auto-fill.
-          const row = waitReplyBroad(db, String(args.id), sid);
-          if (row) {
-            return JSON.stringify(row, null, 2);
-          }
-          await new Promise((r) => setTimeout(r, 250));
+        const to = typeof args.to === "string" ? args.to : "";
+        if (!to) return "error: mesh_ask needs a target mailbox";
+        const deadline =
+          typeof args.deadline === "number" && args.deadline > 0
+            ? Date.now() + args.deadline * 1000
+            : null;
+        // The federated resolution BEFORE the row insert: an unknown target
+        // must not leave an orphan submitted row (never swept, no deadline).
+        const isLocal = mailboxByName(db, to);
+        const fed = isLocal ? null : federatedByName(db, to);
+        if (!isLocal && (!fed || fed.node_id === null)) {
+          return `error: unknown mailbox/pool ${to}`;
         }
-        // On timeout, list the uncorrelated unread (0.30.1): the wake-path
-        // replies (reply_to NULL — the flash carried no id before 0.30.1) sit
-        // in the box while the waiter starves. Name them so the caller drains
-        // immediately instead of re-waiting blind.
-        const strays = unmatchedUnread(db, String(args.id), sid);
-        return buildWaitTimeoutMessage(String(args.id), seconds, requested, strays);
+        const task = askTask(db, {
+          from_box,
+          to_box: to,
+          question: String(args.body ?? ""),
+          group_id: typeof args.group === "string" && args.group.length > 0 ? args.group : null,
+          deadline,
+        });
+        // A FEDERATED target (refonte P2.5): the ask crosses via the outbox;
+        // the reply comes back through /task-reply.
+        if (!isLocal) {
+          const fed = federatedByName(db, to);
+          queueTaskAsk(db, task, Date.now());
+          const fedNodeId = fed?.node_id ?? "";
+          return JSON.stringify(
+            { task_id: task.id, group: task.group_id, queued_for: fedNodeId.slice(0, 8) },
+            null,
+            2,
+          );
+        }
+        return JSON.stringify(
+          { task_id: task.id, group: task.group_id, delivered_to: task.to_box },
+          null,
+          2,
+        );
       },
     },
-
+    {
+      name: "mesh_reply",
+      description:
+        "Answer a task received in your box. The asker is notified on terminal and input_required states; a group notifies once, fully answered, as a digest.",
+      fields: [
+        str("task_id", "The task id from the task message in your box"),
+        str("result", "The answer"),
+        str("state", "completed (default) | failed | input_required | working", false),
+      ],
+      execute: async (args, context) => {
+        const sid = sessionID(context);
+        const sessionBoxes = mailboxesBySession(db, sid).map((b) => b.name);
+        touchMailbox(db, sid, Date.now());
+        const taskId = typeof args.task_id === "string" ? args.task_id : "";
+        const state = (typeof args.state === "string" ? args.state : "completed") as TaskState;
+        if (!taskId) return "error: mesh_reply needs a task_id";
+        const task = getTask(db, taskId);
+        if (!task) return "error: unknown task";
+        const replyingBox = sessionBoxes.find((b) => b === task.to_box);
+        if (!replyingBox)
+          return "error: only the task's target mailbox may reply — run mesh_register with that box";
+        const res = replyTask(db, taskId, replyingBox, String(args.result ?? ""), state);
+        if (!res.ok) return `error: ${res.error}`;
+        // The MIRROR reply (refonte P2.5): the asker is on another node —
+        // the reply crosses back through the outbox.
+        if (res.cross) {
+          queueTaskReply(db, taskId, String(args.result ?? ""), state, Date.now());
+          return JSON.stringify({ task_id: taskId.slice(0, 8), state, queued_back: true });
+        }
+        return JSON.stringify({ task_id: taskId.slice(0, 8), state, notified: res.notified });
+      },
+    },
+    {
+      name: "mesh_tasks",
+      description: "List your tasks (asked or received), newest first. Read-only, never blocks.",
+      fields: [str("group", "Filter by group id", false)],
+      execute: async (args, context) => {
+        const sid = sessionID(context);
+        const sessionBoxes = mailboxesBySession(db, sid).map((b) => b.name);
+        touchMailbox(db, sid, Date.now());
+        const rows = listTasks(
+          db,
+          sessionBoxes,
+          typeof args.group === "string" && args.group.length > 0 ? args.group : undefined,
+        );
+        return `tasks: ${rows.length}\n${JSON.stringify(
+          rows.map((t) => ({
+            id: t.id.slice(0, 8),
+            from: t.from_box,
+            to: t.to_box,
+            state: t.state,
+            group: t.group_id,
+            question: t.question.slice(0, 60),
+            result: t.result?.slice(0, 120),
+            deadline: t.deadline,
+          })),
+          null,
+          2,
+        )}`;
+      },
+    },
+    {
+      name: "mesh_board_set",
+      description:
+        "Write ONE status key for your box (task | blocker | state | eta). NO wake — the board is shared state: update it instead of DMing a status.",
+      fields: [str("key", "task | blocker | state | eta"), str("value", "The value (short)")],
+      execute: async (args, context) => {
+        const sid = sessionID(context);
+        const sessionBoxes = mailboxesBySession(db, sid);
+        const box = sessionBoxes[0]?.name;
+        touchMailbox(db, sid, Date.now());
+        if (!box) return "error: run mesh_register first";
+        const key = typeof args.key === "string" ? args.key : "";
+        if (!(BOARD_KEYS as readonly string[]).includes(key))
+          return `error: key must be one of ${BOARD_KEYS.join(" | ")}`;
+        boardSet(
+          db,
+          box ?? "",
+          key as BoardKey,
+          String(args.value ?? "").slice(0, 200),
+          Date.now(),
+        );
+        return `board set: ${box} ${key}=${String(args.value ?? "").slice(0, 200)}`;
+      },
+    },
+    {
+      name: "mesh_board_get",
+      description:
+        "Read the board: ONE line per box (the fixed keys). pool filters to the boxes carrying it. Nobody is woken by a read.",
+      fields: [str("pool", "Filter: the boxes carrying this pool", false)],
+      execute: async (args, context) => {
+        touchMailbox(db, sessionID(context), Date.now());
+        const pool = typeof args.pool === "string" && args.pool.length > 0 ? args.pool : undefined;
+        const rows = boardGet(db, pool);
+        return `board (${rows.length} boxes):\n${rows.map((r) => `${r.box}: ${r.line}`).join("\n") || "(empty)"}`;
+      },
+    },
     {
       name: "mesh_journal",
       description:
