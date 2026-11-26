@@ -790,6 +790,7 @@ const LIVE_LOCAL_LAST_SEEN_MS = 60 * 60 * 1000;
 function federatedRowValid(row: FederatedRegistryRow, now: number): boolean {
   if (typeof row.name !== "string" || !/^[A-Za-z0-9._-]{1,64}$/.test(row.name)) return false;
   if (typeof row.session_id !== "string" || row.session_id.length === 0) return false;
+  if (row.session_id.length > 128) return false;
   if (typeof row.registered_at !== "number" || !Number.isFinite(row.registered_at)) return false;
   if (
     row.registered_at < now - FEDERATED_AT_PAST_TOLERANCE ||
@@ -801,10 +802,16 @@ function federatedRowValid(row: FederatedRegistryRow, now: number): boolean {
   try {
     const parsed = JSON.parse(row.pools) as unknown;
     if (!Array.isArray(parsed)) return false;
+    // Every pool id is a full "team:<name>" — anything else would inject a
+    // phantom pool into the local membership view.
+    if (!parsed.every((p) => typeof p === "string" && /^team:[A-Za-z0-9._-]+$/.test(p))) {
+      return false;
+    }
   } catch {
     return false;
   }
   if (row.role !== null && typeof row.role !== "string") return false;
+  if (typeof row.role === "string" && row.role.length > 64) return false;
   if (row.primary_pool !== null && typeof row.primary_pool !== "string") return false;
   return true;
 }
@@ -818,73 +825,82 @@ export function mergeFederatedRegistry(
   // The full-state replacement (the PO fix 4): each push carries the
   // sender's COMPLETE local registry — the federated rows owned by the
   // sender that are ABSENT from the push are stale (the box was deleted or
-  // renamed there) and die here.
-  const pushed = new Set(rows.filter((r) => federatedRowValid(r, now)).map((r) => r.name));
-  db.conn.run(
-    "DELETE FROM mailboxes WHERE node_id = ? AND name NOT IN (" +
-      (pushed.size > 0 ? Array.from(pushed, () => "?").join(",") : "NULL") +
-      ")",
-    [senderNodeId, ...pushed],
-  );
-  let applied = 0;
-  for (const row of rows) {
-    if (!federatedRowValid(row, now)) continue;
-    const local = db.conn.get<{
-      node_id: string | null;
-      registered_at: number | null;
-      last_seen: number;
-    }>("SELECT node_id, registered_at, last_seen FROM mailboxes WHERE name = ?", [row.name]);
-    if (local) {
-      if (local.node_id === null || local.node_id === "") {
-        // This node owns the name. Two guards before a takeover: (1) a LIVE
-        // local session (fresh last_seen) keeps its name — the two-orq fight
-        // resolves: each keeps its own; (2) the inbound registration must be
-        // strictly newer than the local one (the explicit rebind on the
-        // other side transferred it).
-        if (local.last_seen > now - LIVE_LOCAL_LAST_SEEN_MS) continue;
-        const localAt = local.registered_at ?? 0;
-        if (row.registered_at <= localAt) continue;
-      } else if (local.node_id !== senderNodeId) {
-        // A federated row owned by a THIRD node: the sender must be the owner
-        // to update it — the third-party re-broadcast never overwrites.
-        continue;
-      } else if ((local.registered_at ?? 0) >= row.registered_at) {
-        continue;
-      }
-      db.conn.run(
-        `UPDATE mailboxes SET session_id = ?, role = ?, pools = ?, primary_pool = ?,
+  // renamed there) and die here. One transaction: a mid-merge crash never
+  // leaves half a batch (rows deleted, their replacements absent).
+  return withTransaction(db, () => {
+    const pushed = new Set(rows.filter((r) => federatedRowValid(r, now)).map((r) => r.name));
+    db.conn.run(
+      "DELETE FROM mailboxes WHERE node_id = ? AND name NOT IN (" +
+        (pushed.size > 0 ? Array.from(pushed, () => "?").join(",") : "NULL") +
+        ")",
+      [senderNodeId, ...pushed],
+    );
+    let applied = 0;
+    for (const row of rows) {
+      if (!federatedRowValid(row, now)) continue;
+      const local = db.conn.get<{
+        node_id: string | null;
+        registered_at: number | null;
+        last_seen: number;
+        bind_key: string | null;
+      }>("SELECT node_id, registered_at, last_seen, bind_key FROM mailboxes WHERE name = ?", [
+        row.name,
+      ]);
+      if (local) {
+        if (local.node_id === null || local.node_id === "") {
+          // This node owns the name. Three guards before a takeover: (1) a LIVE
+          // local session (fresh last_seen) keeps its name — the two-orq fight
+          // resolves: each keeps its own; (2) a BOUND name (bind_key set — an
+          // instance binding) is never ceded, quiet session or not: the bind is
+          // the operator's claim, the staleness does not reopen it; (3) the
+          // inbound registration must be strictly newer than the local one (the
+          // explicit rebind on the other side transferred it).
+          if (local.bind_key !== null && local.bind_key !== "") continue;
+          if (local.last_seen > now - LIVE_LOCAL_LAST_SEEN_MS) continue;
+          const localAt = local.registered_at ?? 0;
+          if (row.registered_at <= localAt) continue;
+        } else if (local.node_id !== senderNodeId) {
+          // A federated row owned by a THIRD node: the sender must be the owner
+          // to update it — the third-party re-broadcast never overwrites.
+          continue;
+        } else if ((local.registered_at ?? 0) >= row.registered_at) {
+          continue;
+        }
+        db.conn.run(
+          `UPDATE mailboxes SET session_id = ?, role = ?, pools = ?, primary_pool = ?,
          registered_at = ?, last_seen = ?, bind_key = NULL, node_id = ? WHERE name = ?`,
-        [
-          row.session_id,
-          row.role,
-          row.pools,
-          row.primary_pool,
-          row.registered_at,
-          Date.now(),
-          senderNodeId,
-          row.name,
-        ],
-      );
-    } else {
-      db.conn.run(
-        `INSERT INTO mailboxes (name, session_id, role, pools, bind_key, primary_pool, last_seen, created_at, registered_at, node_id)
+          [
+            row.session_id,
+            row.role,
+            row.pools,
+            row.primary_pool,
+            row.registered_at,
+            Date.now(),
+            senderNodeId,
+            row.name,
+          ],
+        );
+      } else {
+        db.conn.run(
+          `INSERT INTO mailboxes (name, session_id, role, pools, bind_key, primary_pool, last_seen, created_at, registered_at, node_id)
          VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)`,
-        [
-          row.name,
-          row.session_id,
-          row.role,
-          row.pools,
-          row.primary_pool,
-          Date.now(),
-          Date.now(),
-          row.registered_at,
-          senderNodeId,
-        ],
-      );
+          [
+            row.name,
+            row.session_id,
+            row.role,
+            row.pools,
+            row.primary_pool,
+            Date.now(),
+            Date.now(),
+            row.registered_at,
+            senderNodeId,
+          ],
+        );
+      }
+      applied += 1;
     }
-    applied += 1;
-  }
-  return applied;
+    return applied;
+  });
 }
 
 /** The local registry rows this node owns (for the /registry-sync push). */

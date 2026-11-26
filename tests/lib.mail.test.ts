@@ -862,3 +862,66 @@ describe("P1 (0.31.0): a federated name is never a local box", () => {
     db.close();
   });
 });
+
+describe("P2 (0.31.0): the registry merge is hardened", () => {
+  const inbound = (over: Partial<Parameters<typeof mergeFederatedRegistry>[1][number]> = {}) => ({
+    name: "orq",
+    session_id: "ses-foreign",
+    role: "po",
+    pools: "[]",
+    primary_pool: null,
+    registered_at: Date.now() - 1000,
+    ...over,
+  });
+
+  function boundLocalDb(name = "orq") {
+    const db = openMeshDb(":memory:");
+    registerMailbox(db, { name, session_id: "s1", bind_key: "proj:/work", now: 1000 });
+    // The binding is live but the session went quiet: only the BIND proves
+    // the name is taken — the staleness must not reopen the takeover.
+    db.conn.run("UPDATE mailboxes SET last_seen = ?", [Date.now() - 2 * 60 * 60 * 1000]);
+    return db;
+  }
+
+  it("never cedes a bound local name, even when its session went quiet", () => {
+    const db = boundLocalDb();
+    const applied = mergeFederatedRegistry(db, [inbound()], "node-b");
+    expect(applied).toBe(0);
+    const row = mailboxByName(db, "orq");
+    expect(row?.bind_key).toBe("proj:/work");
+    db.close();
+  });
+
+  it("a pools entry outside the team:<id> grammar skips the row", () => {
+    const db = boundLocalDb("free-name");
+    const applied = mergeFederatedRegistry(
+      db,
+      [inbound({ name: "free-name", pools: '["garbage"]' })],
+      "node-b",
+    );
+    expect(applied).toBe(0);
+    db.close();
+  });
+
+  it("an oversized session_id skips the row", () => {
+    const db = boundLocalDb("free-name");
+    const applied = mergeFederatedRegistry(
+      db,
+      [inbound({ name: "free-name", session_id: "x".repeat(200) })],
+      "node-b",
+    );
+    expect(applied).toBe(0);
+    db.close();
+  });
+
+  it("an oversized role skips the row", () => {
+    const db = boundLocalDb("free-name");
+    const applied = mergeFederatedRegistry(
+      db,
+      [inbound({ name: "free-name", role: "x".repeat(100) })],
+      "node-b",
+    );
+    expect(applied).toBe(0);
+    db.close();
+  });
+});
