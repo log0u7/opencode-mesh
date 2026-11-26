@@ -14,6 +14,7 @@ import { openMeshDb } from "../src/lib/db.js";
 import {
   inboxRows,
   MESSAGE_TTL_MS,
+  mergeFederatedRegistry,
   receiveMessage,
   joinPool,
   registerMailbox,
@@ -881,6 +882,23 @@ describe("the task wire routes (refonte P2.5)", () => {
     expect(
       db.conn.get<{ n: number }>("SELECT COUNT(*) AS n FROM deliveries WHERE to_box = 'alice'")?.n,
     ).toBe(1);
+    // La row federated bob-remote depuis peer-1 (le PROPRIETAIRE du to_box
+    // — l'owner check du refonte2-P3 l'exige).
+    mergeFederatedRegistry(
+      db,
+      [
+        {
+          name: "bob-remote",
+          session_id: "ses-b",
+          role: null,
+          pools: "[]",
+          primary_pool: null,
+          registered_at: Date.now() - 1000,
+          epoch: 2,
+        },
+      ],
+      "peer-1",
+    );
     // 404: la reply sur une tache inconnue.
     const unknown = await post(
       url,

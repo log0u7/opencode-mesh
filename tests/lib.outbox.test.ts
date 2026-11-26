@@ -511,6 +511,10 @@ describe("P2.5 the cross-host round trip VIA THE LAZY SWEEP (the mr-review findi
       if (taskState === "completed") break;
       await new Promise((r) => setTimeout(r, 200));
     }
+    const dbgRow = dbB.conn.get<{ state: string; attempts: number; last_error: string }>(
+      "SELECT state, attempts, last_error FROM outbox",
+    );
+    console.log("DBG-B:", JSON.stringify(dbgRow));
     expect(taskState).toBe("completed");
     const got = dbA.conn.get<{ body: string }>(
       "SELECT m.body FROM messages m JOIN deliveries d ON d.message_id = m.id WHERE d.to_box = 'alice'",

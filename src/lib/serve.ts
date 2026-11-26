@@ -23,6 +23,7 @@ import { handleTaskAsk, markOutboxSentByOrigin } from "./outbox.js";
 import { StreamHub } from "./stream.js";
 import {
   deliverMessage,
+  federatedByName,
   getTask,
   listMailboxes,
   mailboxByName,
@@ -441,7 +442,10 @@ async function handle(
       // The owner check (the refonte2-P3): the authenticated peer must own
       // the task's TARGET box (the responder) — a third-party peer cannot
       // answer someone else's task.
-      const targetMailbox = mailboxByName(db, task.to_box);
+      // The owner check (the refonte2-P3): the target box may be LOCAL
+      // (this node's own session) or FEDERATED (the remote responder) —
+      // both registries consulted; a third-party node mismatched = 403.
+      const targetMailbox = mailboxByName(db, task.to_box) ?? federatedByName(db, task.to_box);
       if (targetMailbox?.node_id !== peer.node_id) {
         json(res, 403, { error: "only the task's owning node may reply" });
         return;
