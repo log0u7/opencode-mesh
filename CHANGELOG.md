@@ -5,6 +5,34 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.33.4] - 2026-11-26
+
+### Fixed
+
+- The wake reminder ghost loop (caught live: 10 identical wake injections
+  10 minutes apart on orq's session, the delivery never acked because the
+  agent answered text-only): the fatigue is PERSISTED in the DB
+  (deliveries.flash_count) — the reclaim window doubles per flash (base,
+  2x, 4x, 8x, capped) and the reminder dies past 4 flashes. The in-memory
+  undrained/mute maps are gone: a restart or a second instance reads the
+  same persisted sequence.
+- The task avis link: task notifications carry deliveries.task_id (a digest
+  carries the group id) — the flash ALWAYS consumes a task avis (the inline
+  is truncated: the state + the first 400 chars of the result +
+  "full: mesh_tasks"; the tasks table stays the source of truth) and
+  mesh_tasks retires the avis it showed.
+- escalateBox does nothing when the box IS the escalation target (no
+  self-wake loop).
+- mesh_tasks outputs compact one-line-per-task rows instead of indented
+  JSON.
+
+### Added
+
+- tests/wake.fatigue.test.ts: the task avis consumption (1 flash, 0 unread,
+  0 reminder), the persisted fatigue sequence (the reminders widen then
+  stop, the restart stays silent), the escalateBox self-target no-op, the
+  mesh_tasks compact grammar + the avis retirement.
+
 ## [0.33.3] - 2026-11-26
 
 ### Fixed

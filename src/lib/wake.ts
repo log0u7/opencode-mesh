@@ -16,6 +16,7 @@ import {
   unreadBoxCount,
   wakeBoxStats,
   withTransaction,
+  FATIGUE_MAX_FLASHES,
 } from "./mail.js";
 import { pluginWarn, storeLogDir } from "./plugin-log.js";
 import { pluginVersion } from "./version.js";
@@ -126,7 +127,10 @@ export type WakeOptions = {
    * cadence in the DB; the reminder cadence is fatigueTtlMs. Accepted for
    * options compat, never read. */
   cooldownMs?: number;
-  /** Consecutive undrained prompts before giving up on a box. Default 3. */
+  /** DEPRECATED (0.33.4): inert — the fatigue lives in the DB
+   * (deliveries.flash_count): the reclaim window doubles per flash and the
+   * reminder dies past FATIGUE_MAX_FLASHES. Accepted for compat, never
+   * read. */
   maxUndrainedPrompts?: number;
   /** Wake on pool broadcasts too (default false, token economy 0.16.0):
    * only DIRECT mail wakes the session; fanouted pool mail (origin_id differs
@@ -145,6 +149,8 @@ export const DEFAULT_WAKE_COOLDOWN_MS = 60000;
 /** Consecutive prompts without the box being drained before the wake gives
  * up on it: the binding is wrong (the bound session never reads this box) —
  * re-register in the owning session's tab. */
+/** DEPRECATED (0.33.4): inert — the persisted fatigue replaced the
+ * consecutive-undrained counter. Kept for the importers' compat. */
 export const MAX_UNDRAINED_PROMPTS = 3;
 /** How long a wake prompt may stay "in flight" before the collapse gate
  * releases on its own: a turn shorter than the poll interval can deliver the
@@ -165,19 +171,17 @@ export const MAX_TICK_FAILURES = 5;
 /** The backoff ceiling: the tick interval never exceeds this between
  * attempts, however many failures stack up. */
 export const TICK_BACKOFF_CAP_MS = 300_000;
-/** How long a fatigued box stays muted before the loop reminds it again: the
- * mute would otherwise starve the box forever (the purge requires a drain,
- * the drain requires a prompt — a session that never reads never unmutes).
- * One reminder per TTL worst case. */
+/** The base flash-reminder cadence (the reclaim window doubles per flash,
+ * the persisted fatigue — the 0.33.4): a never-drained delivery reminds at
+ * base, 2x, 4x, 8x then goes silent. */
 export const FATIGUE_MUTE_TTL_MS = 600_000;
-/** The mute TTL doubles per consecutive mute cycle (10 -> 20 -> 40 -> 80 min
- * cap): a blocked or distracted agent that never drains must not cost a full
- * turn every 10 minutes forever (6 turns/hour under the flat TTL). */
-export const FATIGUE_MUTE_MAX_MS = 4_800_000;
+export { FATIGUE_MUTE_MAX_MS } from "./mail.js";
 /** After this many consecutive mute cycles without a drain, the wake alerts
  * the orchestrator mailbox (when it exists on this node) instead of letting
  * the box starve silently. One alert per starvation period (cleared on the
  * first drain). */
+/** DEPRECATED (0.33.4): inert — the escalation fires once per starvation
+ * period when the unread rows pass FATIGUE_MAX_FLASHES. */
 export const ESCALATE_AFTER_MUTE_CYCLES = 3;
 /** The escalation target: the lead's mailbox, resolved in the local registry. */
 
@@ -186,7 +190,7 @@ export const ESCALATE_AFTER_MUTE_CYCLES = 3;
  * exists on this node) — the human-chaired loop then decides. ONE alert per
  * starvation period (the flag clears on the first drain); the wake itself
  * never re-prompts the starved box faster than its backoff. */
-function escalateBox(
+export function escalateBox(
   db: MeshDb,
   escalateTo: string,
   box: string,
@@ -194,6 +198,9 @@ function escalateBox(
   subject: string | null,
   escalated: Map<string, number>,
 ): void {
+  // A box never escalates to ITSELF (the 0.33.4-3): orq starving would DM
+  // orq, the self-wake loops.
+  if (box === escalateTo) return;
   if (escalated.has(box)) return;
   // The orchestrator mailbox resolves first: absent at escalation time =
   // the skip is LOGGED and the flag stays unset (a late-registered orq
@@ -227,9 +234,6 @@ export function startWakeLoop(options: WakeOptions): WakeHandle {
   const wakePools = options.wakePools ?? false;
   const escalateTo = options.escalateTo ?? "orq";
   const lastUnread = new Map<string, number>();
-  const undrained = new Map<string, number>();
-  const mutedSince = new Map<string, number>();
-  const muteCycles = new Map<string, number>();
   const escalated = new Map<string, number>();
   // Collapse gate (0.28.0): at most ONE wake prompt in flight per session.
   // The host queue delivers one queued item per idle cycle: a second queued
@@ -277,9 +281,6 @@ export function startWakeLoop(options: WakeOptions): WakeHandle {
         const previous = lastUnread.get(box.name) ?? 0;
         if (stat === undefined || stat.unread === 0) {
           lastUnread.delete(box.name);
-          undrained.delete(box.name);
-          mutedSince.delete(box.name);
-          muteCycles.delete(box.name);
           escalated.delete(box.name);
           continue;
         }
@@ -294,47 +295,18 @@ export function startWakeLoop(options: WakeOptions): WakeHandle {
           continue;
         }
         lastUnread.set(box.name, unread);
-        // Drained since the last prompt → the fatigue counter resets AND the
-        // escalation re-arms (the contract: one alert per starvation period,
-        // and a drain ended it — the next starvation re-alerts orq).
+        // Drained since the last prompt → the escalation re-arms (the
+        // contract: one alert per starvation period, and a drain ended it —
+        // the next starvation re-alerts orq). The FATIGUE state itself is in
+        // the DB now (deliveries.flash_count, the 0.33.4): no in-memory
+        // undrained/mute maps — a restart or a second instance reads the
+        // same persisted sequence.
         if (unread < previous) {
-          undrained.delete(box.name);
           escalated.delete(box.name);
         }
-        const cycles = undrained.get(box.name) ?? 0;
-        // The claim staleness for this pass: the base reminder cadence is the
-        // fatigue TTL — rows flashed longer ago are RE-claimed (the starved
-        // box reminds without new mail: the orq/6admin episode). The fatigue
-        // branch below widens it to the current (doubled) mute TTL.
-        let claimStaleAfter = options.fatigueTtlMs ?? FATIGUE_MUTE_TTL_MS;
-        // Fatigue guard: prompted MAX times, never drained, count unchanged
-        // → mute. Fatigue mute TTL (0.28.2): a muted box never unmuted by
-        // itself — the purge requires the count to drop, which requires the
-        // box to drain, which requires a prompt — starvation (seen live: the
-        // orq box held 8 unread mails while the session kept running). The
-        // TTL releases the mute: one reminder per TTL, the mail never
-        // starves.
-        if (unread <= previous && cycles >= MAX_UNDRAINED_PROMPTS) {
-          const mutedAt = mutedSince.get(box.name);
-          if (mutedAt === undefined) {
-            mutedSince.set(box.name, now);
-            continue;
-          }
-          // The reminder backoff (0.30.0): each consecutive mute cycle
-          // doubles the TTL (10 -> 20 -> 40 -> 80 min cap) — a blocked agent
-          // costs one reminder per doubling instead of one per 10 minutes.
-          const cycle = muteCycles.get(box.name) ?? 0;
-          const base = options.fatigueTtlMs ?? FATIGUE_MUTE_TTL_MS;
-          const ttl = Math.min(base * 2 ** cycle, FATIGUE_MUTE_MAX_MS);
-          if (now - mutedAt < ttl) continue;
-          claimStaleAfter = ttl;
-          if (cycle >= ESCALATE_AFTER_MUTE_CYCLES) {
-            escalateBox(options.db, escalateTo, box.name, cycle, stat.subject, escalated);
-          }
-          undrained.delete(box.name);
-          mutedSince.set(box.name, now);
-          muteCycles.set(box.name, cycle + 1);
-        }
+        // The claim: the reclaim window lives PER ROW now (the persisted
+        // fatigue) — the base cadence doubles per flash inside the claim.
+        const base = options.fatigueTtlMs ?? FATIGUE_MUTE_TTL_MS;
         const bound =
           typeof box.session_id === "string" &&
           box.session_id.length > 0 &&
@@ -354,20 +326,24 @@ export function startWakeLoop(options: WakeOptions): WakeHandle {
         }
         // The single-flight claim (0.32.0): the flash is DB-arbitrated across
         // every instance and process sharing the store. 0 claimed = someone
-        // else announced these rows (or nothing fresh) — skip. The reminder
-        // path (the fatigue mute fall-through) re-claims rows whose flash is
-        // older than the mute TTL.
-        const claim = claimFlashWithContent(
-          options.db,
-          box.name,
-          now,
-          claimStaleAfter,
-          FLASH_CONTENT_BUDGET,
-        );
+        // else announced these rows, nothing fresh, OR the rows are past the
+        // fatigue cap (the persisted flash_count — the reminder is dead, the
+        // box starves silently unless the escalation speaks).
+        const claim = claimFlashWithContent(options.db, box.name, now, base, FLASH_CONTENT_BUDGET);
         if (claim.claimed === 0) {
+          // The starvation escalation (the 0.33.4): the unread rows are past
+          // the flash cap (never drained through 5 flashes) — escalate ONCE
+          // per starvation period (the escalated map, cleared on the drain).
+          const starved = options.db.conn.get<{ n: number }>(
+            `SELECT COUNT(*) AS n FROM deliveries d
+              WHERE d.to_box = ? AND d.status = 'unread' AND d.flash_count >= ?`,
+            [box.name, FATIGUE_MAX_FLASHES + 1],
+          )?.n;
+          if (starved && starved > 0) {
+            escalateBox(options.db, escalateTo, box.name, starved, stat.subject, escalated);
+          }
           continue;
         }
-        undrained.set(box.name, cycles + 1);
         // The content rides (the batch fit the budget): the mail is CONSUMED
         // by the same UPDATE — the prompt carries it and the agent skips the
         // mesh_inbox turn. One turn per wake instead of two.
@@ -437,7 +413,6 @@ export function startWakeLoop(options: WakeOptions): WakeHandle {
         const fresh = unreadBoxCount(options.db, box.name);
         if (fresh === 0) {
           lastUnread.delete(box.name);
-          undrained.delete(box.name);
           continue;
         }
         lastUnread.set(box.name, fresh);

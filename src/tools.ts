@@ -31,6 +31,7 @@ import {
   askTask,
   getTask,
   listTasks,
+  markTaskDeliveriesRead,
   replyTask,
   type TaskState,
 } from "./lib/mail.js";
@@ -783,20 +784,20 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
           sessionBoxes,
           typeof args.group === "string" && args.group.length > 0 ? args.group : undefined,
         );
-        return `tasks: ${rows.length}\n${JSON.stringify(
-          rows.map((t) => ({
-            id: t.id.slice(0, 8),
-            from: t.from_box,
-            to: t.to_box,
-            state: t.state,
-            group: t.group_id,
-            question: t.question.slice(0, 60),
-            result: t.result?.slice(0, 120),
-            deadline: t.deadline,
-          })),
-          null,
-          2,
-        )}`;
+        // The avis retirement (the 0.33.4-1): the task notifications this
+        // listing just showed go read — the reminder never fires for a seen
+        // task. The digest avis (task_id = the group id) retires with the
+        // group's rows.
+        markTaskDeliveriesRead(db, sessionBoxes, rows);
+        // The compact grammar (the 0.33.4-4): one line per task, no indented
+        // JSON — the token cost of a listing matters at fleet scale.
+        const lines = rows.map(
+          (t) =>
+            `${t.id.slice(0, 8)} ${t.state} ${t.from_box ?? "?"}->${t.to_box} ${
+              t.group_id ?? "-"
+            } | ${t.question.slice(0, 60)} | ${t.result?.slice(0, 120) ?? "-"}`,
+        );
+        return `tasks: ${rows.length}\n${lines.join("\n")}`;
       },
     },
     {

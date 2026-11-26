@@ -54,6 +54,10 @@ export type DeliverInput = {
    * origin_id already exists locally, the delivery is skipped (the fanout
    * can hand the same broadcast to a node through several paths). */
   origin_id?: string | null;
+  /** The task avis link (the 0.33.4): the delivery carries the task id (or
+   * the group id for a digest) — the flash consumes it, mesh_tasks marks
+   * it read. NULL = an ordinary mail. */
+  task_id?: string | null;
   /** Deliberate broadcast (mesh_send wake:true): wake every recipient even
    * though the mail is a pool fanout (Slack model, 0.17.0). Direct mail
    * always wakes; this flag is only meaningful for multi-recipient or
@@ -395,8 +399,8 @@ export function deliverMessage(db: MeshDb, input: DeliverInput): DeliverResult {
 
   for (const box of recipients) {
     db.conn.run(
-      "INSERT INTO deliveries (id, message_id, to_box, status, created_at) VALUES (?, ?, ?, 'unread', ?)",
-      [randomUUID(), id, box, created_at],
+      "INSERT INTO deliveries (id, message_id, to_box, status, task_id, created_at) VALUES (?, ?, ?, 'unread', ?, ?)",
+      [randomUUID(), id, box, input.task_id ?? null, created_at],
     );
   }
   // Record the delivery under its content hash: purge the expired hashes at
@@ -1009,6 +1013,18 @@ export function releaseFlash(db: MeshDb, box: string, at: number): void {
  * instead of two. An oversized batch claims WITHOUT content (the compact
  * flash path: mesh_inbox carries the bodies at the next turn). Atomic: the
  * read, the budget check and the claim+consume happen in one transaction. */
+export const FATIGUE_MAX_FLASHES = 4;
+/** The reclaim-window ceiling (moved from wake.ts, the 0.33.4: the claim
+ * owns the per-row window). A never-drained delivery reminds at base,
+ * 2x, 4x, 8x — never past this ceiling. */
+export const FATIGUE_MUTE_MAX_MS = 4_800_000;
+/** The reclaim window for a delivery flashed `count` times: the base
+ * cadence doubles per flash (10, 20, 40, 80 min shape), capped. */
+export function fatigueWindowMs(baseMs: number, count: number): number {
+  if (count <= 0) return 0;
+  return Math.min(baseMs * 2 ** (count - 1), FATIGUE_MUTE_MAX_MS);
+}
+
 export function claimFlashWithContent(
   db: MeshDb,
   box: string,
@@ -1017,31 +1033,90 @@ export function claimFlashWithContent(
   maxChars: number,
 ): { claimed: number; at: number; content: string | null } {
   return withTransaction(db, () => {
+    // The candidates: never flashed, or flashed and PAST the fatigue mute —
+    // the reclaim window doubles per flash (the persisted fatigue, the
+    // 0.33.4); a delivery beyond FATIGUE_MAX_FLASHES flashes never re-claims
+    // (it stays readable at the drain, the reminder is dead).
     const rows = db.conn.all<{
       id: string;
       from_box: string | null;
       subject: string;
       body: string;
+      task_id: string | null;
+      flash_count: number;
+      flashed_at: number | null;
+      task_state: string | null;
+      task_result: string | null;
     }>(
-      `SELECT m.id, m.from_box, m.subject, m.body
+      `SELECT d.id, m.from_box, m.subject, m.body, d.task_id, d.flash_count, d.flashed_at,
+              t.state AS task_state, t.result AS task_result
          FROM deliveries d JOIN messages m ON m.id = d.message_id
-         WHERE d.to_box = ? AND d.status = 'unread'
-           AND (d.flashed_at IS NULL OR d.flashed_at <= ?)
-         ORDER BY d.created_at ASC`,
-      [box, now - staleAfterMs],
+         LEFT JOIN tasks t ON t.id = d.task_id
+        WHERE d.to_box = ? AND d.status = 'unread' AND d.flash_count < ?
+        ORDER BY d.created_at ASC`,
+      [box, FATIGUE_MAX_FLASHES + 1],
     );
-    const content = rows
-      .map((r) => `[${r.id.slice(0, 8)}] ${r.from_box ?? "?"}: ${r.subject} — ${r.body}`)
-      .join("\n");
+    const due = rows.filter(
+      (r) =>
+        r.flashed_at === null || now - r.flashed_at >= fatigueWindowMs(staleAfterMs, r.flash_count),
+    );
+    if (due.length === 0) {
+      return { claimed: 0, at: now, content: null };
+    }
+    // The content: an ordinary mail rides full; a TASK avis rides truncated
+    // (the state + the first 400 chars of the result + the full pointer) —
+    // the tasks table is the source of truth, the avis is a heads-up.
+    const lines = due.map((r) => {
+      if (r.task_id === null) {
+        return `[${r.id.slice(0, 8)}] ${r.from_box ?? "?"}: ${r.subject} — ${r.body}`;
+      }
+      const state = r.task_state ?? "unknown";
+      const result = (r.task_result ?? r.body).slice(0, 400);
+      return `[${r.id.slice(0, 8)}] ${r.from_box ?? "?"}: ${r.subject} — ${state}; ${result} (full: mesh_tasks)`;
+    });
+    const content = lines.join("\n");
     const fits = content.length <= maxChars;
-    const res = db.conn.run(
-      `UPDATE deliveries SET flashed_at = ?${fits ? ", status = 'read'" : ""}
-       WHERE to_box = ? AND status = 'unread'
-         AND (flashed_at IS NULL OR flashed_at <= ?)`,
-      [now, box, now - staleAfterMs],
-    );
-    return { claimed: res.changes, at: now, content: fits ? content : null };
+    let claimed = 0;
+    for (const r of due) {
+      // A task avis is ALWAYS consumed (the truncated inline carries the
+      // heads-up; the full content lives in the tasks table). An ordinary
+      // mail is consumed ONLY at its first flash when the batch fits — the
+      // REMINDER re-claims (flashed_at set) never consume: they nudge, the
+      // agent acks by draining (the ghost-loop fix: an oversized batch that
+      // never fits must not be consumed by a reminder either).
+      const consume = r.task_id !== null || (fits && r.flashed_at === null);
+      const res = db.conn.run(
+        `UPDATE deliveries SET flashed_at = ?, flash_count = flash_count + 1${
+          consume ? ", status = 'read'" : ""
+        } WHERE id = ? AND status = 'unread'`,
+        [now, r.id],
+      );
+      claimed += res.changes;
+    }
+    return { claimed, at: now, content: fits ? content : null };
   });
+}
+
+/** mesh_tasks retires the task avis it showed (the 0.33.4-1): the asker's
+ * unread deliveries whose task_id (or digest group id) appears in the
+ * returned rows go read — the reminder never fires for a seen task. */
+export function markTaskDeliveriesRead(db: MeshDb, boxes: string[], rows: TaskRow[]): number {
+  if (boxes.length === 0 || rows.length === 0) return 0;
+  const ids = new Set<string>();
+  for (const t of rows) {
+    ids.add(t.id);
+    if (t.group_id) ids.add(t.group_id);
+  }
+  const list = [...ids];
+  const placeholders = list.map(() => "?").join(",");
+  const boxPlaceholders = boxes.map(() => "?").join(",");
+  const res = db.conn.run(
+    `UPDATE deliveries SET status = 'read'
+      WHERE status = 'unread' AND to_box IN (${boxPlaceholders})
+        AND task_id IN (${placeholders})`,
+    [...boxes, ...list],
+  );
+  return res.changes;
 }
 
 // ---- tasks (the refonte P2: the A2A lifecycle, server-side correlation) ----
@@ -1257,6 +1332,7 @@ function replyTaskInner(
         subject: `task ${task.id.slice(0, 8)} ${state}`,
         body: `${result}\n(task ${task.id.slice(0, 8)}, state: ${state})`,
         kind: "notify",
+        task_id: task.id,
       });
       return { ok: true, notified: true };
     }
@@ -1272,6 +1348,9 @@ function replyTaskInner(
     subject: `task ${taskId.slice(0, 8)} ${state}`,
     body,
     kind: "notify",
+    // The avis link (the 0.33.4): the task id — a digest delivery carries
+    // the GROUP id so mesh_tasks can retire it with the group's tasks.
+    task_id: task.group_id ?? taskId,
   });
   return { ok: true, notified: true };
 }
