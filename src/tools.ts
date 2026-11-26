@@ -203,6 +203,46 @@ export const MESH_WAIT_MAX_S = 30;
 export const meshWaitClamp = (timeout: number | undefined): number =>
   Math.min(typeof timeout === "number" && timeout > 0 ? timeout : MESH_WAIT_MAX_S, MESH_WAIT_MAX_S);
 
+/** The wait's timeout message (0.32.0): a clamped request says SO — the orq
+ * repro read "within 30s" on a 60s request as a mechanical abort or an
+ * agent silence, because the message never named the clamp. The note also
+ * carries the doctrine (send, end the turn, drain). */
+export function buildWaitTimeoutMessage(
+  id: string,
+  seconds: number,
+  requested: number | undefined,
+  strays: {
+    id: string;
+    from_box: string | null;
+    from: string;
+    subject: string;
+    reply_to: string | null;
+  }[],
+): string {
+  const clamped = requested !== undefined && requested > MESH_WAIT_MAX_S;
+  const note = clamped
+    ? ` (requested ${requested}s, clamped at MESH_WAIT_MAX_S=${MESH_WAIT_MAX_S} — send, end the turn, the wake brings the reply)`
+    : "";
+  if (strays.length === 0) {
+    return `timeout: no reply to ${id} within ${seconds}s${note}`;
+  }
+  const shown = strays
+    .slice(0, 5)
+    .map(
+      (r) =>
+        `  ${r.id.slice(0, 8)} from ${r.from_box ?? r.from ?? "?"} "${r.subject}" (reply_to: ${r.reply_to ?? "none"})`,
+    );
+  const more =
+    strays.length > shown.length ? `\n  ... and ${strays.length - shown.length} more` : "";
+  return (
+    [
+      `timeout: no reply to ${id} within ${seconds}s${note}`,
+      `uncorrelated unread in your box — drain with mesh_inbox and reply with reply_to=<id>:`,
+      ...shown,
+    ].join("\n") + more
+  );
+}
+
 export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
   const {
     db,
@@ -669,7 +709,8 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
       execute: async (args, context) => {
         const sid = sessionID(context);
         touchMailbox(db, sid, Date.now());
-        const seconds = meshWaitClamp(typeof args.timeout === "number" ? args.timeout : undefined);
+        const requested = typeof args.timeout === "number" ? args.timeout : undefined;
+        const seconds = meshWaitClamp(requested);
         const deadline = Date.now() + seconds * 1000;
         while (Date.now() < deadline) {
           // Atomic fetch+ack, same race fix as mesh_inbox (0.16.1). The
@@ -687,24 +728,7 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
         // in the box while the waiter starves. Name them so the caller drains
         // immediately instead of re-waiting blind.
         const strays = unmatchedUnread(db, String(args.id), sid);
-        if (strays.length === 0) {
-          return `timeout: no reply to ${String(args.id)} within ${seconds}s`;
-        }
-        const shown = strays
-          .slice(0, 5)
-          .map(
-            (r) =>
-              `  ${r.id.slice(0, 8)} from ${r.from_box ?? r.from ?? "?"} "${r.subject}" (reply_to: ${r.reply_to ?? "none"})`,
-          );
-        const more =
-          strays.length > shown.length ? `\n  ... and ${strays.length - shown.length} more` : "";
-        return (
-          [
-            `timeout: no reply to ${String(args.id)} within ${seconds}s`,
-            `uncorrelated unread in your box — drain with mesh_inbox and reply with reply_to=<id>:`,
-            ...shown,
-          ].join("\n") + more
-        );
+        return buildWaitTimeoutMessage(String(args.id), seconds, requested, strays);
       },
     },
 

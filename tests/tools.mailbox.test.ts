@@ -10,7 +10,13 @@ import {
   registerMailbox,
 } from "../src/lib/mail.js";
 import { pairWithToken } from "../src/lib/peers.js";
-import { buildToolSpecs, meshWaitClamp, type MeshContext, type ToolSpec } from "../src/tools.js";
+import {
+  buildToolSpecs,
+  buildWaitTimeoutMessage,
+  meshWaitClamp,
+  type MeshContext,
+  type ToolSpec,
+} from "../src/tools.js";
 import type { HostCapa } from "../src/lib/capa.js";
 
 function setup(capa?: () => Promise<HostCapa>) {
@@ -343,6 +349,18 @@ describe("P4 (0.31.0): mesh_wait is bounded and correlates on the sender", () =>
     expect(Date.now() - t0).toBeLessThan(4500);
     expect(row.from_box).toBe("bob");
     expect(row.subject).toBe("re: q");
+  });
+
+  it("the timeout message names the clamp — the caller never reads an unexplained early death (the orq repro, 0.32.0)", () => {
+    // orq: timeout 60 requested, the result said "within 30s" with no word
+    // about the clamp — read as a mechanical abort or an agent silence.
+    const msg = buildWaitTimeoutMessage("id-x", 30, 60, []);
+    expect(msg).toContain("within 30s");
+    expect(msg).toContain("requested 60s");
+    expect(msg).toContain("clamped");
+    // An explicit short timeout: no clamp note.
+    const plain = buildWaitTimeoutMessage("id-y", 5, 5, []);
+    expect(plain).not.toContain("clamped");
   });
 
   it("the clamp caps the requested timeout at 30s", () => {
