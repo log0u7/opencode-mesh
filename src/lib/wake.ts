@@ -105,7 +105,9 @@ export type WakeOptions = {
   fatigueTtlMs?: number;
   /** Poll interval in ms. 0 disables the loop. Default 5000. */
   intervalMs?: number;
-  /** Minimum delay between two consecutive wake prompts per mailbox. Default 60000. */
+  /** DEPRECATED (0.32.0): inert — the flash single-flight arbitrates the
+   * cadence in the DB; the reminder cadence is fatigueTtlMs. Accepted for
+   * options compat, never read. */
   cooldownMs?: number;
   /** Consecutive undrained prompts before giving up on a box. Default 3. */
   maxUndrainedPrompts?: number;
