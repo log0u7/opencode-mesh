@@ -28,6 +28,8 @@ export type PluginOptions = {
    * 0.17.0 a sender can flag one broadcast wake:true; this option wakes
    * every broadcast. */
   wakePools?: boolean;
+  /** One diagnostic line per wake flash (the ghost-counter hunt). */
+  debugWake?: boolean;
   /** The escalation target mailbox (the box starved through
    * ESCALATE_AFTER_MUTE_CYCLES alerts it). Default "orq". */
   escalateTo?: string;
@@ -155,6 +157,12 @@ export function parseOptions(raw: PluginOptions | undefined): PluginOptions {
       throw new Error("opencode-mesh: options.wakePools must be a boolean");
     }
     options.wakePools = raw.wakePools;
+  }
+  if (raw.debugWake !== undefined) {
+    if (typeof raw.debugWake !== "boolean") {
+      throw new Error("opencode-mesh: options.debugWake must be a boolean");
+    }
+    options.debugWake = raw.debugWake;
   }
   if (raw.escalateTo !== undefined) {
     if (typeof raw.escalateTo !== "string" || raw.escalateTo.length === 0) {

@@ -16,6 +16,8 @@ import {
   listMailboxes,
   mailboxesBySession,
   localRegistryRows,
+  federatedByName,
+  lastUnansweredFrom,
   mailboxByName,
   mailboxBySession,
   poolExists,
@@ -24,7 +26,7 @@ import {
   unreadCount,
   unreadMessages,
   unmatchedUnread,
-  waitReplyRead,
+  waitReplyBroad,
 } from "./lib/mail.js";
 import { journalQuery } from "./lib/journal.js";
 import { listLocks, releaseLock, tryLock } from "./lib/locks.js";
@@ -191,6 +193,14 @@ export const WORKER_TOOL_BLOCKLIST = new Set([
   "mesh_worker_stop",
   "mesh_worker_remove",
 ]);
+
+/** The hard cap (0.31.0): a wait parks the whole turn and makes the agent
+ * unreachable — every blocked second invites the host's user-prompt
+ * interrupt. 30s covers the fast-RPC case; anything longer is the wake
+ * pattern's job (send, end the turn, drain on the flash). */
+export const MESH_WAIT_MAX_S = 30;
+export const meshWaitClamp = (timeout: number | undefined): number =>
+  Math.min(typeof timeout === "number" && timeout > 0 ? timeout : MESH_WAIT_MAX_S, MESH_WAIT_MAX_S);
 
 export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
   const {
@@ -454,6 +464,15 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
             ? (sessionBoxes.find((b) => b.name === args.box)?.name ?? args.box)
             : (sessionBoxes[0]?.name ?? null);
         touchMailbox(db, sessionID(context), Date.now());
+        // P3 (0.31.0): the reply correlation is server-side. An agent that
+        // answers without reply_to (the storm root cause) gets the pending
+        // question's id filled in automatically — explicit always wins,
+        // pools/broadcasts never correlate.
+        const replyToFor = (to: string): string | null => {
+          if (typeof args.reply_to === "string" && args.reply_to.length > 0) return args.reply_to;
+          if (to === "all" || to.startsWith("team:")) return null;
+          return from_box === null ? null : lastUnansweredFrom(db, from_box, to);
+        };
         const selfSendLocal = async (): Promise<string> => {
           const result = deliverMessage(db, {
             from: identity.node_id,
@@ -461,7 +480,7 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
             to_box: to!,
             subject: String(args.subject),
             body: String(args.body),
-            reply_to: typeof args.reply_to === "string" ? args.reply_to : null,
+            reply_to: to === null ? null : replyToFor(to),
             wake,
           });
           // Federation: a broadcast with no LOCAL recipients (the sender is
@@ -491,13 +510,8 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
             // DM to that peer — the same contract as peer + to, resolved by
             // name. The peer resolves its own box at arrival.
             if (result.error === "unknown_mailbox") {
-              const federated = db.conn.get<{
-                node_id: string;
-                name: string;
-              }>("SELECT node_id, name FROM mailboxes WHERE name = ? AND node_id IS NOT NULL", [
-                to,
-              ]);
-              if (federated) {
+              const federated = to === null ? null : federatedByName(db, to);
+              if (federated && federated.node_id !== null) {
                 const target = findSendablePeer(db, federated.node_id);
                 if (target) {
                   const conn = resolvePeerTarget(db, target.node_id);
@@ -512,8 +526,8 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
                       body: String(args.body),
                       to: federated.name,
                       ...(from_box !== null ? { from_box } : {}),
-                      ...(typeof args.reply_to === "string" && args.reply_to.length > 0
-                        ? { reply_to: args.reply_to }
+                      ...(replyToFor(federated.name) !== null
+                        ? { reply_to: replyToFor(federated.name)! }
                         : {}),
                       proof: pairingProof(identity, target.token ?? ""),
                     });
@@ -550,7 +564,7 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
         };
         const extras = {
           ...(to !== null ? { to } : {}),
-          ...(typeof args.reply_to === "string" ? { reply_to: args.reply_to } : {}),
+          ...(to !== null && replyToFor(to) !== null ? { reply_to: replyToFor(to)! } : {}),
           ...(from_box !== null ? { from_box } : {}),
         };
         if (peer !== null) {
@@ -645,22 +659,22 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
     {
       name: "mesh_wait",
       description:
-        "Wait for a reply to a sent message (matching its reply_to). Blocks the turn: request/response completes within it. Replies that arrive through the wake path may carry no reply_to — the timeout lists them so you can drain instead.",
+        "Wait (max 30s) for a reply to a sent message. Only when your next step in THIS turn depends on the answer. Otherwise send, end the turn, the wake brings the reply.",
       fields: [
         str("id", "Message id from mesh_send output"),
-        num("timeout", "Seconds to wait (default 60)"),
+        num("timeout", "Seconds to wait (default 30, hard-capped at 30)"),
       ],
       execute: async (args, context) => {
         const sid = sessionID(context);
         touchMailbox(db, sid, Date.now());
-        // Default 60 (0.30.1, was 120): every second a wait blocks the turn it
-        // is exposed to the host's user-prompt interrupt — and the live test
-        // showed every real reply lands within ~60s anyway.
-        const seconds = typeof args.timeout === "number" ? args.timeout : 60;
+        const seconds = meshWaitClamp(typeof args.timeout === "number" ? args.timeout : undefined);
         const deadline = Date.now() + seconds * 1000;
         while (Date.now() < deadline) {
-          // Atomic fetch+ack, same race fix as mesh_inbox (0.16.1).
-          const row = waitReplyRead(db, String(args.id), sid);
+          // Atomic fetch+ack, same race fix as mesh_inbox (0.16.1). The
+          // broadened matcher (0.31.0) also returns on any message from the
+          // request's recipient box — the correlation survives a reply that
+          // skipped the auto-fill.
+          const row = waitReplyBroad(db, String(args.id), sid);
           if (row) {
             return JSON.stringify(row, null, 2);
           }

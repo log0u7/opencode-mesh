@@ -5,6 +5,37 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.31.0] - 2026-11-26
+
+### Fixed
+
+- A federated name is never a local box (P1): mailboxByName/listMailboxes
+  filter node_id IS NULL — a caller deciding "does this box live here?" can
+  no longer answer yes for a foreign row and sink mail into a box no local
+  session drains; federatedByName carries the routing row; the sidebar and
+  mesh_pools count local boxes only.
+- The registry merge is hardened (P2): a BOUND local name (bind_key set) is
+  never ceded even when its session went quiet; the per-row validation
+  tightens (session_id <= 128, role <= 64, every pool entry must match
+  team:<id>); the merge runs in one transaction.
+- The reply correlation is server-side (P3): a bare answer (no reply_to)
+  auto-carries the pending question's id — lastUnansweredFrom(fromBox,
+  toBox, 30 min window), applied on the local, the federated and the peer
+  wire paths. The agents' reply discipline is no longer load-bearing (the
+  storm root cause dies at the source). Explicit reply_to always wins.
+- mesh_wait is hard-capped at 30s and correlates on the sender (P4): the
+  matcher returns on the exact reply_to OR any message from the request's
+  recipient box arriving after it; the description states the contract
+  (only when the next step in THIS turn depends on the answer).
+
+### Changed
+
+- The wake flash loses the reply id (P5): the auto-fill made it redundant —
+  ~50 tokens back on every wake of every agent.
+- New option debugWake: one plugin.log line per flash (pid, box, fresh
+  count, PRAGMA data_version) — the ghost-counter hunt switch (frozen WAL
+  snapshot vs orphan instance).
+
 ## [0.30.1] - 2026-11-26
 
 ### Fixed

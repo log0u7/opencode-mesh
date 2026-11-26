@@ -15,8 +15,10 @@ import {
   ackInbox,
   withTransaction,
   mailboxByName,
+  listMailboxes,
   mergeFederatedRegistry,
   RESEND_WINDOW_MS,
+  federatedByName,
 } from "../src/lib/mail.js";
 
 /** The wake loop reads per-box stats in one grouped query; the gate tests
@@ -469,42 +471,54 @@ describe("wake gates (0.16.0 token economy)", () => {
     expect(statOf(db, "a")?.unread).toBe(2);
     db.close();
   });
+});
 
-  it("wakeBoxStats: id is the OLDEST unread delivery's id — the wake flash carries the reply target (0.30.1)", () => {
+describe("P2 follow-up (0.31.0, the mr-review findings)", () => {
+  it("an EMPTY push retires ALL of the sender's federated rows", () => {
     const db = openMeshDb(":memory:");
-    registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
-    const first = deliverMessage(db, {
-      from: "n",
-      to_box: "a",
-      subject: "first",
-      body: "b",
-      created_at: 1000,
-    });
-    if (!first.ok) throw new Error("delivery failed");
-    deliverMessage(db, { from: "n", to_box: "a", subject: "second", body: "b", created_at: 2000 });
-    // The reply correlation (mesh_wait) only matches on reply_to: the woken
-    // agent needs the id IN the flash or its replies starve the waiter
-    // (the 02:17 repro: orq's reply sat uncorrelated, the wait timed out).
-    expect(statOf(db, "a")?.id).toBe(first.id);
+    mergeFederatedRegistry(
+      db,
+      [
+        {
+          name: "gone",
+          session_id: "ses-gone",
+          role: null,
+          pools: "[]",
+          primary_pool: null,
+          registered_at: Date.now() - 1000,
+        },
+      ],
+      "node-b",
+    );
+    expect(federatedByName(db, "gone")).not.toBeNull();
+    // The sender's next push carries NOTHING: its rows must die (the NULL
+    // placeholder deleted nothing, stale rows kept routing to a dead box).
+    const applied = mergeFederatedRegistry(db, [], "node-b");
+    expect(applied).toBe(0);
+    expect(federatedByName(db, "gone")).toBeNull();
     db.close();
   });
 
-  it("wakeBoxStats: subject and id pair from the SAME row even on a created_at tie (mr-review tie-break)", () => {
+  it("a long-lived box (registered_at 2 days old) still upserts as federated", () => {
     const db = openMeshDb(":memory:");
-    registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
-    deliverMessage(db, { from: "n", to_box: "a", subject: "tie-1", body: "b", created_at: 1000 });
-    deliverMessage(db, { from: "n", to_box: "a", subject: "tie-2", body: "b", created_at: 1000 });
-    // The two subqueries share the deterministic tie-break (created_at, id):
-    // subject and id MUST come from the same row — a mismatched pair sends the
-    // woken agent's reply_to at the wrong message.
-    const winner = db.conn.get<{ mid: string; subject: string }>(
-      `SELECT m.id AS mid, m.subject AS subject
-       FROM deliveries d JOIN messages m ON m.id = d.message_id
-       WHERE d.to_box = 'a' AND d.status = 'unread'
-       ORDER BY d.created_at ASC, d.id ASC LIMIT 1`,
+    const applied = mergeFederatedRegistry(
+      db,
+      [
+        {
+          name: "old-orq",
+          session_id: "ses-old",
+          role: "lead",
+          pools: "[]",
+          primary_pool: null,
+          registered_at: Date.now() - 2 * 24 * 60 * 60 * 1000,
+        },
+      ],
+      "node-b",
     );
-    expect(statOf(db, "a")?.id).toBe(winner?.mid);
-    expect(statOf(db, "a")?.subject).toBe(winner?.subject);
+    // registered_at is the ORIGINAL registration time and never moves: the
+    // past bound would drop exactly the long-lived federation targets.
+    expect(applied).toBe(1);
+    expect(federatedByName(db, "old-orq")).not.toBeNull();
     db.close();
   });
 });
@@ -749,7 +763,7 @@ describe("registry federation (0.30.0)", () => {
       ],
       "node-ricinus",
     );
-    const row = mailboxByName(db, "sysops");
+    const row = federatedByName(db, "sysops");
     expect(row).not.toBeNull();
     db.close();
   });
@@ -775,7 +789,9 @@ describe("registry federation (0.30.0)", () => {
       "node-ricinus",
     );
     expect(applied).toBe(1);
-    const row = mailboxByName(db, "local");
+    // The transfer turns OUR row into an addressing row (node_id = the new
+    // owner): the name now lives on the peer.
+    const row = federatedByName(db, "local");
     expect(row?.session_id).toBe("ses-foreign");
     db.close();
   });
@@ -800,6 +816,124 @@ describe("registry federation (0.30.0)", () => {
     expect(applied).toBe(0);
     const row = mailboxByName(db, "local");
     expect(row?.session_id).toBe("s1");
+    db.close();
+  });
+});
+
+describe("P1 (0.31.0): a federated name is never a local box", () => {
+  const FED = {
+    name: "remote-dev",
+    session_id: "ses-remote",
+    role: "ops",
+    pools: '["team:x"]',
+    primary_pool: null,
+    registered_at: Date.now() - 1000,
+  };
+
+  function federatedDb() {
+    const db = openMeshDb(":memory:");
+    registerMailbox(db, { name: "alice", session_id: "s1", now: 1000 });
+    mergeFederatedRegistry(db, [FED], "node-b");
+    return db;
+  }
+
+  it("mailboxByName resolves LOCAL boxes only; federatedByName carries the routing row", () => {
+    const db = federatedDb();
+    // The local resolution must not see the federated row: every caller that
+    // decides "does this box live here?" would otherwise answer yes and sink
+    // mail into a box no local session drains.
+    expect(mailboxByName(db, "remote-dev")).toBeNull();
+    const fed = federatedByName(db, "remote-dev");
+    expect(fed?.name).toBe("remote-dev");
+    expect(fed?.node_id).toBe("node-b");
+    db.close();
+  });
+
+  it("deliverMessage to a federated name is unknown_mailbox, never a phantom delivery", () => {
+    const db = federatedDb();
+    const result = deliverMessage(db, {
+      from: "n1",
+      from_box: "alice",
+      to_box: "remote-dev",
+      subject: "dm",
+      body: "b",
+    });
+    expect(result).toEqual({ ok: false, error: "unknown_mailbox" });
+    db.close();
+  });
+
+  it("a federated pool membership does not surface as a local pool", () => {
+    const db = federatedDb();
+    // team:x exists ONLY on node-b: locally it has no members, so nothing
+    // local lists it (the sidebar and mesh_pools count node_id IS NULL).
+    const pools = new Set<string>();
+    for (const box of listMailboxes(db)) {
+      for (const p of box.pools) pools.add(p);
+    }
+    expect(pools.has("team:x")).toBe(false);
+    db.close();
+  });
+});
+
+describe("P2 (0.31.0): the registry merge is hardened", () => {
+  const inbound = (over: Partial<Parameters<typeof mergeFederatedRegistry>[1][number]> = {}) => ({
+    name: "orq",
+    session_id: "ses-foreign",
+    role: "po",
+    pools: "[]",
+    primary_pool: null,
+    registered_at: Date.now() - 1000,
+    ...over,
+  });
+
+  function boundLocalDb(name = "orq") {
+    const db = openMeshDb(":memory:");
+    registerMailbox(db, { name, session_id: "s1", bind_key: "proj:/work", now: 1000 });
+    // The binding is live but the session went quiet: only the BIND proves
+    // the name is taken — the staleness must not reopen the takeover.
+    db.conn.run("UPDATE mailboxes SET last_seen = ?", [Date.now() - 2 * 60 * 60 * 1000]);
+    return db;
+  }
+
+  it("never cedes a bound local name, even when its session went quiet", () => {
+    const db = boundLocalDb();
+    const applied = mergeFederatedRegistry(db, [inbound()], "node-b");
+    expect(applied).toBe(0);
+    const row = mailboxByName(db, "orq");
+    expect(row?.bind_key).toBe("proj:/work");
+    db.close();
+  });
+
+  it("a pools entry outside the team:<id> grammar skips the row", () => {
+    const db = boundLocalDb("free-name");
+    const applied = mergeFederatedRegistry(
+      db,
+      [inbound({ name: "free-name", pools: '["garbage"]' })],
+      "node-b",
+    );
+    expect(applied).toBe(0);
+    db.close();
+  });
+
+  it("an oversized session_id skips the row", () => {
+    const db = boundLocalDb("free-name");
+    const applied = mergeFederatedRegistry(
+      db,
+      [inbound({ name: "free-name", session_id: "x".repeat(200) })],
+      "node-b",
+    );
+    expect(applied).toBe(0);
+    db.close();
+  });
+
+  it("an oversized role skips the row", () => {
+    const db = boundLocalDb("free-name");
+    const applied = mergeFederatedRegistry(
+      db,
+      [inbound({ name: "free-name", role: "x".repeat(100) })],
+      "node-b",
+    );
+    expect(applied).toBe(0);
     db.close();
   });
 });

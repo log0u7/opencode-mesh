@@ -258,6 +258,42 @@ describe("mesh server routes", () => {
     server.close();
   });
 
+  it("POST /registry-sync merges the peer's rows through the real handler (the mr-review 🔴)", async () => {
+    const { db, server, url } = await start();
+    pairWithToken(db, {
+      node_id: "peer1",
+      hostname: "laptop",
+      fingerprint: "ff00",
+      token: "tok-peer1",
+    });
+    const response = await post(
+      url,
+      "/registry-sync",
+      {
+        registry: [
+          {
+            name: "remote-dev",
+            session_id: "ses-remote",
+            role: "ops",
+            pools: "[]",
+            primary_pool: null,
+            registered_at: Date.now() - 1000,
+          },
+        ],
+      },
+      "tok-peer1",
+    );
+    // The nested-transaction regression made EVERY push 500 and the
+    // federation silently dead on the wire: the route must merge for real.
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ applied: 1 });
+    const row = db.conn.get<{ node_id: string }>(
+      "SELECT node_id FROM mailboxes WHERE name = 'remote-dev'",
+    );
+    expect(row?.node_id).toBe("peer1");
+    server.close();
+  });
+
   it("bounds the pair-code attempt map (LRU cap, 0.18.0)", () => {
     // The cap evicts the OLDEST remote: a fresh flood of spoofed sources
     // cannot grow the map, and an evicted remote starts a fresh window.

@@ -321,13 +321,14 @@ async function handle(
       json(res, 400, { error: "registry must be an array" });
       return;
     }
+    // mergeFederatedRegistry wraps its own body in withTransaction (0.31.0):
+    // a nested one here would trip the leak guard (inTransaction true at
+    // entry) and 500 every push.
     try {
-      const applied = withTransaction(db, () =>
-        mergeFederatedRegistry(
-          db,
-          rows as Parameters<typeof mergeFederatedRegistry>[1],
-          peer.node_id,
-        ),
+      const applied = mergeFederatedRegistry(
+        db,
+        rows as Parameters<typeof mergeFederatedRegistry>[1],
+        peer.node_id,
       );
       json(res, 200, { applied });
     } catch {

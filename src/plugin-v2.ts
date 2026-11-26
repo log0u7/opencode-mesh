@@ -280,6 +280,7 @@ export const MeshV2 = Plugin.define({
       ...(options.wake === false ? { intervalMs: 0 } : {}),
       ...(options.wakeIntervalMs !== undefined ? { intervalMs: options.wakeIntervalMs } : {}),
       ...(options.wakePools !== undefined ? { wakePools: options.wakePools } : {}),
+      ...(options.debugWake ? { debugWake: true } : {}),
       sessionKnown: (sessionID) => sessionsSeen.has(sessionID) || liveSessions.has(sessionID),
       sessionRunning: (sessionID) => running.has(sessionID),
       escalateTo: options.escalateTo ?? "orq",

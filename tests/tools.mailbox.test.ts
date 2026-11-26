@@ -10,7 +10,7 @@ import {
   registerMailbox,
 } from "../src/lib/mail.js";
 import { pairWithToken } from "../src/lib/peers.js";
-import { buildToolSpecs, type MeshContext, type ToolSpec } from "../src/tools.js";
+import { buildToolSpecs, meshWaitClamp, type MeshContext, type ToolSpec } from "../src/tools.js";
 import type { HostCapa } from "../src/lib/capa.js";
 
 function setup(capa?: () => Promise<HostCapa>) {
@@ -244,12 +244,14 @@ describe("mesh_wait", () => {
     const { db, call } = setup();
     await call("mesh_register", { name: "alice" }, "s1");
     await call("mesh_register", { name: "bob" }, "s2");
+    await call("mesh_register", { name: "carol" }, "s3");
     const out = await call("mesh_send", { to: "bob", subject: "q", body: "?" }, "s1");
     const sent = JSON.parse(out) as { id: string };
-    // The wake-path reply: NO reply_to — invisible to the wait correlation.
+    // A reply from a THIRD box: not the request's recipient, so the sender
+    // match cannot fire — the wait reaches its timeout and lists the stray.
     deliverMessage(db, {
       from: "n1",
-      from_box: "bob",
+      from_box: "carol",
       to_box: "alice",
       subject: "re: q",
       body: "!",
@@ -258,9 +260,86 @@ describe("mesh_wait", () => {
     const result = await call("mesh_wait", { id: sent.id, timeout: 1 }, "s1");
     expect(result).toContain(`timeout: no reply to ${sent.id} within 1s`);
     expect(result).toContain("uncorrelated");
-    expect(result).toContain("bob");
+    expect(result).toContain("carol");
     expect(result).toContain("re: q");
     expect(result).toContain("mesh_inbox");
+  });
+});
+
+describe("P3 (0.31.0): the reply correlation is server-side", () => {
+  it("a bare answer auto-carries reply_to = the pending question it answers", async () => {
+    const { db, call } = setup();
+    await call("mesh_register", { name: "alice" }, "s1");
+    await call("mesh_register", { name: "bob" }, "s2");
+    const out = await call("mesh_send", { to: "bob", subject: "q", body: "?" }, "s1");
+    const sent = JSON.parse(out) as { id: string };
+    // Bob answers WITHOUT reply_to — the discipline the agents never had.
+    await call("mesh_send", { to: "alice", subject: "re: q", body: "!" }, "s2");
+    const row = db.conn.get<{ reply_to: string | null }>(
+      "SELECT reply_to FROM messages WHERE from_box = 'bob' AND subject = 're: q'",
+    );
+    expect(row?.reply_to).toBe(sent.id);
+  });
+
+  it("an explicit reply_to wins over the auto-fill", async () => {
+    const { db, call } = setup();
+    await call("mesh_register", { name: "alice" }, "s1");
+    await call("mesh_register", { name: "bob" }, "s2");
+    await call("mesh_send", { to: "bob", subject: "q", body: "?" }, "s1");
+    await call(
+      "mesh_send",
+      { to: "alice", subject: "re: q", body: "!", reply_to: "explicit-id" },
+      "s2",
+    );
+    const row = db.conn.get<{ reply_to: string | null }>(
+      "SELECT reply_to FROM messages WHERE from_box = 'bob'",
+    );
+    expect(row?.reply_to).toBe("explicit-id");
+  });
+
+  it("nothing pending: the answer carries no invented reply_to", async () => {
+    const { db, call } = setup();
+    await call("mesh_register", { name: "alice" }, "s1");
+    await call("mesh_register", { name: "bob" }, "s2");
+    await call("mesh_send", { to: "alice", subject: "cold call", body: "hi" }, "s2");
+    const row = db.conn.get<{ reply_to: string | null }>(
+      "SELECT reply_to FROM messages WHERE from_box = 'bob'",
+    );
+    expect(row?.reply_to).toBeNull();
+  });
+});
+
+describe("P4 (0.31.0): mesh_wait is bounded and correlates on the sender", () => {
+  it("a reply that bypassed the auto-fill still returns the wait (sender match)", async () => {
+    const { db, call } = setup();
+    await call("mesh_register", { name: "alice" }, "s1");
+    await call("mesh_register", { name: "bob" }, "s2");
+    const out = await call("mesh_send", { to: "bob", subject: "q", body: "?" }, "s1");
+    const sent = JSON.parse(out) as { id: string };
+    const t0 = Date.now();
+    const waiting = call("mesh_wait", { id: sent.id, timeout: 5 }, "s1");
+    // DB-level delivery: the answer bypasses mesh_send, so NO auto-fill —
+    // reply_to stays NULL (a legacy/wire-path reply). The wait must still
+    // return on the sender + arrival-after-request match.
+    setTimeout(() => {
+      deliverMessage(db, {
+        from: "n1",
+        from_box: "bob",
+        to_box: "alice",
+        subject: "re: q",
+        body: "!",
+      });
+    }, 300);
+    const row = JSON.parse(await waiting) as { from_box: string | null; subject: string };
+    expect(Date.now() - t0).toBeLessThan(4500);
+    expect(row.from_box).toBe("bob");
+    expect(row.subject).toBe("re: q");
+  });
+
+  it("the clamp caps the requested timeout at 30s", () => {
+    expect(meshWaitClamp(300)).toBe(30);
+    expect(meshWaitClamp(undefined)).toBe(30);
+    expect(meshWaitClamp(5)).toBe(5);
   });
 });
 
