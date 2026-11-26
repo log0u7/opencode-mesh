@@ -1,4 +1,3 @@
-import { appendFileSync } from "node:fs";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -10,8 +9,6 @@ import { deliverMessage, registerMailbox } from "../src/lib/mail.js";
 import { pairWithToken } from "../src/lib/peers.js";
 import { loadOrCreateIdentity, pairingProof } from "../src/lib/identity.js";
 
-const log = (s: string) => appendFileSync("/tmp/opencode/stream-test.log", s + "\n");
-
 describe("the stream hub (refonte 3.1)", () => {
   it("registers, pushes to the open streams and cleans up on stop", async () => {
     const hub = new StreamHub();
@@ -19,7 +16,7 @@ describe("the stream hub (refonte 3.1)", () => {
     const fakeRes = {
       writeHead: () => {},
       write: (frame: string) => {
-        log("FRAME:" + frame.replace(/\n/g, "|"));
+        void frame;
       },
       on: () => {},
       end: () => {},

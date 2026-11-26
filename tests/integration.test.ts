@@ -1,4 +1,4 @@
-import { appendFileSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -168,18 +168,8 @@ describe("two-node integration", () => {
     let inbox = "";
     for (let i = 0; i < 40; i += 1) {
       inbox = String(await a.tool?.mesh_inbox?.execute({}, ctx()));
-      appendFileSync("/tmp/opencode/poll.log", i + ": " + inbox.slice(0, 120) + "\n");
       if (inbox.includes('"s"')) break;
     }
-    // DEBUG dump
-    const { DatabaseSync } = await import("node:sqlite");
-    const dbgB = new DatabaseSync(join(dir, "b", "mesh.db"), { readOnly: true });
-    const ob = dbgB.prepare("SELECT state, attempts, last_error FROM outbox").all();
-    const dbgA = new DatabaseSync(join(dir, "a", "mesh.db"), { readOnly: true });
-    const msgs = dbgA.prepare("SELECT subject, status FROM messages").all();
-    appendFileSync("/tmp/opencode/int-dbg.log", JSON.stringify({ ob, msgs }) + "\n");
-    dbgB.close();
-    dbgA.close();
     expect(inbox).toContain('"s"');
 
     await a.dispose?.();
