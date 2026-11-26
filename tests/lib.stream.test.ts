@@ -68,7 +68,8 @@ describe("the stream round trip (refonte 3.1): the push delivers without any POS
     // La connexion + l'enregistrement du stream (le handshake + la reponse).
     await new Promise((r) => setTimeout(r, 300));
     expect(hub!.isOpen(identityB.node_id)).toBe(true);
-    const n = hub!.push(identityB.node_id, {
+    const streamHub = hub!;
+    const n = streamHub.push(identityB.node_id, {
       type: "mail",
       data: { subject: "pushed", body: "instant" },
     });
@@ -78,7 +79,7 @@ describe("the stream round trip (refonte 3.1): the push delivers without any POS
     expect(received.length).toBeGreaterThanOrEqual(1);
     expect(JSON.stringify(received[0])).toContain("pushed");
     client.stop();
-    hub!.stop();
+    streamHub.stop();
     server.close();
     db.close();
     rmSync(dir, { recursive: true, force: true });
@@ -105,6 +106,7 @@ describe("the stream client: the reconnect (refonte 3.1)", () => {
       public_key: identityB.public_key,
     });
     const drops: number[] = [];
+    const streamHub = hub as NonNullable<typeof hub>;
     const client = openPeerStream(
       {
         url: `http://127.0.0.1:${port}`,
@@ -118,7 +120,7 @@ describe("the stream client: the reconnect (refonte 3.1)", () => {
       },
     );
     await new Promise((r) => setTimeout(r, 300));
-    expect(hub.isOpen(identityB.node_id)).toBe(true);
+    expect(streamHub.isOpen(identityB.node_id)).toBe(true);
     // Le serveur meurt: la stream droppe, le client reconnecte (le retry).
     server.close();
     server.closeAllConnections();
@@ -126,7 +128,7 @@ describe("the stream client: the reconnect (refonte 3.1)", () => {
     expect(drops.length).toBeGreaterThanOrEqual(1);
     // Le client tourne toujours (les retries vers le port mort ne crashent pas).
     client.stop();
-    hub.stop();
+    streamHub.stop();
     db.close();
     rmSync(dir, { recursive: true, force: true });
   });

@@ -960,11 +960,9 @@ describe("the wire client's error branches (the refonte coverage)", () => {
     const pools = await getPools({
       url,
       token: "tok-peer1",
-      from: "peer-1",
-      proof: "p",
     });
     expect(pools).not.toBeNull();
-    const dead = await getPools({ url: "http://127.0.0.1:1", token: "t", from: "x", proof: "p" });
+    const dead = await getPools({ url: "http://127.0.0.1:1", token: "t" });
     expect(dead).toBeNull();
     server.close();
   });

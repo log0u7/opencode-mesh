@@ -243,7 +243,7 @@ describe("defaultDataDir", () => {
 describe("the option validation branches (the refonte coverage)", () => {
   it("each malformed option throws with its name; each valid option passes", async () => {
     const { parseOptions } = await import("../src/options.js");
-    const cases: Array<[Record<string, unknown>, string]> = [
+    const cases: Array<Record<string, unknown>> = [
       { wakeIntervalMs: -1 },
       { wakeIntervalMs: 1.5 },
       { wakeIntervalMs: "x" },
@@ -263,7 +263,7 @@ describe("the option validation branches (the refonte coverage)", () => {
     ];
     for (const bad of cases) {
       const key = Object.keys(bad)[0];
-      expect(() => parseOptions(bad as never)).toThrow(new RegExp(key));
+      expect(() => parseOptions(bad as never)).toThrow(key);
     }
     // Les valides passent.
     const ok = parseOptions({
