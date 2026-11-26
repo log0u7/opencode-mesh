@@ -1177,3 +1177,13 @@ describe("3.2 (refonte): the registry anti-entropy — the logical epoch per nam
     db.close();
   });
 });
+
+describe("3.2 (refonte): the composite separator guard", () => {
+  it("registerMailbox refuses a name containing '/'", () => {
+    const db = openMeshDb(":memory:");
+    expect(() => registerMailbox(db, { name: "a/b", session_id: "s1", now: 1000 })).toThrow(
+      'a mailbox name cannot contain "/"',
+    );
+    db.close();
+  });
+});

@@ -178,9 +178,11 @@ export function startOutboxSender(
       // The task payloads route by the FEDERATED box (the owner resolved at
       // delivery), not by node_id.
       const nodeQuery =
-        payload.type === "task-ask" || payload.type === "task-reply"
-          ? (federatedByName(db, payload.to_box)?.node_id ?? payload.node_id)
-          : payload.node_id;
+        payload.type === "task-reply" && payload.node_id
+          ? payload.node_id // the explicit asker's node (the name-collision safe)
+          : payload.type === "task-ask"
+            ? (federatedByName(db, payload.to_box)?.node_id ?? payload.node_id)
+            : payload.node_id;
       if (!nodeQuery) return "no target node";
       // The STREAM first (refonte 3.1): an open peer stream gets the event
       // pushed instantly — no POST, no latency.
@@ -253,7 +255,12 @@ export function sweepOutbox(
     // The task payloads route to the dedicated endpoints (the same routing
     // as the background sender — the lazy sweep must not lose them).
     if (payload.type === "task-ask" || payload.type === "task-reply") {
-      const fedNode = federatedByName(db, payload.to_box)?.node_id ?? payload.node_id;
+      // task-reply: the EXPLICIT composite node (the name-collision safe);
+      // task-ask: the federated owner resolved by name.
+      const fedNode =
+        payload.type === "task-reply" && payload.node_id
+          ? payload.node_id
+          : (federatedByName(db, payload.to_box)?.node_id ?? payload.node_id);
       const target = findSendablePeer(db, fedNode);
       if (!target) return "no paired peer";
       const conn = resolvePeerTarget(db, fedNode);

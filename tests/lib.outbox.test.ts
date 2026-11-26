@@ -596,3 +596,58 @@ describe("P2.5 the cross-host ASK VIA THE REAL WIRE (the mr-review finding: the 
     rmSync(dirB, { recursive: true, force: true });
   });
 });
+
+describe("3.2 (refonte): the task-reply routing prefers the EXPLICIT node (the name-collision safe)", () => {
+  it("the reply routes to the composite node even when a federated row shares the bare box name", () => {
+    const db = openMeshDb(":memory:");
+    registerMailbox(db, { name: "bob-remote", session_id: "s-b", now: 1000 });
+    // DEUX rows federated pour le meme nom "alice" venu de nodes differents:
+    // la collision que le fix doit tuer — la resolution par NOM choisirait
+    // un match arbitraire; l'explicite node_id gagne.
+    mergeFederatedRegistry(
+      db,
+      [
+        {
+          name: "alice",
+          session_id: "ses-a",
+          role: null,
+          pools: "[]",
+          primary_pool: null,
+          registered_at: Date.now() - 2000,
+          epoch: 2,
+        },
+      ],
+      "node-wrong",
+    );
+    mergeFederatedRegistry(
+      db,
+      [
+        {
+          name: "alice",
+          session_id: "ses-a2",
+          role: null,
+          pools: "[]",
+          primary_pool: null,
+          registered_at: Date.now() - 1000,
+          epoch: 3,
+        },
+      ],
+      "node-right",
+    );
+    // Le miroir: from_box = le composite node-right/alice.
+    const now = Date.now();
+    db.conn.run(
+      `INSERT INTO tasks (id, from_box, to_box, question, state, created_at, updated_at)
+       VALUES ('task-c', 'node-right/alice', 'bob-remote', 'q', 'submitted', ?, ?)`,
+      [now, now],
+    );
+    queueTaskReply(db, "task-c", "reponse", "completed", now);
+    const row = db.conn.get<{ payload: string }>(
+      "SELECT payload FROM outbox WHERE json_extract(payload,'$.type') = 'task-reply'",
+    )!;
+    const p = JSON.parse(row.payload);
+    expect(p.node_id).toBe("node-right");
+    expect(p.to_box).toBe("alice");
+    db.close();
+  });
+});

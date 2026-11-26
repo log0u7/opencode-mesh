@@ -164,6 +164,12 @@ type MessageRow = {
 // ---- registration and presence ----
 
 export function registerMailbox(db: MeshDb, input: RegisterMailboxInput): Mailbox {
+  // The "/" is the node/box composite separator (the refonte P2.5): a local
+  // box named "a/b" would be indistinguishable from a cross-host mirror
+  // reference. Refuse at the boundary.
+  if (input.name.includes("/")) {
+    throw new Error('a mailbox name cannot contain "/"');
+  }
   // A session may own SEVERAL mailboxes (one TUI, several agent hats).
   // Re-registering an existing name rebinds it to this session (handoff).
   // A re-register without a primary keeps the declared one (identity trait,
