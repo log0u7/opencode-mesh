@@ -4,6 +4,7 @@ import { pid } from "node:process";
 import type { MeshDb } from "./db.js";
 import {
   claimFlash,
+  claimFlashWithContent,
   deliverMessage,
   listMailboxes,
   mailboxByName,
@@ -135,6 +136,10 @@ export const MAX_UNDRAINED_PROMPTS = 3;
  * TTL the gate would mute the session forever. Worst case after expiry: one
  * duplicate flash per TTL, still bounded by the fatigue guard. */
 export const PROMPT_GATE_TTL_MS = 120_000;
+/** The content-bearing flash budget (0.33 refonte P1.1): a batch whose
+ * rendered payload fits rides IN the wake prompt (acked atomically) — the
+ * agent skips the mesh_inbox turn. Oversized batches take the compact path. */
+export const FLASH_CONTENT_BUDGET = 600;
 /** Consecutive failed ticks before the loop backs off: a busy database (the
  * busy_timeout is 5s with several processes on mesh.db) or a prompt-refusing
  * host used to STOP the loop forever (the boxes starved silently — the warns
@@ -330,11 +335,52 @@ export function startWakeLoop(options: WakeOptions): WakeHandle {
         // else announced these rows (or nothing fresh) — skip. The reminder
         // path (the fatigue mute fall-through) re-claims rows whose flash is
         // older than the mute TTL.
-        const claim = claimFlash(options.db, box.name, now, claimStaleAfter);
+        const claim = claimFlashWithContent(
+          options.db,
+          box.name,
+          now,
+          claimStaleAfter,
+          FLASH_CONTENT_BUDGET,
+        );
         if (claim.claimed === 0) {
           continue;
         }
         undrained.set(box.name, cycles + 1);
+        // The content rides (the batch fit the budget): the mail is CONSUMED
+        // by the same UPDATE — the prompt carries it and the agent skips the
+        // mesh_inbox turn. One turn per wake instead of two.
+        if (claim.content !== null) {
+          // The first line keeps the compact grammar (count + preview); the
+          // payload below carries the mail itself — no mesh_inbox turn.
+          const cSubject = stat?.subject ?? null;
+          const cPreview =
+            cSubject === null ? "" : cSubject.length > 60 ? `${cSubject.slice(0, 59)}…` : cSubject;
+          lastUnread.set(box.name, claim.claimed);
+          if (options.debugWake) {
+            const dv = options.db.conn.get<{ data_version: number }>("PRAGMA data_version");
+            pluginWarn(
+              storeLogDir(options.db.path),
+              `flash v=${pluginVersion()} pid=${pid} box=${box.name} fresh=${claim.claimed} content=1 dataVersion=${dv?.data_version ?? "?"}`,
+            );
+          }
+          if (stopped) return;
+          try {
+            await options.prompt(
+              box.session_id,
+              cPreview === ""
+                ? `mesh: ${claim.claimed} unread (acked — no drain needed):\n${claim.content}`
+                : `mesh: ${claim.claimed} unread — "${cPreview}" (acked — no drain needed):\n${claim.content}`,
+              `msg_${randomUUID()}`,
+            );
+          } catch (error) {
+            // The prompt never fired: release the claim AND the consumption —
+            // the rows go back to unread/NULL, the next tick retries.
+            releaseFlash(options.db, box.name, claim.at);
+            throw error;
+          }
+          if (stopped) return;
+          continue;
+        }
         // The flash recomputes from the database at the moment it is emitted
         // (0.24.6): the tick-start grouped stat can be seconds old by the time
         // the loop reaches this box, and the prompt is queued — it fires later

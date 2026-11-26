@@ -1003,10 +1003,57 @@ export function claimFlash(
  * the next tick re-claims them — a claimed-but-never-announced delivery is
  * the silent-starvation class (the flash died, the mail looks announced). */
 export function releaseFlash(db: MeshDb, box: string, at: number): void {
-  db.conn.run("UPDATE deliveries SET flashed_at = NULL WHERE to_box = ? AND flashed_at = ?", [
-    box,
-    at,
-  ]);
+  // Restore the PRE-claim state: NULL flashed_at AND unread. The
+  // content-bearing flash CONSUMES the rows (status read in the claim
+  // UPDATE) — a failed prompt must un-consume them, or the re-claim
+  // (WHERE status = 'unread') never sees them again: silent loss.
+  db.conn.run(
+    "UPDATE deliveries SET flashed_at = NULL, status = 'unread' WHERE to_box = ? AND flashed_at = ?",
+    [box, at],
+  );
+}
+
+/** The content-bearing flash (0.33 refonte P1.1): claim the box's
+ * announceable unreads AND, when the whole batch fits the character budget,
+ * CONSUME it in the same UPDATE (flashed_at set, status read) and return the
+ * payload. The wake prompt then carries the mail itself: the agent reads the
+ * content in the flash and skips the mesh_inbox turn — one turn per wake
+ * instead of two. An oversized batch claims WITHOUT content (the compact
+ * flash path: mesh_inbox carries the bodies at the next turn). Atomic: the
+ * read, the budget check and the claim+consume happen in one transaction. */
+export function claimFlashWithContent(
+  db: MeshDb,
+  box: string,
+  now: number,
+  staleAfterMs: number,
+  maxChars: number,
+): { claimed: number; at: number; content: string | null } {
+  return withTransaction(db, () => {
+    const rows = db.conn.all<{
+      id: string;
+      from_box: string | null;
+      subject: string;
+      body: string;
+    }>(
+      `SELECT m.id, m.from_box, m.subject, m.body
+         FROM deliveries d JOIN messages m ON m.id = d.message_id
+         WHERE d.to_box = ? AND d.status = 'unread'
+           AND (d.flashed_at IS NULL OR d.flashed_at <= ?)
+         ORDER BY d.created_at ASC`,
+      [box, now - staleAfterMs],
+    );
+    const content = rows
+      .map((r) => `[${r.id.slice(0, 8)}] ${r.from_box ?? "?"}: ${r.subject} — ${r.body}`)
+      .join("\n");
+    const fits = content.length <= maxChars;
+    const res = db.conn.run(
+      `UPDATE deliveries SET flashed_at = ?${fits ? ", status = 'read'" : ""}
+       WHERE to_box = ? AND status = 'unread'
+         AND (flashed_at IS NULL OR flashed_at <= ?)`,
+      [now, box, now - staleAfterMs],
+    );
+    return { claimed: res.changes, at: now, content: fits ? content : null };
+  });
 }
 
 /** The local registry rows this node owns (for the /registry-sync push). */
