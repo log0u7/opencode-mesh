@@ -424,13 +424,23 @@ export const MeshV2 = Plugin.define({
       sessionKnown: (sessionID) => sessionsSeen.has(sessionID) || liveSessions.has(sessionID),
       sessionRunning: (sessionID) => running.has(sessionID),
       escalateTo: options.escalateTo ?? "orq",
-      prompt: (sessionID, text, messageID) => {
-        // The server reads the prompt's explicit id (packages/core/src/session/session.ts:
-        // input.id ?? create) — the transport-retry idempotency key (0.28.1):
-        // every retry of this call reconciles to the same message and no
-        // ghost turn re-fires. The key is `id` (SessionPromptInput) — NOT
-        // `messageID` (that key lives on the plugin HOOK type, a different
-        // surface; an effect-schema input strips unknown keys).
+      prompt: (sessionID, text, messageID, description) => {
+        // The refonte2-C4: the SYNTHETIC delivery when the host supports it
+        // (opencode >= 2.4: a synthetic message, not a user one; the
+        // transport-retry idempotency key = the explicit id, unchanged).
+        // notify semantics: delivery "steer" (the next safe switch point) +
+        // resume true (the session wakes now). The fallback: the older
+        // prompt path (the queue delivery).
+        if (typeof ctx.session.synthetic === "function") {
+          return ctx.session.synthetic({
+            sessionID,
+            id: messageID,
+            text,
+            description: description ?? null,
+            delivery: "steer",
+            resume: true,
+          });
+        }
         const input = { sessionID, id: messageID, text, delivery: "queue" as const };
         return ctx.session.prompt(input);
       },

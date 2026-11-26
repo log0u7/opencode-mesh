@@ -378,7 +378,8 @@ describe("opencode-mesh v2 setup", () => {
     for (let i = 0; i < 60 && prompts.length === 0; i += 1) {
       await new Promise((r) => setTimeout(r, 25));
     }
-    expect(prompts.some((t) => t.includes('mesh: 1 unread — "ping"'))).toBe(true);
+    expect(prompts.some((t) => t.includes('<mesh-mail kind="notify" subject="ping">'))).toBe(true);
+    expect(prompts.some((t) => t.includes("ping — wake up"))).toBe(true);
 
     // The transport-retry idempotency key (0.28.1): the prompt input carries
     // the generated id under the key the server reads (`id`), so a retried
@@ -456,7 +457,8 @@ describe("opencode-mesh v2 setup", () => {
 
     await vi.waitFor(
       () => {
-        expect(prompts.some((t) => t.includes('mesh: 1 unread — "s"'))).toBe(true);
+        expect(prompts.some((t) => t.includes('<mesh-mail kind="notify" subject="s">'))).toBe(true);
+        expect(prompts.some((t) => t.includes("s — b"))).toBe(true);
       },
       { timeout: 5000 },
     );

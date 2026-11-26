@@ -92,13 +92,20 @@ export type WakeOptions = {
   /** The escalation target mailbox (the box starved through
    * ESCALATE_AFTER_MUTE_CYCLES alerts it). Default "orq". */
   escalateTo?: string;
-  /** Inject a prompt into a session (ctx.session.prompt). The third argument
-   * is a generated messageID: the host server honors an explicit id
-   * (input.id ?? create) and the transport can retry the call — with a
-   * stable id every retry reconciles to the same message ('existing') and no
-   * ghost turn re-fires (the 4s-spaced phantom deliveries, root-caused
-   * 2026-11-25). */
-  prompt: (sessionID: string, text: string, messageID: string) => Promise<unknown>;
+  /** Inject a notification into a session (the refonte2-C4: ctx.session
+   * .synthetic when the host supports it — a synthetic message, not a user
+   * one; the fallback prompt otherwise). The third argument is a generated
+   * messageID: the host server honors an explicit id (input.id ?? create)
+   * and the transport can retry the call — with a stable id every retry
+   * reconciles to the same message ('existing') and no ghost turn re-fires
+   * (the 4s-spaced phantom deliveries, root-caused 2026-11-25). The fourth
+   * is the short description (the transcript label). */
+  prompt: (
+    sessionID: string,
+    text: string,
+    messageID: string,
+    description?: string,
+  ) => Promise<unknown>;
   /** One diagnostic line per flash (pid, box, fresh, data_version) beside
    * the store. Off by default — the ghost-counter hunt switch. */
   debugWake?: boolean;
@@ -381,12 +388,18 @@ export function startWakeLoop(options: WakeOptions): WakeHandle {
             return;
           }
           try {
+            // The <mesh-mail> envelope (the refonte2-C4): the content is
+            // DATA FROM ANOTHER AGENT, not the user's words — the model
+            // reads it as the protocol payload, never as an instruction.
+            const mailText =
+              cPreview === ""
+                ? `<mesh-mail kind="notify">\n${claim.content}\n</mesh-mail>`
+                : `<mesh-mail kind="notify" subject="${cPreview}">\n${claim.content}\n</mesh-mail>`;
             await options.prompt(
               box.session_id,
-              cPreview === ""
-                ? `mesh: ${claim.claimed} unread (acked — no drain needed):\n${claim.content}`
-                : `mesh: ${claim.claimed} unread — "${cPreview}" (acked — no drain needed):\n${claim.content}`,
+              mailText,
               `msg_${randomUUID()}`,
+              cPreview === "" ? `mesh: ${claim.claimed} unread` : `mesh: ${cPreview}`,
             );
           } catch (error) {
             // The prompt never fired: release the claim AND the consumption —

@@ -223,7 +223,9 @@ describe("wake collapse gate (at most one prompt in flight per session)", () => 
     await new Promise((r) => setTimeout(r, 200));
     handle.stop();
     expect(prompts.length).toBe(first + 1);
-    expect(prompts[prompts.length - 1]?.text).toContain("2 unread");
+    expect(prompts[prompts.length - 1]?.text).toContain('<mesh-mail kind="notify" subject="s2">');
+    expect(prompts[prompts.length - 1]?.text).toContain("s2 — b2");
+    expect(prompts[prompts.length - 1]?.text).toContain("s3 — b3");
   });
 
   it("clears the in-flight gate when the delivered prompt's turn runs", async () => {
@@ -341,7 +343,9 @@ describe("wake loop", () => {
 
     expect(prompt).toHaveBeenCalledTimes(1);
     expect(prompts[0]?.sessionID).toBe("s1");
-    expect(prompts[0]?.text).toContain('mesh: 1 unread — "s"');
+    // The content path: the <mesh-mail> envelope carries the mail (acked).
+    expect(prompts[0]?.text).toContain('<mesh-mail kind="notify" subject="s">');
+    expect(prompts[0]?.text).toContain("s — b");
 
     db.close();
   });
@@ -609,7 +613,7 @@ describe("wake flag (0.17.0 Slack model)", () => {
     handle.stop();
 
     expect(prompts.map((p) => p.sessionID).sort()).toEqual(["s2", "s3"]);
-    expect(prompts[0]?.text).toContain('mesh: 1 unread — "r8 go: build is green"');
+    expect(prompts[0]?.text).toContain('<mesh-mail kind="notify" subject="r8 go: build is green">');
     db.close();
   });
 
@@ -820,7 +824,9 @@ describe("token economy (0.16.0)", () => {
     expect(prompt).toHaveBeenCalledTimes(1);
     // The content path: the first line keeps the compact grammar, the
     // payload carries the mail (acked — no drain turn).
-    expect(prompts[0]?.text).toContain('mesh: 2 unread — "status: pool broadcast"');
+    expect(prompts[0]?.text).toContain(
+      '<mesh-mail kind="notify" subject="status: pool broadcast">',
+    );
     expect(prompts[0]?.text).toContain("status: pool broadcast — b");
     expect(prompts[0]?.text).toContain("dm — b");
     db.close();
@@ -849,7 +855,9 @@ describe("token economy (0.16.0)", () => {
     handle.stop();
 
     expect(prompt).toHaveBeenCalledTimes(1);
-    expect(prompts[0]?.text).toContain('mesh: 1 unread — "status: pool broadcast"');
+    expect(prompts[0]?.text).toContain(
+      '<mesh-mail kind="notify" subject="status: pool broadcast">',
+    );
     expect(prompts[0]?.text).toContain("status: pool broadcast — b");
     db.close();
   });
@@ -881,7 +889,11 @@ describe("token economy (0.16.0)", () => {
     await new Promise((r) => setTimeout(r, 60));
     handle.stop();
 
-    expect(prompts[0]?.text).toContain('mesh: 2 unread — "status: quota config transmise"');
+    expect(prompts[0]?.text).toContain(
+      '<mesh-mail kind="notify" subject="status: quota config transmise">',
+    );
+    expect(prompts[0]?.text).toContain("status: quota config transmise — b");
+    expect(prompts[0]?.text).toContain("later mail — b");
     expect(prompts[0]?.text).toContain("status: quota config transmise — b");
     expect(prompts[0]?.text).toContain("later mail — b");
     db.close();
@@ -908,7 +920,8 @@ describe("token economy (0.16.0)", () => {
     await new Promise((r) => setTimeout(r, 60));
     handle.stop();
 
-    expect(prompts[0]?.text).toContain(`mesh: 1 unread — "${"x".repeat(59)}…"`);
+    expect(prompts[0]?.text).toContain(`mesh-mail`);
+    expect(prompts[0]?.text).toContain("x".repeat(70));
     expect(prompts[0]?.text).toContain("x".repeat(70));
     db.close();
   });
@@ -993,8 +1006,11 @@ describe("phantom unread counter (0.24.6): the displayed count is the database's
     expect(prompts.filter((p) => p.text.includes("mesh: 3 unread")).length).toBe(threes);
     const afterAck = prompts.slice(beforeAck);
     expect(afterAck.length).toBeGreaterThanOrEqual(1);
+    // Le rappel a repris m2 SEUL (300c <= le budget): le chemin CONTENU —
+    // l'enveloppe porte le mail, jamais le compte retenu 3.
     for (const p of afterAck) {
-      expect(p.text).toContain("mesh: 1 unread");
+      expect(p.text).toContain('<mesh-mail kind="notify" subject="m2">');
+      expect(p.text).toContain("m2 — ");
       expect(p.text).not.toContain("mesh: 3 unread");
     }
     db.close();
