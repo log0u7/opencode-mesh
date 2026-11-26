@@ -291,7 +291,6 @@ describe("the outbox sender: the REAL wire delivery (the POST path)", () => {
       token: "tok-a",
       public_key: identityA.public_key,
       addresses: [`127.0.0.1:${port}`],
-      pk: identityA.public_key,
     });
     // Le pairing MUTUEL: A a besoin de la row peer pour B (l'auth du wire
     // verifie le bearer + le proof signe par B contre la cle pinnee de B).
