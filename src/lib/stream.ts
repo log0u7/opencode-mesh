@@ -55,6 +55,18 @@ export async function ackEvent(
     const req = doRequest(requestOpts, (response) => {
       response.resume();
     });
+    if (isTls) {
+      // The secureConnect guard (the refonte2-P2): fires in EVERY case
+      // (self-signed included) — the ack POST carries the Bearer token, the
+      // pin MUST hold before any byte leaves.
+      req.on("socket", (socket) => {
+        socket.on("secureConnect", () => {
+          const tlsSocket = socket as import("node:tls").TLSSocket;
+          const err = pinCheck(target.pk)(tlsSocket.getPeerCertificate());
+          if (err) req.destroy(err);
+        });
+      });
+    }
     req.on("error", () => {});
     req.end(body);
   } catch {
