@@ -5,6 +5,57 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.33.0] - 2026-11-26
+
+### The async refonte — the LLM turns are the cost, not the bytes
+
+### Added
+
+- The content-bearing flash (P1.1): a batch whose payload fits 600 chars is
+  claimed, consumed and returned in ONE atomic update — the wake prompt
+  carries the mail itself, the agent skips the mesh_inbox turn.
+- The message kinds (P1.2): notify wakes per the wake rules; fyi NEVER wakes
+  (the silent DM). Pools default fyi; an explicit notify on a pool is the
+  deliberate broadcast.
+- The tasks core (P2): tasks (schema v19) carry the A2A lifecycle
+  (submitted | working | input_required | completed | failed | canceled).
+  mesh_ask returns the task id immediately, NEVER blocks; the reply goes
+  through mesh_reply(task_id) — the correlation is server-side. The asker
+  is notified on terminal and input_required states; a group answers as
+  ONE digest. The deadline sweeper fails expired tasks on its own.
+- The outbox (P2.6): the remote sends are QUEUED and the caller answers
+  "queued: <id>" — the agent never sees "unreachable" again. Three
+  delivery drivers: the inline attempt, the lazy sweep (mesh_inbox and
+  mesh_status sweep before reading), the background sender (backoff
+  30s -> 10min, dead-letter at 12, visible in mesh_status).
+- The cross-host tasks (P2.5): the ask crosses via the outbox, the
+  responder's node holds a MIRROR row (the same id), the reply crosses
+  back (POST /task-ask, /task-reply, the pairing auth), the state comes
+  home to the original row.
+- The blackboard (P4): board (schema v21, the fixed keys task | blocker |
+  state | eta), mesh_board_set writes WITHOUT waking anyone,
+  mesh_board_get reads one line per box. Status = shared state, not DMs.
+- The registry anti-entropy (3.2): mailboxes.epoch (schema v22) — the
+  LOGICAL clock per name, incremented at each rebind; the LWW resolves on
+  it (a wall clock can lie, an epoch cannot); an epoch-less inbound
+  (a pre-3.2 peer) never takes a local name.
+- The persistent stream per peer (3.1): SSE over the mesh serve — the
+  StreamHub pushes the mail / the task states / the registry the moment
+  they exist; the outbox pushes STREAM-FIRST (no POST, no latency), the
+  POST fallback stays. The client: one SSE connection per peer, the
+  reconnect with a doubling backoff.
+
+### Changed
+
+- mesh_wait is REMOVED: a blocking wait parks the turn, makes the agent
+  unreachable and bets on uncontrollable timing — mesh_ask replaces it
+  (the answer arrives as a wake; a group answers as one digest).
+- The event-driven wake (P1.3): fs.watch on mesh.db-wal fires the tick on
+  every commit — the flash lands in milliseconds; the interval drops
+  5s -> 30s (the safety net + the forced reminder path).
+- The flash no longer carries the reply id (P1.1's auto-fill correlation
+  made it redundant) — ~50 tokens back on every wake.
+
 ## [0.32.0] - 2026-11-26
 
 ### Fixed
