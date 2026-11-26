@@ -488,6 +488,25 @@ describe("wake gates (0.16.0 token economy)", () => {
     expect(statOf(db, "a")?.id).toBe(first.id);
     db.close();
   });
+
+  it("wakeBoxStats: subject and id pair from the SAME row even on a created_at tie (mr-review tie-break)", () => {
+    const db = openMeshDb(":memory:");
+    registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
+    deliverMessage(db, { from: "n", to_box: "a", subject: "tie-1", body: "b", created_at: 1000 });
+    deliverMessage(db, { from: "n", to_box: "a", subject: "tie-2", body: "b", created_at: 1000 });
+    // The two subqueries share the deterministic tie-break (created_at, id):
+    // subject and id MUST come from the same row — a mismatched pair sends the
+    // woken agent's reply_to at the wrong message.
+    const winner = db.conn.get<{ mid: string; subject: string }>(
+      `SELECT m.id AS mid, m.subject AS subject
+       FROM deliveries d JOIN messages m ON m.id = d.message_id
+       WHERE d.to_box = 'a' AND d.status = 'unread'
+       ORDER BY d.created_at ASC, d.id ASC LIMIT 1`,
+    );
+    expect(statOf(db, "a")?.id).toBe(winner?.mid);
+    expect(statOf(db, "a")?.subject).toBe(winner?.subject);
+    db.close();
+  });
 });
 
 describe("resend dedup window (0.29.0: the minutes-apart re-send class)", () => {

@@ -233,6 +233,13 @@ describe("mesh_wait", () => {
     );
   });
 
+  it("times out cleanly for an unregistered session (mailboxBySession null, global-only path)", async () => {
+    const { call } = setup();
+    expect(await call("mesh_wait", { id: "nope", timeout: 1 }, "s-unreg")).toBe(
+      "timeout: no reply to nope within 1s",
+    );
+  });
+
   it("on timeout, lists the uncorrelated replies sitting in the box (the wake-path answers, 0.30.1)", async () => {
     const { db, call } = setup();
     await call("mesh_register", { name: "alice" }, "s1");

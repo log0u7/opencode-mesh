@@ -689,10 +689,10 @@ export function wakeBoxStats(db: MeshDb): WakeBoxStat[] {
                        THEN 1 ELSE 0 END) AS wakeable,
               (SELECT m3.subject FROM deliveries d3 JOIN messages m3 ON m3.id = d3.message_id
                 WHERE d3.to_box = d.to_box AND d3.status = 'unread'
-                ORDER BY d3.created_at ASC LIMIT 1) AS subject,
+                ORDER BY d3.created_at ASC, d3.id ASC LIMIT 1) AS subject,
               (SELECT m4.id FROM deliveries d4 JOIN messages m4 ON m4.id = d4.message_id
                 WHERE d4.to_box = d.to_box AND d4.status = 'unread'
-                ORDER BY d4.created_at ASC LIMIT 1) AS id
+                ORDER BY d4.created_at ASC, d4.id ASC LIMIT 1) AS id
        FROM deliveries d JOIN messages m ON m.id = d.message_id
        WHERE d.status = 'unread'
          AND d.to_box NOT IN (SELECT name FROM mailboxes WHERE node_id IS NOT NULL)
