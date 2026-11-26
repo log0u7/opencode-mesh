@@ -113,6 +113,52 @@ describe("mesh plugin", () => {
     await hooks.dispose?.();
   });
 
+  it("mesh_reply resolves the task id by prefix (the agents copy the 8-char id)", async () => {
+    const hooks = await MeshPlugin(fakeInput(), { dataDir: dir, port: 0, advertise: false });
+    const tools = hooks.tool ?? {};
+
+    await tools.mesh_register?.execute({ name: "alice" }, ctx("s1"));
+    await tools.mesh_register?.execute({ name: "bob" }, ctx("s2"));
+
+    // Controlled ids: the ambiguity path needs two tasks sharing an 8-char
+    // prefix, which random uuids cannot guarantee.
+    const { openMeshDb } = await import("../src/lib/db.js");
+    const db = openMeshDb(`${dir}/mesh.db`);
+    const now = Date.now();
+    const sql =
+      "INSERT INTO tasks (id, from_box, to_box, question, state, created_at, updated_at) " +
+      "VALUES (?, 'alice', 'bob', 'q', 'submitted', ?, ?)";
+    db.conn.run(sql, ["cafe0000-aaaa-4000-8000-000000000001", now, now]);
+    db.conn.run(sql, ["cafe0000-bbbb-4000-8000-000000000002", now, now]);
+    const solo = "cafe0001-cccc-4000-8000-000000000003";
+    db.conn.run(sql, [solo, now, now]);
+
+    // The unique 8-char prefix resolves.
+    const unique = await tools.mesh_reply?.execute(
+      { task_id: solo.slice(0, 8), result: "ok" },
+      ctx("s2"),
+    );
+    expect(unique).toContain('"notified":true');
+
+    // The ambiguous prefix refuses (two tasks share it).
+    const dup = await tools.mesh_reply?.execute({ task_id: "cafe0000", result: "x" }, ctx("s2"));
+    expect(dup).toContain("error: ambiguous task id cafe0000");
+
+    // The full id still resolves.
+    const full = await tools.mesh_reply?.execute(
+      { task_id: "cafe0000-aaaa-4000-8000-000000000001", result: "y" },
+      ctx("s2"),
+    );
+    expect(full).toContain('"notified":true');
+
+    // A sub-8-char prefix never resolves: unknown task.
+    const short = await tools.mesh_reply?.execute({ task_id: "cafe000", result: "z" }, ctx("s2"));
+    expect(short).toContain("error: unknown task");
+
+    db.close();
+    await hooks.dispose?.();
+  });
+
   it("mesh_inbox lists unread messages after delivery", async () => {
     const hooks = await MeshPlugin(fakeInput(), { dataDir: dir, port: 0, advertise: false });
     const tools = hooks.tool ?? {};
