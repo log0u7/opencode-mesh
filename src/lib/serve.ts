@@ -20,6 +20,7 @@ import {
 } from "./distant-spawn.js";
 import { countRunningSpawnedByPeer } from "./workers.js";
 import { handleTaskAsk } from "./outbox.js";
+import { StreamHub } from "./stream.js";
 import {
   deliverMessage,
   getTask,
@@ -55,6 +56,10 @@ const MEMORY_SYNC_BODY_LIMIT = 1024 * 1024;
 const DEFAULT_BIND = "127.0.0.1";
 
 export type MeshServerOptions = {
+  /** The stream hub (the refonte 3.1): the open peer streams — set at
+   * creation, read by the /stream route inside handle(). */
+  hub?: StreamHub;
+
   db: MeshDb;
   port: number;
   bind?: "loopback" | "lan";
@@ -108,6 +113,7 @@ export type MeshServer = {
   server: Server;
   port: number;
   address: string;
+  hub?: StreamHub;
   /** The insecure side channel, when insecureHttp was requested. */
   insecureServer?: Server;
   insecurePort?: number;
@@ -144,6 +150,7 @@ export async function startMeshServer(options: MeshServerOptions): Promise<MeshS
       json(res, 500, { error: "internal error" });
     });
   };
+  options.hub = new StreamHub();
   const server = tls
     ? createHttpsServer(
         { key: options.tlsMaterial!.keyPem, cert: options.tlsMaterial!.certPem },
@@ -165,6 +172,7 @@ export async function startMeshServer(options: MeshServerOptions): Promise<MeshS
     server,
     port,
     address: host,
+    hub: options.hub,
     ...(insecureServer !== undefined && insecurePort !== undefined
       ? { insecureServer, insecurePort }
       : {}),
@@ -285,6 +293,22 @@ async function handle(
     } catch {
       json(res, 500, { error: "memory-sync storage failed" });
     }
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/stream") {
+    // The persistent stream (refonte 3.1, SSE): the peer holds ONE
+    // connection per direction; the server pushes the mail / the task
+    // states / the registry the moment they exist. The auth: the pairing
+    // headers (a GET has no body).
+    const from = String(req.headers["x-mesh-sender"] ?? "");
+    const proof = String(req.headers["x-mesh-proof"] ?? "");
+    const peer = authenticate(db, req, from, proof);
+    if (!peer) {
+      json(res, 401, { error: "unauthorized" });
+      return;
+    }
+    options.hub?.add(peer.node_id, res);
     return;
   }
 

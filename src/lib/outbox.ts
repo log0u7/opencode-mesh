@@ -171,6 +171,7 @@ export function startOutboxSender(
   identity: NodeIdentity,
   rebrowse: () => void,
   intervalMs = 1_000,
+  hub?: { isOpen(nodeId: string): boolean; push(nodeId: string, event: unknown): number },
 ): { stop(): void } {
   const timer = setInterval(() => {
     void processOutbox(db, Date.now(), async (payload) => {
@@ -181,6 +182,26 @@ export function startOutboxSender(
           ? (federatedByName(db, payload.to_box)?.node_id ?? payload.node_id)
           : payload.node_id;
       if (!nodeQuery) return "no target node";
+      // The STREAM first (refonte 3.1): an open peer stream gets the event
+      // pushed instantly — no POST, no latency.
+      if (hub?.isOpen(nodeQuery)) {
+        const delivered = hub.push(nodeQuery, {
+          type: payload.type ?? "mail",
+          data: {
+            from: identity.node_id,
+            from_box: payload.from_box,
+            to: payload.to_box,
+            subject: payload.subject,
+            body: payload.body,
+            reply_to: payload.reply_to,
+            origin_id: payload.origin_id,
+            ...(payload.type === "task-ask" || payload.type === "task-reply"
+              ? { task: payload.task }
+              : {}),
+          },
+        });
+        if (delivered > 0) return null;
+      }
       const target = findSendablePeer(db, nodeQuery);
       if (!target) return "no paired peer";
       const conn = resolvePeerTarget(db, nodeQuery);

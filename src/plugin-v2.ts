@@ -5,11 +5,15 @@ import { openMeshDb, type MeshDb } from "./lib/db.js";
 import { advertiseMesh, browseMesh, type AdvertiseHandle } from "./lib/discovery.js";
 import { listLocks } from "./lib/locks.js";
 import {
+  deliverMessage,
+  getTask,
   listMailboxes,
   mailboxByBindKey,
   mailboxByName,
   mailboxesBySession,
   registerMailbox,
+  replyTask,
+  type TaskState,
   unreadBoxCount,
 } from "./lib/mail.js";
 import {
@@ -30,7 +34,8 @@ import { startMemorySyncPusher } from "./lib/memory-sync.js";
 import { createDurableStore } from "./lib/persist.js";
 import { createFanout } from "./lib/fanout.js";
 import { createHostCapa } from "./lib/capa.js";
-import { startOutboxSender, sweepOutbox } from "./lib/outbox.js";
+import { handleTaskAsk, startOutboxSender, sweepOutbox } from "./lib/outbox.js";
+import { openPeerStream } from "./lib/stream.js";
 import { startWakeLoop, createExecutionTracker, type HostEvent } from "./lib/wake.js";
 import { startSessionLister } from "./lib/sessions.js";
 import { MESH_GUIDANCE } from "./lib/guidance.js";
@@ -140,7 +145,7 @@ export const MeshV2 = Plugin.define({
     // TLS material is derived from the node identity: the cert presents the
     // very key peers already pin, so TLS adds zero new trust.
     const tlsMaterial = nodeTlsMaterial(dataDir);
-    const { server, port, address, insecureServer } = await startMeshServer({
+    const { server, port, address, insecureServer, hub } = await startMeshServer({
       db,
       port: options.port ?? DEFAULT_PORT,
       ...(options.bind !== undefined ? { bind: options.bind } : {}),
@@ -286,10 +291,106 @@ export const MeshV2 = Plugin.define({
     // delivered in the background — the peer conn is resolved FRESH at
     // delivery (a moved peer, a fresh mDNS announce, a re-paired token are
     // picked up without the asking agent ever knowing).
+    // The stream client + the hub (refonte 3.1): the SSE streams per peer —
+    // the receive side never polls; the outbox pushes over the open streams.
+    const dispatch = (event: { type: string; data: unknown }) => {
+      const d = event.data as {
+        from?: string;
+        from_box?: string;
+        to?: string;
+        subject?: string;
+        body?: string;
+        reply_to?: string;
+        origin_id?: string;
+        task?: { id: string; result?: string; state?: string };
+      };
+      if (event.type === "registry") return; // the registry rides its own pusher
+      if (event.type === "task-reply" && d.task?.id) {
+        const task = getTask(db, d.task.id);
+        if (task) {
+          replyTask(
+            db,
+            d.task.id,
+            task.to_box,
+            d.task.result ?? "",
+            (d.task.state ?? "completed") as TaskState,
+          );
+        }
+        return;
+      }
+      if (event.type === "task-ask" && d.task?.id) {
+        handleTaskAsk(db, {
+          node_id: d.from ?? "",
+          to_box: d.to ?? "",
+          from_box: d.from_box ?? null,
+          subject: d.subject ?? "",
+          body: d.body ?? "",
+          origin_id: d.origin_id ?? "",
+          type: "task-ask",
+          task: {
+            id: d.task.id,
+            from_box: d.from_box ?? null,
+            to_box: d.to ?? "",
+            question: d.body ?? "",
+            group_id: null,
+            deadline: null,
+            ...(d.task.result !== undefined ? { result: d.task.result } : {}),
+            state: (d.task.state ?? "completed") as TaskState,
+          },
+        });
+        return;
+      }
+      deliverMessage(db, {
+        from: d.from ?? "",
+        from_box: d.from_box ?? null,
+        to_box: d.to ?? null,
+        subject: d.subject ?? "",
+        body: d.body ?? "",
+        reply_to: d.reply_to ?? null,
+        origin_id: d.origin_id ?? null,
+      });
+    };
+    const streamClients = new Map<string, { stop(): void }>();
+    const openStreams = (): void => {
+      for (const peer of listPeers(db)) {
+        if (!peer.paired || streamClients.has(peer.node_id)) continue;
+        const conn = resolvePeerTarget(db, peer.node_id);
+        if (!conn) continue;
+        const token = findSendablePeer(db, peer.node_id)?.token ?? "";
+        streamClients.set(
+          peer.node_id,
+          openPeerStream(
+            {
+              url: conn.url,
+              ...(conn.tls ? { tls: true } : {}),
+              ...(conn.pk !== null ? { pk: conn.pk } : {}),
+              token,
+              from: identity.node_id,
+              proof: pairingProof(identity, token),
+            },
+            {
+              onEvent: dispatch,
+              onDrop: () => streamClients.delete(peer.node_id),
+            },
+          ),
+        );
+      }
+    };
+    openStreams();
+
     const outboxSender =
       options.wake === false
         ? undefined
-        : startOutboxSender(db, identity, () => browseHandle?.refresh());
+        : startOutboxSender(
+            db,
+            identity,
+            () => {
+              browseHandle?.refresh();
+              openStreams();
+            },
+            1_000,
+            hub,
+          );
 
     const wake = startWakeLoop({
       db,
@@ -423,6 +524,8 @@ export const MeshV2 = Plugin.define({
       disposed = true;
       wake.stop();
       outboxSender?.stop();
+      hub?.stop();
+      for (const s of streamClients.values()) s.stop();
       memorySyncPusher?.stop();
       liveSessions.stop();
       stopAllWorkers(db);
