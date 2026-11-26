@@ -159,11 +159,12 @@ describe("createExecutionTracker (the host's real session-status events)", () =>
     // different prompts are two different messages.
     expect(ids[0]).not.toBe(ids[1]);
   });
-  it("expires the fatigue mute — a starved box wakes again", async () => {
+  it("the fatigue cap: the reminders widen then the box goes silent, escalated once (0.33.4)", async () => {
     vi.useFakeTimers();
     try {
       const { db, prompt, prompts, sessionKnown } = setup(["s1"]);
       registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
+      registerMailbox(db, { name: "orq", session_id: "s-orq", now: 1000 });
       // An OVERSIZED body: the compact path keeps the mail UNREAD — the
       // content path would consume it and there would be nothing to starve.
       deliverMessage(db, {
@@ -177,21 +178,24 @@ describe("createExecutionTracker (the host's real session-status events)", () =>
         db,
         prompt,
         sessionKnown,
-        // No sessionRunning: this test isolates the fatigue guard — the
-        // claim re-arms at +50ms, three reminders exhaust the counter, the
-        // mute arms, then the TTL releases it.
         intervalMs: 100,
         fatigueTtlMs: 150,
       });
-      // Three prompts exhaust the fatigue counter; the box never drains.
-      await vi.advanceTimersByTimeAsync(500);
-      const muted = prompts.length;
-      expect(muted).toBe(3);
-      // Ten minutes of silence: without a mute TTL the box never prompts
-      // again and its mail starves (the orq/6admin episode).
-      await vi.advanceTimersByTimeAsync(600_000);
+      // The reminders widen (base, 2x, 4x, 8x): the 5-flash sequence
+      // exhausts at ~2.4s (150+300+600+1200), the box never drains.
+      await vi.advanceTimersByTimeAsync(3_000);
+      const before = prompts.length;
+      expect(before).toBe(5);
+      // PAST the cap: silence — no prompt ever again, the mail stays
+      // unread, and the escalation alerted orq EXACTLY once.
+      await vi.advanceTimersByTimeAsync(6_000);
       handle.stop();
-      expect(prompts.length).toBeGreaterThan(muted);
+      expect(prompts.length).toBe(before);
+      expect(unreadBoxCount(db, "a")).toBe(1);
+      const alerts = db.conn.get<{ n: number }>(
+        "SELECT COUNT(*) AS n FROM deliveries d JOIN messages m ON m.id = d.message_id WHERE d.to_box = 'orq'",
+      )?.n;
+      expect(alerts).toBe(1);
     } finally {
       vi.useRealTimers();
     }
@@ -966,15 +970,24 @@ describe("phantom unread counter (0.24.6): the displayed count is the database's
   it("quotes the fresh count, not the one retained from an earlier flash", async () => {
     const { db, prompt, prompts } = setup(["s1"]);
     registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
-    // Three OVERSIZED mails: the batch exceeds the budget → the compact path
-    // claims without consuming (the mail stays unread, the drain scenario
-    // exists).
-    for (let i = 0; i < 3; i += 1) {
+    // One OVERSIZED + two small mails: the batch exceeds the budget → the
+    // compact path claims without consuming (the mail stays unread, the
+    // drain scenario exists). After the partial drain the BIG mail remains
+    // alone: STILL oversized → the reminder takes the compact path and
+    // quotes the database's fresh count.
+    deliverMessage(db, {
+      from: "n",
+      to_box: "a",
+      subject: "m0-big",
+      body: "x".repeat(700),
+      created_at: 1000,
+    });
+    for (let i = 1; i < 3; i += 1) {
       deliverMessage(db, {
         from: "n",
         to_box: "a",
         subject: `m${i}`,
-        body: "x".repeat(300),
+        body: "x".repeat(50),
         created_at: 1000 + i,
       });
     }
@@ -994,24 +1007,27 @@ describe("phantom unread counter (0.24.6): the displayed count is the database's
     // last unread row and the flash quotes the database's 1, never the
     // retained 3.
     db.conn.run(
-      "UPDATE deliveries SET status = 'read' WHERE id IN (SELECT id FROM deliveries WHERE to_box = 'a' ORDER BY created_at ASC LIMIT 2)",
+      "UPDATE deliveries SET status = 'read' WHERE id IN (SELECT id FROM deliveries WHERE to_box = 'a' ORDER BY created_at DESC LIMIT 2)",
     );
     await new Promise((r) => setTimeout(r, 80));
     handle.stop();
-    // The reminder re-claimed the LAST unread row: a single 300c mail fits
-    // the budget → the content path CONSUMED it (the prompt carried the
-    // mail — no drain turn). The database's 0 IS the truth here; the
-    // contract under test is the QUOTED count (1, never the retained 3).
-    expect(unreadBoxCount(db, "a")).toBe(0);
+    // The reminder re-claimed the LAST unread row: the reminder NEVER
+    // consumes (the 0.33.4 — a nudge, not the delivery): the row stays
+    // unread and the flash quotes the database's 1, never the retained 3.
+    expect(unreadBoxCount(db, "a")).toBe(1);
+    expect(prompts.filter((p) => p.text.includes("mesh: 1 unread")).length).toBeGreaterThanOrEqual(
+      1,
+    );
     expect(prompts.filter((p) => p.text.includes("mesh: 3 unread")).length).toBe(threes);
     const afterAck = prompts.slice(beforeAck);
     expect(afterAck.length).toBeGreaterThanOrEqual(1);
-    // Le rappel a repris m2 SEUL (300c <= le budget): le chemin CONTENU —
-    // l'enveloppe porte le mail, jamais le compte retenu 3.
+    // Le rappel reprend le gros mail SEUL (700c > le budget): le chemin
+    // COMPACT cite le compte frais de la DB (1, jamais le retenu 3) —
+    // jamais l'enveloppe (le rappel ne consomme pas, la 0.33.4).
     for (const p of afterAck) {
-      expect(p.text).toContain('<mesh-mail kind="notify" subject="m2">');
-      expect(p.text).toContain("m2 — ");
+      expect(p.text).toContain('mesh: 1 unread — "m0-big"');
       expect(p.text).not.toContain("mesh: 3 unread");
+      expect(p.text).not.toContain("<mesh-mail");
     }
     db.close();
   });

@@ -15,7 +15,7 @@ export type MeshDb = {
 
 // Bump when a schema change needs a migration step; the version anchors future
 // migrations that cannot be expressed as idempotent `CREATE ... IF NOT EXISTS`.
-const SCHEMA_VERSION = 25;
+const SCHEMA_VERSION = 26;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS peers (
@@ -56,6 +56,8 @@ CREATE TABLE IF NOT EXISTS deliveries (
   message_id TEXT NOT NULL,
   to_box TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'unread',
+  task_id TEXT,
+  flash_count INTEGER NOT NULL DEFAULT 0,
   created_at INTEGER NOT NULL
 );
 -- v10: sender-side re-send defense (0.20.0). Pure addition: an existing v9
@@ -171,6 +173,15 @@ function migrate(conn: SqliteConn): void {
     .map((row) => row.name);
   if (!deliveryColumns.includes("flashed_at")) {
     conn.exec("ALTER TABLE deliveries ADD COLUMN flashed_at INTEGER");
+  } // v26: deliveries.task_id + deliveries.flash_count (the 0.33.4): the
+  // task avis link (the flash consumes, mesh_tasks marks read) and the
+  // PERSISTED fatigue (the reclaim window doubles per flash, the state
+  // survives the restarts — the in-memory mute maps are gone).
+  if (!deliveryColumns.includes("task_id")) {
+    conn.exec("ALTER TABLE deliveries ADD COLUMN task_id TEXT");
+  }
+  if (!deliveryColumns.includes("flash_count")) {
+    conn.exec("ALTER TABLE deliveries ADD COLUMN flash_count INTEGER NOT NULL DEFAULT 0");
   }
   // v22: mailboxes.epoch — the LOGICAL clock per name (the refonte 3.2):
   // incremented at each rebind, replaces registered_at (wall clock, the
