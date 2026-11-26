@@ -736,7 +736,7 @@ describe("token economy (0.16.0)", () => {
   it("wakes when a direct mail lands among unread fanout mail", async () => {
     const { db, prompt, prompts } = setup(["s1"]);
     registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
-    deliverMessage(db, {
+    const broadcast = deliverMessage(db, {
       from: "n",
       to_box: "a",
       subject: "status: pool broadcast",
@@ -744,6 +744,7 @@ describe("token economy (0.16.0)", () => {
       origin_id: "origin-1",
       created_at: 1000,
     });
+    if (!broadcast.ok) throw new Error("delivery failed");
     const handle = startWakeLoop({
       db,
       prompt,
@@ -757,14 +758,16 @@ describe("token economy (0.16.0)", () => {
     handle.stop();
 
     expect(prompt).toHaveBeenCalledTimes(1);
-    expect(prompts[0]?.text).toBe('mesh: 2 unread — "status: pool broadcast"');
+    expect(prompts[0]?.text).toBe(
+      `mesh: 2 unread — "status: pool broadcast" (reply id: ${broadcast.id})`,
+    );
     db.close();
   });
 
   it("wakes on fanout mail when wakePools is true (opt-in)", async () => {
     const { db, prompt, prompts } = setup(["s1"]);
     registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
-    deliverMessage(db, {
+    const broadcast = deliverMessage(db, {
       from: "n",
       to_box: "a",
       subject: "status: pool broadcast",
@@ -772,6 +775,7 @@ describe("token economy (0.16.0)", () => {
       origin_id: "origin-1",
       created_at: 1000,
     });
+    if (!broadcast.ok) throw new Error("delivery failed");
     const handle = startWakeLoop({
       db,
       prompt,
@@ -784,20 +788,23 @@ describe("token economy (0.16.0)", () => {
     handle.stop();
 
     expect(prompt).toHaveBeenCalledTimes(1);
-    expect(prompts[0]?.text).toBe('mesh: 1 unread — "status: pool broadcast"');
+    expect(prompts[0]?.text).toBe(
+      `mesh: 1 unread — "status: pool broadcast" (reply id: ${broadcast.id})`,
+    );
     db.close();
   });
 
   it("compacts the notification: unread count + first pending subject", async () => {
     const { db, prompt, prompts } = setup(["s1"]);
     registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
-    deliverMessage(db, {
+    const first = deliverMessage(db, {
       from: "n",
       to_box: "a",
       subject: "status: quota config transmise",
       body: "b",
       created_at: 1000,
     });
+    if (!first.ok) throw new Error("delivery failed");
     deliverMessage(db, {
       from: "n",
       to_box: "a",
@@ -815,7 +822,9 @@ describe("token economy (0.16.0)", () => {
     await new Promise((r) => setTimeout(r, 60));
     handle.stop();
 
-    expect(prompts[0]?.text).toBe('mesh: 2 unread — "status: quota config transmise"');
+    expect(prompts[0]?.text).toBe(
+      `mesh: 2 unread — "status: quota config transmise" (reply id: ${first.id})`,
+    );
     db.close();
   });
 
@@ -823,7 +832,14 @@ describe("token economy (0.16.0)", () => {
     const { db, prompt, prompts } = setup(["s1"]);
     registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
     const long = "x".repeat(70);
-    deliverMessage(db, { from: "n", to_box: "a", subject: long, body: "b", created_at: 1000 });
+    const sent = deliverMessage(db, {
+      from: "n",
+      to_box: "a",
+      subject: long,
+      body: "b",
+      created_at: 1000,
+    });
+    if (!sent.ok) throw new Error("delivery failed");
     const handle = startWakeLoop({
       db,
       prompt,
@@ -834,7 +850,34 @@ describe("token economy (0.16.0)", () => {
     await new Promise((r) => setTimeout(r, 60));
     handle.stop();
 
-    expect(prompts[0]?.text).toBe(`mesh: 1 unread — "${"x".repeat(59)}…"`);
+    expect(prompts[0]?.text).toBe(`mesh: 1 unread — "${"x".repeat(59)}…" (reply id: ${sent.id})`);
+    db.close();
+  });
+
+  it("the flash carries the oldest pending message id — the woken agent can reply_to it (0.30.1)", async () => {
+    const { db, prompt, prompts } = setup(["s1"]);
+    registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
+    const sent = deliverMessage(db, {
+      from: "n",
+      to_box: "a",
+      subject: "dm",
+      body: "b",
+      created_at: 1000,
+    });
+    if (!sent.ok) throw new Error("delivery failed");
+    const handle = startWakeLoop({
+      db,
+      prompt,
+      sessionKnown: () => true,
+      intervalMs: 10,
+      cooldownMs: 5000,
+    });
+    await new Promise((r) => setTimeout(r, 60));
+    handle.stop();
+
+    // Without the id in the flash the woken agent replies bare (reply_to NULL)
+    // and the waiter's mesh_wait starves to its full timeout (the 02:17 repro).
+    expect(prompts[0]?.text).toContain(`(reply id: ${sent.id})`);
     db.close();
   });
 });

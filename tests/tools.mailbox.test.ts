@@ -232,6 +232,36 @@ describe("mesh_wait", () => {
       "timeout: no reply to nope within 1s",
     );
   });
+
+  it("times out cleanly for an unregistered session (mailboxBySession null, global-only path)", async () => {
+    const { call } = setup();
+    expect(await call("mesh_wait", { id: "nope", timeout: 1 }, "s-unreg")).toBe(
+      "timeout: no reply to nope within 1s",
+    );
+  });
+
+  it("on timeout, lists the uncorrelated replies sitting in the box (the wake-path answers, 0.30.1)", async () => {
+    const { db, call } = setup();
+    await call("mesh_register", { name: "alice" }, "s1");
+    await call("mesh_register", { name: "bob" }, "s2");
+    const out = await call("mesh_send", { to: "bob", subject: "q", body: "?" }, "s1");
+    const sent = JSON.parse(out) as { id: string };
+    // The wake-path reply: NO reply_to — invisible to the wait correlation.
+    deliverMessage(db, {
+      from: "n1",
+      from_box: "bob",
+      to_box: "alice",
+      subject: "re: q",
+      body: "!",
+      created_at: Date.now() + 10,
+    });
+    const result = await call("mesh_wait", { id: sent.id, timeout: 1 }, "s1");
+    expect(result).toContain(`timeout: no reply to ${sent.id} within 1s`);
+    expect(result).toContain("uncorrelated");
+    expect(result).toContain("bob");
+    expect(result).toContain("re: q");
+    expect(result).toContain("mesh_inbox");
+  });
 });
 
 describe("mesh_journal", () => {

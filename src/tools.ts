@@ -23,6 +23,7 @@ import {
   touchMailbox,
   unreadCount,
   unreadMessages,
+  unmatchedUnread,
   waitReplyRead,
 } from "./lib/mail.js";
 import { journalQuery } from "./lib/journal.js";
@@ -644,15 +645,18 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
     {
       name: "mesh_wait",
       description:
-        "Wait for a reply to a sent message (matching its reply_to). Blocks the turn: request/response completes within it.",
+        "Wait for a reply to a sent message (matching its reply_to). Blocks the turn: request/response completes within it. Replies that arrive through the wake path may carry no reply_to — the timeout lists them so you can drain instead.",
       fields: [
         str("id", "Message id from mesh_send output"),
-        num("timeout", "Seconds to wait (default 120)"),
+        num("timeout", "Seconds to wait (default 60)"),
       ],
       execute: async (args, context) => {
         const sid = sessionID(context);
         touchMailbox(db, sid, Date.now());
-        const seconds = typeof args.timeout === "number" ? args.timeout : 120;
+        // Default 60 (0.30.1, was 120): every second a wait blocks the turn it
+        // is exposed to the host's user-prompt interrupt — and the live test
+        // showed every real reply lands within ~60s anyway.
+        const seconds = typeof args.timeout === "number" ? args.timeout : 60;
         const deadline = Date.now() + seconds * 1000;
         while (Date.now() < deadline) {
           // Atomic fetch+ack, same race fix as mesh_inbox (0.16.1).
@@ -662,7 +666,29 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
           }
           await new Promise((r) => setTimeout(r, 250));
         }
-        return `timeout: no reply to ${String(args.id)} within ${seconds}s`;
+        // On timeout, list the uncorrelated unread (0.30.1): the wake-path
+        // replies (reply_to NULL — the flash carried no id before 0.30.1) sit
+        // in the box while the waiter starves. Name them so the caller drains
+        // immediately instead of re-waiting blind.
+        const strays = unmatchedUnread(db, String(args.id), sid);
+        if (strays.length === 0) {
+          return `timeout: no reply to ${String(args.id)} within ${seconds}s`;
+        }
+        const shown = strays
+          .slice(0, 5)
+          .map(
+            (r) =>
+              `  ${r.id.slice(0, 8)} from ${r.from_box ?? r.from ?? "?"} "${r.subject}" (reply_to: ${r.reply_to ?? "none"})`,
+          );
+        const more =
+          strays.length > shown.length ? `\n  ... and ${strays.length - shown.length} more` : "";
+        return (
+          [
+            `timeout: no reply to ${String(args.id)} within ${seconds}s`,
+            `uncorrelated unread in your box — drain with mesh_inbox and reply with reply_to=<id>:`,
+            ...shown,
+          ].join("\n") + more
+        );
       },
     },
 
