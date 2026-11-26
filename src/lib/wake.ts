@@ -1,7 +1,9 @@
 import { randomUUID } from "node:crypto";
+import { watch, type FSWatcher } from "node:fs";
 import { pid } from "node:process";
 
 import type { MeshDb } from "./db.js";
+import { openSqlite } from "./sqlite.js";
 import {
   claimFlash,
   claimFlashWithContent,
@@ -124,7 +126,7 @@ export type WakeHandle = {
   stop(): void;
 };
 
-export const DEFAULT_WAKE_INTERVAL_MS = 5000;
+export const DEFAULT_WAKE_INTERVAL_MS = 30_000;
 export const DEFAULT_WAKE_COOLDOWN_MS = 60000;
 /** Consecutive prompts without the box being drained before the wake gives
  * up on it: the binding is wrong (the bound session never reads this box) —
@@ -471,11 +473,55 @@ export function startWakeLoop(options: WakeOptions): WakeHandle {
     }
   };
 
-  let timer: ReturnType<typeof setInterval> = setInterval(() => void tick(), interval);
+  // The event-driven wake (0.33 refonte P1.3): the 30s interval is the
+  // SAFETY net only. The fast path is the WAL file: fs.watch fires on every
+  // commit (any instance, any process) and the tick runs immediately. A
+  // dedicated signal connection reads PRAGMA data_version first — unchanged
+  // since the last tick means NOTHING was written anywhere, and the whole
+  // scan is skipped (the tick becomes free). fs.watch is unavailable on
+  // exotic mounts: a 250ms stat-style fallback poller keeps the fast path.
+  // :memory: stores cannot share a signal connection (each open is a
+  // DIFFERENT empty database — its data_version never moves and every tick
+  // after the first would be skipped): the gate is file-backed only.
+  const fileBacked = !options.db.path.includes(":memory:");
+  const signal = fileBacked ? openSqlite(options.db.path) : null;
+  let lastDataVersion = -1;
+  // The gate SKIPs only the WATCHER ticks (the dedup of the fast path).
+  // The INTERVAL tick is FORCED: without it the reminder can never fire —
+  // the re-claim is the only writer when the box is quiet, and a gate that
+  // blocks unwritten ticks starves the reminder circularly (caught live:
+  // 12 ticks, one prompt, dv frozen at 3).
+  const maybeTick = async (force: boolean): Promise<void> => {
+    if (signal && !force) {
+      const dv = Number(
+        signal.get<{ data_version?: number | bigint }>("PRAGMA data_version")?.data_version ?? -1,
+      );
+      if (dv === lastDataVersion) return; // nothing written anywhere since the last tick
+      lastDataVersion = dv;
+    }
+    await tick();
+  };
+  let timer: ReturnType<typeof setInterval> = setInterval(() => void maybeTick(true), interval);
+  let watcher: FSWatcher | undefined;
+  let fallbackPoller: ReturnType<typeof setInterval> | undefined;
+  try {
+    watcher = watch(`${options.db.path}-wal`, { persistent: false }, () => {
+      void maybeTick(false);
+    });
+  } catch {
+    fallbackPoller = setInterval(() => void maybeTick(true), 250);
+  }
   return {
     stop: () => {
       stopped = true;
       clearInterval(timer);
+      if (fallbackPoller) clearInterval(fallbackPoller);
+      watcher?.close();
+      if (signal) {
+        try {
+          signal.close();
+        } catch {}
+      }
     },
   };
 }

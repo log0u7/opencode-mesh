@@ -292,9 +292,32 @@ describe("wake collapse gate (at most one prompt in flight per session)", () => 
 });
 
 describe("wake loop", () => {
-  it("uses the documented defaults", () => {
-    expect(DEFAULT_WAKE_INTERVAL_MS).toBe(5000);
+  it("uses the documented defaults (the safety tick is 30s: the WAL watcher is the fast path)", () => {
+    expect(DEFAULT_WAKE_INTERVAL_MS).toBe(30_000);
     expect(DEFAULT_WAKE_COOLDOWN_MS).toBe(60000);
+  });
+
+  it("the WAL watcher flashes immediately, without any timer (the event-driven wake)", async () => {
+    // A REAL file db: the watcher watches mesh.db-wal (:memory: has none).
+    const dir = mkdtempSync(join(tmpdir(), "wake-event-"));
+    const db = openMeshDb(join(dir, "mesh.db"));
+    const prompts: Array<{ sessionID: string; text: string }> = [];
+    registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
+    const handle = startWakeLoop({
+      db,
+      prompt: async (sessionID, text) => {
+        prompts.push({ sessionID, text });
+      },
+      sessionKnown: () => true,
+      intervalMs: 30_000, // the safety tick: 30s away — NO timer delivers this
+    });
+    deliverMessage(db, { from: "n", to_box: "a", subject: "s", body: "b", created_at: 1000 });
+    // Well under the 30s safety tick: only the WAL watcher can have fired.
+    await new Promise((r) => setTimeout(r, 150));
+    handle.stop();
+    expect(prompts.length).toBe(1);
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
   });
 
   it("is inert with intervalMs <= 0", async () => {
