@@ -401,122 +401,119 @@ describe("the outbox sender: the POST path (no hub)", () => {
 });
 
 describe("P2.5 the cross-host round trip VIA THE LAZY SWEEP (the mr-review finding 1)", () => {
-  it(
-    "the reply crosses back through /task-reply and the asker's task completes",
-    { timeout: 15_000 },
-    async () => {
-      // === LE NODE A (l'asker): la row originale + l'ask queue ===
-      const dirA = mkdtempSync(join(tmpdir(), "task-a-"));
-      const dbA = openMeshDb(join(dirA, "mesh.db"));
-      registerMailbox(dbA, { name: "alice", session_id: "s-a", now: 1000 });
-      const identityA = loadOrCreateIdentity(join(dirA, "id-a"));
-      const tlsA = buildTlsMaterial(identityA);
-      const { server: serverA, port: portA } = await startMeshServer({
-        db: dbA,
-        port: 0,
-        tls: true,
-        tlsMaterial: tlsA,
-        self: { node_id: identityA.node_id, pk: identityA.public_key, hostname: "a" },
-      });
-      // === LE NODE B (le respondant): la box + le pairing mutuel ===
-      const dirB = mkdtempSync(join(tmpdir(), "task-b-"));
-      const dbB = openMeshDb(join(dirB, "mesh.db"));
-      registerMailbox(dbB, { name: "bob", session_id: "s-b", now: 1000 });
-      const identityB = loadOrCreateIdentity(join(dirB, "id-b"));
-      const tlsB = buildTlsMaterial(identityB);
-      const { server: serverB, port: portB } = await startMeshServer({
-        db: dbB,
-        port: 0,
-        tls: true,
-        tlsMaterial: tlsB,
-        self: { node_id: identityB.node_id, pk: identityB.public_key, hostname: "b" },
-      });
-      // Les pairings mutuels (les tokens + les pks).
-      pairWithToken(dbA, {
-        node_id: identityB.node_id,
-        hostname: "b",
-        fingerprint: "ff00",
-        token: "tok-shared",
-        public_key: identityB.public_key,
-        addresses: [`127.0.0.1:${portB}`],
-      });
-      pairWithToken(dbB, {
-        node_id: identityA.node_id,
-        hostname: "a",
-        fingerprint: "ff00",
-        token: "tok-shared",
-        public_key: identityA.public_key,
-        addresses: [`127.0.0.1:${portA}`],
-      });
-      // L'asker: la row task vers la box FEDEREE bob (le nom vue depuis A).
-      mergeFederatedRegistry(
-        dbA,
-        [
-          {
-            name: "bob",
-            session_id: "ses-b",
-            role: "ops",
-            pools: "[]",
-            primary_pool: null,
-            registered_at: Date.now() - 1000,
-            epoch: 2,
-          },
-        ],
-        identityB.node_id,
-      );
-      const task = askTask(dbA, { from_box: "alice", to_box: "bob", question: "quel etat?" });
-      queueTaskAsk(dbA, task, Date.now());
-
-      // === LE NODE B: /task-ask (le handler) cree le miroir ===
-      // Le payload: le from_box composite node-a/alice (le serveur l'ecrit).
-      handleTaskAsk(dbB, {
-        node_id: identityA.node_id,
-        to_box: "bob",
-        from_box: `${identityA.node_id}/alice`,
-        subject: `task ${task.id.slice(0, 8)}`,
-        body: "quel etat?",
-        origin_id: task.id,
-        type: "task-ask",
-        task: {
-          id: task.id,
-          from_box: `${identityA.node_id}/alice`,
-          to_box: "bob",
-          question: "quel etat?",
-          group_id: null,
-          deadline: null,
+  it("the reply crosses back through /task-reply and the asker's task completes", {
+    timeout: 15_000,
+  }, async () => {
+    // === LE NODE A (l'asker): la row originale + l'ask queue ===
+    const dirA = mkdtempSync(join(tmpdir(), "task-a-"));
+    const dbA = openMeshDb(join(dirA, "mesh.db"));
+    registerMailbox(dbA, { name: "alice", session_id: "s-a", now: 1000 });
+    const identityA = loadOrCreateIdentity(join(dirA, "id-a"));
+    const tlsA = buildTlsMaterial(identityA);
+    const { server: serverA, port: portA } = await startMeshServer({
+      db: dbA,
+      port: 0,
+      tls: true,
+      tlsMaterial: tlsA,
+      self: { node_id: identityA.node_id, pk: identityA.public_key, hostname: "a" },
+    });
+    // === LE NODE B (le respondant): la box + le pairing mutuel ===
+    const dirB = mkdtempSync(join(tmpdir(), "task-b-"));
+    const dbB = openMeshDb(join(dirB, "mesh.db"));
+    registerMailbox(dbB, { name: "bob", session_id: "s-b", now: 1000 });
+    const identityB = loadOrCreateIdentity(join(dirB, "id-b"));
+    const tlsB = buildTlsMaterial(identityB);
+    const { server: serverB, port: portB } = await startMeshServer({
+      db: dbB,
+      port: 0,
+      tls: true,
+      tlsMaterial: tlsB,
+      self: { node_id: identityB.node_id, pk: identityB.public_key, hostname: "b" },
+    });
+    // Les pairings mutuels (les tokens + les pks).
+    pairWithToken(dbA, {
+      node_id: identityB.node_id,
+      hostname: "b",
+      fingerprint: "ff00",
+      token: "tok-shared",
+      public_key: identityB.public_key,
+      addresses: [`127.0.0.1:${portB}`],
+    });
+    pairWithToken(dbB, {
+      node_id: identityA.node_id,
+      hostname: "a",
+      fingerprint: "ff00",
+      token: "tok-shared",
+      public_key: identityA.public_key,
+      addresses: [`127.0.0.1:${portA}`],
+    });
+    // L'asker: la row task vers la box FEDEREE bob (le nom vue depuis A).
+    mergeFederatedRegistry(
+      dbA,
+      [
+        {
+          name: "bob",
+          session_id: "ses-b",
+          role: "ops",
+          pools: "[]",
+          primary_pool: null,
+          registered_at: Date.now() - 1000,
+          epoch: 2,
         },
-      });
-      expect(getTask(dbB, task.id)?.state).toBe("submitted");
+      ],
+      identityB.node_id,
+    );
+    const task = askTask(dbA, { from_box: "alice", to_box: "bob", question: "quel etat?" });
+    queueTaskAsk(dbA, task, Date.now());
 
-      // === LE RESPONDANT repond: le miroir completed + la reply queue par le SWEEP PARESSEUX ===
-      const rep = replyTask(dbB, task.id, "bob", "build vert", "completed");
-      expect(rep.cross).toBe(true);
-      queueTaskReply(dbB, task.id, "build vert", "completed", Date.now());
-      // Le sweep PARESSEUX de B: la task-reply part par /task-reply (le routage).
-      const identityForSweep = identityB;
-      await sweepOutbox(dbB, identityForSweep, () => {});
+    // === LE NODE B: /task-ask (le handler) cree le miroir ===
+    // Le payload: le from_box composite node-a/alice (le serveur l'ecrit).
+    handleTaskAsk(dbB, {
+      node_id: identityA.node_id,
+      to_box: "bob",
+      from_box: `${identityA.node_id}/alice`,
+      subject: `task ${task.id.slice(0, 8)}`,
+      body: "quel etat?",
+      origin_id: task.id,
+      type: "task-ask",
+      task: {
+        id: task.id,
+        from_box: `${identityA.node_id}/alice`,
+        to_box: "bob",
+        question: "quel etat?",
+        group_id: null,
+        deadline: null,
+      },
+    });
+    expect(getTask(dbB, task.id)?.state).toBe("submitted");
 
-      // === L'ASKER: la row originale completed + la notification alice ===
-      // L'etat FINAL de la tache originale: le poll (le sweep + le POST + la
-      // notification peuvent prendre quelques secondes sous la charge).
-      let taskState = "";
-      for (let i = 0; i < 60; i += 1) {
-        taskState = getTask(dbA, task.id)?.state ?? "";
-        if (taskState === "completed") break;
-        await new Promise((r) => setTimeout(r, 200));
-      }
-      expect(taskState).toBe("completed");
-      const got = dbA.conn.get<{ body: string }>(
-        "SELECT m.body FROM messages m JOIN deliveries d ON d.message_id = m.id WHERE d.to_box = 'alice'",
-      )!;
-      expect(got.body).toContain("build vert");
-      serverA.close();
-      serverB.close();
-      dbA.close();
-      dbB.close();
-      rmSync(dirA, { recursive: true, force: true });
-      rmSync(dirB, { recursive: true, force: true });
-    },
-    20_000,
-  );
+    // === LE RESPONDANT repond: le miroir completed + la reply queue par le SWEEP PARESSEUX ===
+    const rep = replyTask(dbB, task.id, "bob", "build vert", "completed");
+    expect(rep.cross).toBe(true);
+    queueTaskReply(dbB, task.id, "build vert", "completed", Date.now());
+    // Le sweep PARESSEUX de B: la task-reply part par /task-reply (le routage).
+    const identityForSweep = identityB;
+    await sweepOutbox(dbB, identityForSweep, () => {});
+
+    // === L'ASKER: la row originale completed + la notification alice ===
+    // L'etat FINAL de la tache originale: le poll (le sweep + le POST + la
+    // notification peuvent prendre quelques secondes sous la charge).
+    let taskState = "";
+    for (let i = 0; i < 60; i += 1) {
+      taskState = getTask(dbA, task.id)?.state ?? "";
+      if (taskState === "completed") break;
+      await new Promise((r) => setTimeout(r, 200));
+    }
+    expect(taskState).toBe("completed");
+    const got = dbA.conn.get<{ body: string }>(
+      "SELECT m.body FROM messages m JOIN deliveries d ON d.message_id = m.id WHERE d.to_box = 'alice'",
+    )!;
+    expect(got.body).toContain("build vert");
+    serverA.close();
+    serverB.close();
+    dbA.close();
+    dbB.close();
+    rmSync(dirA, { recursive: true, force: true });
+    rmSync(dirB, { recursive: true, force: true });
+  });
 });
