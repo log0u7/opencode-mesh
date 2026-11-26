@@ -831,3 +831,76 @@ describe("GET /metrics", () => {
     db.close();
   });
 });
+
+describe("the task wire routes (refonte P2.5)", () => {
+  it("POST /task-ask creates the mirror + delivers the task message; POST /task-reply applies back home", async () => {
+    const { db, server, url } = await start();
+    registerMailbox(db, { name: "alice", session_id: "s-alice", now: 1000 });
+    pairWithToken(db, {
+      node_id: "peer-1",
+      hostname: "laptop",
+      fingerprint: "ff00",
+      token: "tok-peer1",
+    });
+    // 401: le proof manque.
+    const unauthorized = await post(url, "/task-ask", { task: { id: "t1", to_box: "alice" } });
+    expect(unauthorized.status).toBe(401);
+    // 400: la payload mal forme.
+    const bad = await post(url, "/task-ask", { task: {} }, "tok-peer1");
+    expect(bad.status).toBe(400);
+    // Le happy path: le miroir + le message dans la box locale.
+    const ok = await post(
+      url,
+      "/task-ask",
+      {
+        from_box: "alice",
+        task: {
+          id: "task-abc",
+          to_box: "alice",
+          question: "quel etat?",
+          group_id: null,
+          deadline: null,
+        },
+      },
+      "tok-peer1",
+    );
+    expect(ok.status).toBe(200);
+    const mirror = db.conn.get<{ state: string; from_box: string }>(
+      "SELECT state, from_box FROM tasks WHERE id = 'task-abc'",
+    )!;
+    expect(mirror.state).toBe("submitted");
+    expect(mirror.from_box).toBe("peer-1/alice");
+    expect(
+      db.conn.get<{ n: number }>("SELECT COUNT(*) AS n FROM deliveries WHERE to_box = 'alice'")?.n,
+    ).toBe(1);
+    // 404: la reply sur une tache inconnue.
+    const unknown = await post(
+      url,
+      "/task-reply",
+      { task: { id: "task-nope", result: "x", state: "completed" } },
+      "tok-peer1",
+    );
+    expect(unknown.status).toBe(404);
+    // Le happy path reply: la row originale appliquee.
+    db.conn.run(
+      `INSERT INTO tasks (id, from_box, to_box, question, state, created_at, updated_at)
+       VALUES ('task-xyz', 'alice', 'bob-remote', 'q', 'submitted', 1, 1)`,
+    );
+    const reply = await post(
+      url,
+      "/task-reply",
+      { task: { id: "task-xyz", result: "tout vert", state: "completed" } },
+      "tok-peer1",
+    );
+    expect(reply.status).toBe(200);
+    const applied = db.conn.get<{ state: string }>(
+      "SELECT state FROM tasks WHERE id = 'task-xyz'",
+    )!;
+    expect(applied.state).toBe("completed");
+    // La notification locale (l'asker alice est sur CE node).
+    expect(
+      db.conn.get<{ n: number }>("SELECT COUNT(*) AS n FROM deliveries WHERE to_box = 'alice'")?.n,
+    ).toBe(2);
+    server.close();
+  });
+});

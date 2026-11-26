@@ -699,6 +699,19 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
           group_id: typeof args.group === "string" && args.group.length > 0 ? args.group : null,
           deadline,
         });
+        // A FEDERATED target (refonte P2.5): the ask crosses via the outbox;
+        // the reply comes back through /task-reply.
+        if (!mailboxByName(db, to)) {
+          const fed = federatedByName(db, to);
+          if (!fed || fed.node_id === null) return `error: unknown mailbox/pool ${to}`;
+          queueTaskAsk(db, task, Date.now());
+          await sweepOutbox(db, identity, () => mesh.rebrowse?.());
+          return JSON.stringify(
+            { task_id: task.id, group: task.group_id, queued_for: fed.node_id.slice(0, 8) },
+            null,
+            2,
+          );
+        }
         return JSON.stringify(
           { task_id: task.id, group: task.group_id, delivered_to: task.to_box },
           null,

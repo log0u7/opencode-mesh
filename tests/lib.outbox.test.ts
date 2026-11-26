@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { openMeshDb } from "../src/lib/db.js";
+import { loadOrCreateIdentity, pairingProof } from "../src/lib/identity.js";
+import { buildTlsMaterial } from "../src/lib/tls.js";
+import { startMeshServer } from "../src/lib/serve.js";
+import { pairWithToken } from "../src/lib/peers.js";
 import {
   askTask,
   getTask,
@@ -12,6 +19,7 @@ import {
   handleTaskAsk,
   queueTaskAsk,
   queueTaskReply,
+  startOutboxSender,
   markOutboxFailed,
   OUTBOX_BACKOFF_BASE_MS,
   OUTBOX_MAX_ATTEMPTS,
@@ -177,5 +185,155 @@ describe("P2.5 (refonte): the cross-host tasks — the asker's node is the sourc
     expect(got.body).toContain("build vert");
     a.close();
     b.close();
+  });
+});
+
+describe("the outbox sender (refonte P2.6): stream-first + the retries", () => {
+  it("startOutboxSender: an open stream gets the push and the row marks sent", async () => {
+    const db = openMeshDb(":memory:");
+    const now = Date.now();
+    const pushed: unknown[] = [];
+    const hub = {
+      isOpen: (id: string) => id === "peer-1",
+      push: (id: string, event: unknown) => {
+        pushed.push(event);
+        return 1;
+      },
+    };
+    const sender = startOutboxSender(db, { node_id: "node-me" } as never, () => {}, 20, hub);
+    queueOutbox(db, payload({ origin_id: "o-stream" }), now);
+    await new Promise((r) => setTimeout(r, 120));
+    sender.stop();
+    expect(pushed.length).toBeGreaterThanOrEqual(1);
+    const state = db.conn.get<{ state: string }>("SELECT state FROM outbox")!;
+    expect(state.state).toBe("sent");
+    db.close();
+  });
+
+  it("startOutboxSender without a hub: the POST fallback path runs (no row for an unreachable peer)", async () => {
+    const db = openMeshDb(":memory:");
+    const now = Date.now();
+    const sender = startOutboxSender(db, { node_id: "node-me" } as never, () => {}, 20);
+    queueOutbox(db, payload({ origin_id: "o-nostream", node_id: "ghost-node" }), now);
+    await new Promise((r) => setTimeout(r, 150));
+    sender.stop();
+    // Unreachable: attempts grew (the backoff), the row stays queued.
+    const row = db.conn.get<{ state: string; attempts: number }>(
+      "SELECT state, attempts FROM outbox",
+    )!;
+    expect(row.state).toBe("queued");
+    expect(row.attempts).toBeGreaterThanOrEqual(1);
+    db.close();
+  });
+});
+
+describe("P2.5 (refonte): the task-reply cross path — queueTaskReply parses the node", () => {
+  it("the asker's remote reference node/box drives the delivery", () => {
+    const db = openMeshDb(":memory:");
+    registerMailbox(db, { name: "bob-remote", session_id: "s-b", now: 1000 });
+    // Le miroir: from_box = le composite node/box (le /task-ask l'ecrit).
+    const now = Date.now();
+    db.conn.run(
+      `INSERT INTO tasks (id, from_box, to_box, group_id, question, result, state, created_at, updated_at, deadline)
+       VALUES ('task-x', 'node-a/alice', 'bob-remote', NULL, 'q', NULL, 'submitted', ?, ?, NULL)`,
+      [now, now],
+    );
+    const id = queueTaskReply(db, "task-x", "reponse", "completed", now);
+    expect(id).not.toBeNull();
+    const row = db.conn.get<{ payload: string }>(
+      "SELECT payload FROM outbox WHERE json_extract(payload,'$.type') = 'task-reply'",
+    )!;
+    const p = JSON.parse(row.payload);
+    expect(p.node_id).toBe("node-a");
+    expect(p.to_box).toBe("alice");
+    expect(p.task.state).toBe("completed");
+    db.close();
+  });
+
+  it("queueTaskReply on a LOCAL task returns null (the notification is local)", () => {
+    const db = openMeshDb(":memory:");
+    registerMailbox(db, { name: "alice", session_id: "s1", now: 1000 });
+    registerMailbox(db, { name: "bob", session_id: "s2", now: 1000 });
+    const t = askTask(db, { from_box: "alice", to_box: "bob", question: "q" });
+    // replyTask local: la notification part directement — queueTaskReply ne
+    // double pas.
+    expect(queueTaskReply(db, t.id, "x", "completed", Date.now())).toBeNull();
+    db.close();
+  });
+});
+
+describe("the outbox sender: the REAL wire delivery (the POST path)", () => {
+  it("the sender delivers a queued row through a REAL paired server", {
+    timeout: 10_000,
+  }, async () => {
+    const dir = mkdtempSync(join(tmpdir(), "outbox-real-"));
+    // A: le recepteur (le serveur reel + la box alice).
+    const dbA = openMeshDb(join(dir, "a.db"));
+    registerMailbox(dbA, { name: "alice", session_id: "s-a", now: 1000 });
+    const identityA = loadOrCreateIdentity(join(dir, "id-a"));
+    // TLS: la flotte parle TLS-only (0.11+) — le serveur A aussi (le sender
+    // B parle TLS par defaut: le plain repond "plaintext-peer").
+    const tlsA = buildTlsMaterial(identityA);
+    const { server, port } = await startMeshServer({
+      db: dbA,
+      port: 0,
+      tls: true,
+      tlsMaterial: tlsA,
+      self: { node_id: identityA.node_id, pk: identityA.public_key, hostname: "a" },
+    });
+    // B: le demandeur (le sender) — le pairing avec A (le token + la pk pinnee).
+    const dbB = openMeshDb(join(dir, "b.db"));
+    const identityB = loadOrCreateIdentity(join(dir, "id-b"));
+    pairWithToken(dbB, {
+      node_id: identityA.node_id,
+      hostname: "a",
+      fingerprint: "ff00",
+      token: "tok-a",
+      public_key: identityA.public_key,
+      addresses: [`127.0.0.1:${port}`],
+      pk: identityA.public_key,
+    });
+    // Le pairing MUTUEL: A a besoin de la row peer pour B (l'auth du wire
+    // verifie le bearer + le proof signe par B contre la cle pinnee de B).
+    pairWithToken(dbA, {
+      node_id: identityB.node_id,
+      hostname: "b",
+      fingerprint: "ff00",
+      token: "tok-a",
+      public_key: identityB.public_key,
+    });
+    const sender = startOutboxSender(dbB, identityB, () => {}, 50);
+    queueOutbox(
+      dbB,
+      payload({ origin_id: "o-real", node_id: identityA.node_id, to_box: "alice" }),
+      Date.now(),
+    );
+    // La livraison: le mail atterrit dans la box alice chez A, la row passe sent.
+    let delivered = false;
+    for (let i = 0; i < 40; i += 1) {
+      await new Promise((r) => setTimeout(r, 100));
+      const n = dbA.conn.get<{ n: number }>(
+        "SELECT COUNT(*) AS n FROM deliveries WHERE to_box = 'alice'",
+      )?.n;
+      if (n === 1) {
+        delivered = true;
+        break;
+      }
+    }
+    sender.stop();
+    server.close();
+    const dbgRow = dbB.conn.get<{ state: string; attempts: number; last_error: string }>(
+      "SELECT state, attempts, last_error FROM outbox",
+    );
+    const dbgMsgs = dbA.conn.all<{ subject: string; status: string }>(
+      "SELECT subject, status FROM messages",
+    );
+    console.log("DBG outbox:", JSON.stringify(dbgRow), "msgs:", JSON.stringify(dbgMsgs));
+    expect(delivered).toBe(true);
+    const state = dbB.conn.get<{ state: string }>("SELECT state FROM outbox")!;
+    expect(state.state).toBe("sent");
+    dbA.close();
+    dbB.close();
+    rmSync(dir, { recursive: true, force: true });
   });
 });

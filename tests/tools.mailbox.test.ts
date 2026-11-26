@@ -544,3 +544,55 @@ describe("P4 (refonte): the blackboard — status is shared state, not DMs", () 
     db.close();
   });
 });
+
+describe("P2 (refonte): the ask/reply tools — the federated ask queues, the cross reply queues back", () => {
+  it("mesh_ask to a federated box queues task-ask; mesh_reply on the mirror queues task-reply", async () => {
+    const { db, call } = setup();
+    await call("mesh_register", { name: "alice" }, "s1");
+    mergeFederatedRegistry(
+      db,
+      [
+        {
+          name: "bob-remote",
+          session_id: "ses-b",
+          role: "ops",
+          pools: "[]",
+          primary_pool: null,
+          registered_at: Date.now() - 1000,
+          epoch: 2,
+        },
+      ],
+      "node-b",
+    );
+    const out = await call("mesh_ask", { to: "bob-remote", body: "quel etat?" }, "s1");
+    const parsed = JSON.parse(out) as { task_id: string; queued_for: string };
+    expect(parsed.queued_for).toBe("node-b");
+    // La row task-ask dans l'outbox.
+    const askRow = db.conn.get<{ payload: string }>(
+      "SELECT payload FROM outbox WHERE json_extract(payload,'$.type') = 'task-ask'",
+    )!;
+    expect(JSON.parse(askRow.payload).task.id).toBe(parsed.task_id);
+
+    // NOTE: le miroir + la reply cross vivent sur l'AUTRE node (l'id est le
+    // meme par design) — le round-trip complet est couvre par
+    // tests/lib.outbox.test.ts (le cross-host describe).
+    db.close();
+  });
+
+  it("mesh_tasks lists the asked and received tasks; mesh_board get/set round trip", async () => {
+    const { db, call } = setup();
+    await call("mesh_register", { name: "alice" }, "s1");
+    await call("mesh_register", { name: "bob" }, "s2");
+    const out = await call("mesh_ask", { to: "bob", body: "q?" }, "s1");
+    const parsed = JSON.parse(out) as { task_id: string };
+    const listed = String(await call("mesh_tasks", {}, "s1"));
+    expect(listed).toContain(parsed.task_id.slice(0, 8));
+    expect(listed).toContain("submitted");
+    // mesh_board: le set sans reveil, le get une ligne.
+    await call("mesh_board_set", { key: "state", value: "live" }, "s1");
+    const board = String(await call("mesh_board_get", {}, "s1"));
+    expect(board).toContain("alice");
+    expect(board).toContain("state=live");
+    db.close();
+  });
+});
