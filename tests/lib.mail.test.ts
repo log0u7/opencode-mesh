@@ -473,6 +473,56 @@ describe("wake gates (0.16.0 token economy)", () => {
   });
 });
 
+describe("P2 follow-up (0.31.0, the mr-review findings)", () => {
+  it("an EMPTY push retires ALL of the sender's federated rows", () => {
+    const db = openMeshDb(":memory:");
+    mergeFederatedRegistry(
+      db,
+      [
+        {
+          name: "gone",
+          session_id: "ses-gone",
+          role: null,
+          pools: "[]",
+          primary_pool: null,
+          registered_at: Date.now() - 1000,
+        },
+      ],
+      "node-b",
+    );
+    expect(federatedByName(db, "gone")).not.toBeNull();
+    // The sender's next push carries NOTHING: its rows must die (the NULL
+    // placeholder deleted nothing, stale rows kept routing to a dead box).
+    const applied = mergeFederatedRegistry(db, [], "node-b");
+    expect(applied).toBe(0);
+    expect(federatedByName(db, "gone")).toBeNull();
+    db.close();
+  });
+
+  it("a long-lived box (registered_at 2 days old) still upserts as federated", () => {
+    const db = openMeshDb(":memory:");
+    const applied = mergeFederatedRegistry(
+      db,
+      [
+        {
+          name: "old-orq",
+          session_id: "ses-old",
+          role: "lead",
+          pools: "[]",
+          primary_pool: null,
+          registered_at: Date.now() - 2 * 24 * 60 * 60 * 1000,
+        },
+      ],
+      "node-b",
+    );
+    // registered_at is the ORIGINAL registration time and never moves: the
+    // past bound would drop exactly the long-lived federation targets.
+    expect(applied).toBe(1);
+    expect(federatedByName(db, "old-orq")).not.toBeNull();
+    db.close();
+  });
+});
+
 describe("resend dedup window (0.29.0: the minutes-apart re-send class)", () => {
   it("collapses a re-send sent minutes apart (the 6admin-to-orq episode)", () => {
     const db = openMeshDb(":memory:");

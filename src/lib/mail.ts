@@ -798,10 +798,10 @@ export type FederatedRegistryRow = {
  * foreign — sessionKnown false in the wake loop). The sender's own rows are
  * authoritative for its names: the merge is idempotent per row.
  */
-/** The inbound registered_at acceptance window (the PO fix 2): the sender's
- * clock must be within [now - 1h, now + 5 min skew] — an unbounded timestamp
- * (9e15, or a clock ahead) would steal every local name via the LWW. */
-const FEDERATED_AT_PAST_TOLERANCE = 60 * 60 * 1000;
+/** The inbound registered_at acceptance bound (the PO fix 2): only the
+ * FUTURE side is bounded — an unbounded timestamp (9e15, a clock ahead)
+ * would steal every local name via the LWW. The past side is unbounded:
+ * registered_at is the original registration time and never moves. */
 const FEDERATED_AT_FUTURE_SKEW = 5 * 60 * 1000;
 /** A local box with a fresh last_seen is a LIVE session: its name cannot be
  * taken by a foreign registry row (the two-orq fight resolves: each keeps
@@ -816,10 +816,12 @@ function federatedRowValid(row: FederatedRegistryRow, now: number): boolean {
   if (typeof row.session_id !== "string" || row.session_id.length === 0) return false;
   if (row.session_id.length > 128) return false;
   if (typeof row.registered_at !== "number" || !Number.isFinite(row.registered_at)) return false;
-  if (
-    row.registered_at < now - FEDERATED_AT_PAST_TOLERANCE ||
-    row.registered_at > now + FEDERATED_AT_FUTURE_SKEW
-  ) {
+  // Only the FUTURE skew is bounded (the 9e15 steal class). No past bound:
+  // registered_at is the ORIGINAL registration time and never moves — a
+  // long-lived box (orq, stable names) is older than any tolerance, and the
+  // takeover LWW guard (row.registered_at <= localAt) already refuses a
+  // backdated row for a name we own.
+  if (row.registered_at > now + FEDERATED_AT_FUTURE_SKEW) {
     return false;
   }
   if (typeof row.pools !== "string") return false;
@@ -853,12 +855,20 @@ export function mergeFederatedRegistry(
   // leaves half a batch (rows deleted, their replacements absent).
   return withTransaction(db, () => {
     const pushed = new Set(rows.filter((r) => federatedRowValid(r, now)).map((r) => r.name));
-    db.conn.run(
-      "DELETE FROM mailboxes WHERE node_id = ? AND name NOT IN (" +
-        (pushed.size > 0 ? Array.from(pushed, () => "?").join(",") : "NULL") +
-        ")",
-      [senderNodeId, ...pushed],
-    );
+    // An EMPTY push retires ALL of the sender's federated rows (the full-state
+    // contract): the name NOT IN (NULL) placeholder would compare NULL against
+    // every row and delete NOTHING — stale rows keep routing cross-node DMs
+    // to a dead box (the mr-review finding).
+    if (pushed.size === 0) {
+      db.conn.run("DELETE FROM mailboxes WHERE node_id = ?", [senderNodeId]);
+    } else {
+      db.conn.run(
+        "DELETE FROM mailboxes WHERE node_id = ? AND name NOT IN (" +
+          Array.from(pushed, () => "?").join(",") +
+          ")",
+        [senderNodeId, ...pushed],
+      );
+    }
     let applied = 0;
     for (const row of rows) {
       if (!federatedRowValid(row, now)) continue;
