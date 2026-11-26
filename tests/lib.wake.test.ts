@@ -5,7 +5,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { openMeshDb } from "../src/lib/db.js";
-import { deliverMessage, joinPool, registerMailbox, unreadBoxCount } from "../src/lib/mail.js";
+import {
+  claimFlash,
+  deliverMessage,
+  inboxRead,
+  joinPool,
+  registerMailbox,
+  unreadBoxCount,
+} from "../src/lib/mail.js";
 import {
   startWakeLoop,
   createExecutionTracker,
@@ -128,13 +135,12 @@ describe("createExecutionTracker (the host's real session-status events)", () =>
       prompt,
       sessionKnown,
       intervalMs: 50,
-      cooldownMs: 20,
+      fatigueTtlMs: 30,
     });
-    await new Promise((r) => setTimeout(r, 150));
+    await new Promise((r) => setTimeout(r, 200));
     handle.stop();
-    // The exact count is timing-dependent (the interval/cooldown interplay
-    // drifts across node versions): the invariant is AT LEAST two prompts,
-    // each carrying its own generated id.
+    // One delivery = one claim; the reminder re-claims at +fatigueTtl. The
+    // invariant is AT LEAST two prompts, each carrying its own generated id.
     expect(prompt.mock.calls.length).toBeGreaterThanOrEqual(2);
     const ids = prompt.mock.calls.map((c) => (c as unknown[])[2]);
     for (const id of ids) {
@@ -154,11 +160,11 @@ describe("createExecutionTracker (the host's real session-status events)", () =>
         db,
         prompt,
         sessionKnown,
-        // No sessionRunning: the collapse gate disengages — this test isolates
-        // the fatigue mute (cooldown 50 < interval 100 → three prompts then
-        // the mute).
+        // No sessionRunning: this test isolates the fatigue guard — the
+        // claim re-arms at +50ms, three reminders exhaust the counter, the
+        // mute arms, then the TTL releases it.
         intervalMs: 100,
-        cooldownMs: 50,
+        fatigueTtlMs: 150,
       });
       // Three prompts exhaust the fatigue counter; the box never drains.
       await vi.advanceTimersByTimeAsync(500);
@@ -176,35 +182,31 @@ describe("createExecutionTracker (the host's real session-status events)", () =>
 });
 
 describe("wake collapse gate (at most one prompt in flight per session)", () => {
-  it("does not queue a second prompt while the first is in flight", async () => {
+  it("the claim batches: a drain + two fresh mails produce ONE prompt naming both (the phantom class)", async () => {
     const { db, prompt, prompts, sessionKnown } = setup(["s1"]);
-    const running = false;
     registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
     deliverMessage(db, { from: "n", to_box: "a", subject: "s", body: "b", created_at: 1000 });
     const handle = startWakeLoop({
       db,
       prompt,
       sessionKnown,
-      sessionRunning: () => running,
       intervalMs: 10,
-      cooldownMs: 20,
+      fatigueTtlMs: 60_000,
     });
     await new Promise((r) => setTimeout(r, 80));
     const first = prompts.length;
-    expect(first).toBeGreaterThanOrEqual(1);
+    expect(first).toBe(1);
     // The mail drains (any path: the queue delivered a DIFFERENT turn, a
-    // journal read, ...) while the first prompt's own turn never ran. The
-    // fatigue and cooldown maps reset on the drain; a fresh mail arrives.
-    // Without the collapse gate this fires a second prompt whose inbox is
-    // already empty when its turn runs — the phantom class.
+    // journal read, ...) and two fresh mails land. The claim batches them:
+    // ONE prompt whose count is the database's (the fresh recount), never
+    // the stale retained one — and never one prompt per mail.
     db.conn.run("UPDATE deliveries SET status = 'read' WHERE to_box = 'a'");
-    // Two fresh mails: unread must GROW past the stale previous (1) so the
-    // fatigue mute cannot explain the silence — only the collapse gate can.
     deliverMessage(db, { from: "n", to_box: "a", subject: "s2", body: "b2", created_at: 2000 });
     deliverMessage(db, { from: "n", to_box: "a", subject: "s3", body: "b3", created_at: 2001 });
     await new Promise((r) => setTimeout(r, 200));
     handle.stop();
-    expect(prompts.length).toBe(first);
+    expect(prompts.length).toBe(first + 1);
+    expect(prompts[prompts.length - 1]?.text).toContain("2 unread");
   });
 
   it("clears the in-flight gate when the delivered prompt's turn runs", async () => {
@@ -243,23 +245,23 @@ describe("wake collapse gate (at most one prompt in flight per session)", () => 
         db,
         prompt,
         sessionKnown,
-        // Never busy: the delivery receipt never shows — the TTL is the only
-        // escape (a turn shorter than the poll interval hides its busy event).
         sessionRunning: () => false,
         intervalMs: 100,
-        cooldownMs: 50,
+        fatigueTtlMs: 120_000,
       });
       await vi.advanceTimersByTimeAsync(100);
       expect(prompts.length).toBe(1);
-      // Two fresh mails: ungated, the growth would fire again.
+      // Two fresh mails: their NULL rows claim as a NEW batch (one prompt,
+      // never one per mail).
       deliverMessage(db, { from: "n", to_box: "a", subject: "s2", body: "b2", created_at: 2000 });
       deliverMessage(db, { from: "n", to_box: "a", subject: "s3", body: "b3", created_at: 2001 });
       await vi.advanceTimersByTimeAsync(60_000);
-      expect(prompts.length).toBe(1);
-      // Past the TTL the gate releases: at most one duplicate flash per TTL.
+      expect(prompts.length).toBe(2);
+      // The already-flashed rows stay silent until the reminder TTL (2 min),
+      // then re-claim ONCE — the reminder, not a spam loop.
       await vi.advanceTimersByTimeAsync(70_000);
       handle.stop();
-      expect(prompts.length).toBe(2);
+      expect(prompts.length).toBe(3);
     } finally {
       vi.useRealTimers();
     }
@@ -440,24 +442,31 @@ describe("wake loop", () => {
 });
 
 describe("fatigue guard", () => {
-  it("stops prompting after MAX_UNDRAINED_PROMPTS cycles without drain", async () => {
-    const { db, prompt, prompts } = setup(["s1"]);
-    registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
-    deliverMessage(db, { from: "n", to_box: "a", subject: "s", body: "b", created_at: 1000 });
-    const handle = startWakeLoop({
-      db,
-      prompt,
-      sessionKnown: () => true,
-      intervalMs: 10,
-      cooldownMs: 0,
-      maxUndrainedPrompts: 3,
-    });
-    await new Promise((r) => setTimeout(r, 120));
-    handle.stop();
-
-    // Prompted exactly 3 times, then gave up (count never drained).
-    expect(prompts.length).toBe(3);
-    db.close();
+  it("bounds the reminder rate after MAX undrained prompts (no starvation, no spam)", async () => {
+    vi.useFakeTimers();
+    try {
+      const { db, prompt, prompts } = setup(["s1"]);
+      registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
+      deliverMessage(db, { from: "n", to_box: "a", subject: "s", body: "b", created_at: 1000 });
+      const handle = startWakeLoop({
+        db,
+        prompt,
+        sessionKnown: () => true,
+        intervalMs: 100,
+        fatigueTtlMs: 1000,
+        maxUndrainedPrompts: 3,
+      });
+      // Ten minutes without a drain: the claim re-arms at the reminder TTL
+      // (doubling per mute cycle) — the box is reminded (never starves, the
+      // orq/6admin episode) and the rate stays far under the tick rate.
+      await vi.advanceTimersByTimeAsync(10_000);
+      handle.stop();
+      expect(prompts.length).toBeGreaterThanOrEqual(4);
+      expect(prompts.length).toBeLessThanOrEqual(12);
+      db.close();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("resets the fatigue counter when the box gets drained", async () => {
@@ -890,7 +899,7 @@ describe("phantom unread counter (0.24.6): the displayed count is the database's
       prompt,
       sessionKnown: () => true,
       intervalMs: 10,
-      cooldownMs: 0,
+      fatigueTtlMs: 30,
     });
     await new Promise((r) => setTimeout(r, 40));
     expect(prompts[0]?.text).toContain("mesh: 3 unread");
@@ -948,10 +957,10 @@ describe("the active escalation (0.30.0)", () => {
         // One minute per tick: the mute cycles (minutes) advance in a few
         // dozen ticks instead of tens of thousands.
         intervalMs: 60_000,
-        cooldownMs: 0,
+        fatigueTtlMs: 60_000,
       });
-      // The first window: 3 prompts exhaust the fatigue counter (the mute
-      // begins, cycle 0).
+      // One minute per tick: the claim re-arms on the next tick, three
+      // reminders exhaust the counter (the mute begins, cycle 0).
       await vi.advanceTimersByTimeAsync(3 * 60_000);
       // The mute TTL doubles per cycle: 10 min -> 20 -> 40 -> 80. The 4th
       // expiry crosses ESCALATE_AFTER_MUTE_CYCLES (3): the alert fires once.
@@ -989,7 +998,7 @@ describe("the active escalation (0.30.0)", () => {
         sessionKnown: () => true,
         sessionRunning: () => false,
         intervalMs: 60_000,
-        cooldownMs: 0,
+        fatigueTtlMs: 60_000,
       });
       await vi.advanceTimersByTimeAsync(3 * 60_000);
       await vi.advanceTimersByTimeAsync(11 * 60_000);
@@ -1054,5 +1063,64 @@ describe("P5 (0.31.0): debugWake — the flash leaves a diagnostic line", () => 
     expect(log).not.toContain("flash");
     db.close();
     rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+describe("single-flight flash (0.32.0): the claim lives in the DB, not in instance memory", () => {
+  it("two wake loops on the same DB prompt a fresh delivery ONCE (the double-flash class)", async () => {
+    const db = openMeshDb(":memory:");
+    registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
+    const prompts: string[] = [];
+    const h1 = startWakeLoop({
+      db,
+      prompt: async (_sid: string, text: string) => {
+        prompts.push("h1:" + text);
+      },
+      sessionKnown: () => true,
+      intervalMs: 10,
+      cooldownMs: 5000,
+    });
+    const h2 = startWakeLoop({
+      db,
+      prompt: async (_sid: string, text: string) => {
+        prompts.push("h2:" + text);
+      },
+      sessionKnown: () => true,
+      intervalMs: 10,
+      cooldownMs: 5000,
+    });
+    deliverMessage(db, { from: "n", to_box: "a", subject: "dm", body: "b", created_at: 1000 });
+    await new Promise((r) => setTimeout(r, 80));
+    h1.stop();
+    h2.stop();
+    // Two instances, each iterating ALL boxes with per-instance gates: the
+    // 6admin double-flash (03:33, two identical replies 13s apart). The
+    // claim is DB-arbitrated — one winner.
+    expect(prompts).toHaveLength(1);
+    db.close();
+  });
+
+  it("claimFlash: NULL rows claim at any staleness, flashed rows only past the TTL", () => {
+    const db = openMeshDb(":memory:");
+    registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
+    deliverMessage(db, { from: "n", to_box: "a", subject: "dm", body: "b", created_at: 1000 });
+    const now = Date.now();
+    // Fresh (NULL) rows claim regardless of the staleness — the loop passes
+    // the reminder TTL, never 0.
+    expect(claimFlash(db, "a", now, 10 * 60 * 1000).claimed).toBe(1);
+    // Flashed NOW: not stale after 10 minutes — no re-claim (the anti-spam).
+    expect(claimFlash(db, "a", now + 1000, 10 * 60 * 1000).claimed).toBe(0);
+    // The reminder path: rows flashed before the TTL are re-claimed.
+    expect(claimFlash(db, "a", now + 60 * 60 * 1000, 30 * 60 * 1000).claimed).toBe(1);
+    db.close();
+  });
+
+  it("a delivery read between ticks never flashes (the claim sees nothing fresh)", () => {
+    const db = openMeshDb(":memory:");
+    registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
+    deliverMessage(db, { from: "n", to_box: "a", subject: "dm", body: "b", created_at: 1000 });
+    inboxRead(db, "s1", true);
+    expect(claimFlash(db, "a", Date.now(), 0).claimed).toBe(0);
+    db.close();
   });
 });
