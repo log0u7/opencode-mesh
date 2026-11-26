@@ -35,30 +35,46 @@ jobs:
       - name: Build
         run: pnpm build
 
-      - name: Publish (trusted publishing, OIDC)
-        run: pnpm publish --access public --no-git-checks
-
-      # The 0.31.0 incident (2026-11-26): the publish step printed its success
-      # line, the run went green — and the registry LOST the tarball (GET 404
-      # on the official dist URL). A success line is not proof: the job only
-      # passes when the registry actually serves the tarball (the packument
-      # write and the blob can lag or drop independently, so poll both).
-      - name: Verify the registry serves the tarball
+      # The 0.31.0 + 0.32.0 incidents (2026-11-26): the publish step printed
+      # its success line — and the registry LOST the tarball (GET 404 on the
+      # official dist URL) TWICE in three publishes. A success line is not
+      # proof: the job only passes when the registry actually serves the
+      # tarball. When it does not, the publish RETRIES (up to 3 rounds: the
+      # loss is intermittent, a retry usually lands) — the release heals
+      # itself instead of dying red and waiting for a human.
+      - name: Publish with registry proof (up to 3 rounds)
         run: |
           PKG="$(node -p "require('./package.json').name")"
           VER="$(node -p "require('./package.json').version")"
-          OK=0
-          for i in $(seq 1 18); do
-            URL="$(npm view "$PKG@$VER" dist.tarball 2>/dev/null || true)"
-            if [ -n "$URL" ] && [ "$(curl -s --max-time 30 -o /dev/null -w '%{http_code}' "$URL")" = "200" ]; then
-              echo "verified: $URL"
-              OK=1
-              break
+          for round in 1 2 3; do
+            echo "=== round $round: publish ==="
+            pnpm publish --access public --no-git-checks || true
+            OK=0
+            for i in $(seq 1 12); do
+              URL="$(npm view "$PKG@$VER" dist.tarball 2>/dev/null || true)"
+              if [ -n "$URL" ] && [ "$(curl -s --max-time 30 -o /dev/null -w '%{http_code}' "$URL")" = "200" ]; then
+                echo "verified: $URL"
+                OK=1
+                break
+              fi
+              echo "attempt $i/12: $PKG@$VER not served yet (packument/tarball lag or loss)"
+              sleep 10
+            done
+            if [ "$OK" = "1" ]; then
+              echo "the registry serves $PKG@$VER (round $round)"
+              exit 0
             fi
-            echo "attempt $i/18: $PKG@$VER not served yet (packument/tarball lag or loss)"
-            sleep 10
+            echo "::warning::round $round failed: the registry never served $PKG@$VER"
+            # A zombie packument (the version registered, the blob lost)
+            # blocks the next publish with E409 — a round that wrote the
+            # packument needs the version UNPUBLISHED before retrying. The
+            # job cannot unpublish (no token by design): fail loudly and let
+            # the operator clear the zombie.
+            REGISTERED="$(npm view "$PKG@$VER" version 2>/dev/null || true)"
+            if [ -n "$REGISTERED" ]; then
+              echo "::error::zombie: $PKG@$VER is registered but its tarball is lost. npm unpublish $PKG@$VER --force, then re-run this workflow."
+              exit 1
+            fi
           done
-          if [ "$OK" != "1" ]; then
-            echo "::error::the registry never served $PKG@$VER — the publish must be treated as LOST"
-            exit 1
-          fi
+          echo "::error::3 rounds, the registry never served $PKG@$VER — the publish is LOST"
+          exit 1
