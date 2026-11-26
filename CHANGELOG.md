@@ -5,6 +5,19 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.30.1] - 2026-11-26
+
+### Fixed
+
+- The per-tick transaction probe REVERTED: it ran a noop txn on the SHARED
+  serve connection and its guard treated ANY in-flight transaction from
+  another session as a leak, reopening the connection mid-tool — the other
+  session's in-flight mesh_wait died with "Tool execution interrupted"
+  (the storm on orq, live since 0.30.0). The reactive recovery stays: the
+  withTransaction guard still detects and recovers a real leak on the tool
+  paths. The probe's detection value returns in a later release behind a
+  dedicated connection.
+
 ## [0.30.0] - 2026-11-25
 
 ### Added

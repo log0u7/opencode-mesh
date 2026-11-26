@@ -215,19 +215,13 @@ export function startWakeLoop(options: WakeOptions): WakeHandle {
     if (stopped || ticking) return;
     ticking = true;
     try {
-      // The transaction-leak probe (0.30.0): every tick runs a noop
-      // transaction. The 0.28.2 guard throws on a leaked BEGIN — the leak
-      // pinned the WAL snapshot (the frozen-view class, seen live twice) —
-      // and the probe recovers via the connection reopen, with the warn in
-      // the plugin log. One noop txn per tick is negligible.
-      try {
-        withTransaction(options.db, () => {});
-      } catch (error) {
-        // Bare failure label: the probe cannot know whether an inner
-        // recovery ran — a false "recovered" in the incident log is the
-        // exact misread this file exists to prevent.
-        pluginWarn(storeLogDir(options.db.path), `wake probe: ${String(error)}`);
-      }
+      // NOTE (0.30.1): the per-tick transaction probe is REMOVED — it ran a
+      // noop txn on the SHARED serve connection and its guard treated ANY
+      // in-flight transaction from another session as a leak, REOPENING the
+      // connection mid-tool and killing the other session's in-flight
+      // mesh_wait (the "Tool execution interrupted" storm on orq, live
+      // since 0.30.0). The reactive recovery stays: the withTransaction
+      // guard still detects and recovers a real leak on the tool paths.
       const now = Date.now();
       // One grouped read for the whole host (0.21.0): per-box unread count,
       // wake gate and preview subject used to cost two queries per mailbox
