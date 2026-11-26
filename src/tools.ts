@@ -737,10 +737,24 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
         const sid = sessionID(context);
         const sessionBoxes = mailboxesBySession(db, sid).map((b) => b.name);
         touchMailbox(db, sid, Date.now());
-        const taskId = typeof args.task_id === "string" ? args.task_id : "";
+        const taskIdInput = typeof args.task_id === "string" ? args.task_id : "";
         const state = (typeof args.state === "string" ? args.state : "completed") as TaskState;
-        if (!taskId) return "error: mesh_reply needs a task_id";
-        const task = getTask(db, taskId);
+        if (!taskIdInput) return "error: mesh_reply needs a task_id";
+        // The PREFIX resolution (the refonte2-C7 follow-up): the agents copy
+        // the 8-char id from mesh_tasks/mesh_inbox — the full id resolves,
+        // the prefix resolves to the unique task.
+        let taskId = taskIdInput;
+        let task = getTask(db, taskId);
+        if (!task && taskIdInput.length >= 8) {
+          const candidates = db.conn.all<{ id: string }>(
+            "SELECT id FROM tasks WHERE id LIKE ? || '%'",
+            [taskIdInput],
+          );
+          if (candidates.length === 1) taskId = candidates[0]!.id;
+          else if (candidates.length > 1) return `error: ambiguous task id ${taskIdInput}`;
+          else return "error: unknown task";
+        }
+        task = getTask(db, taskId);
         if (!task) return "error: unknown task";
         const replyingBox = sessionBoxes.find((b) => b === task.to_box);
         if (!replyingBox)
