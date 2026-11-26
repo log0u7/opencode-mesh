@@ -629,3 +629,14 @@ describe("B4 (refonte2): the tools NEVER block on the outbox sweeps", () => {
     db.close();
   });
 });
+
+describe("D (refonte2): the board shows the age", () => {
+  it("mesh_board_get includes the entry age", async () => {
+    const { db, call } = setup();
+    await call("mesh_register", { name: "alice" }, "s1");
+    await call("mesh_board_set", { key: "task", value: "build 2025" }, "s1");
+    const out = String(await call("mesh_board_get", {}, "s1"));
+    expect(out).toMatch(/task=build 2025 \(\d+[smh]\)/);
+    db.close();
+  });
+});

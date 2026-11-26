@@ -7,6 +7,7 @@ import { openSqlite } from "./sqlite.js";
 import {
   claimFlashWithContent,
   deliverMessage,
+  purgeDeliveredHistory,
   sweepTasks,
   listMailboxes,
   mailboxByName,
@@ -265,6 +266,8 @@ export function startWakeLoop(options: WakeOptions): WakeHandle {
       // The deadline sweeper (refonte P2): expired open tasks fail on their
       // own and the asker is notified — no intervention, no starvation.
       sweepTasks(options.db, Date.now());
+      // The retention (refonte2-D): the delivered history purges (7 days).
+      purgeDeliveredHistory(options.db, Date.now());
       if (options.onTick) await options.onTick();
       const statsByName = new Map(wakeBoxStats(options.db).map((s) => [s.box, s]));
       for (const box of listMailboxes(options.db)) {

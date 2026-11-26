@@ -1360,6 +1360,24 @@ export function localRegistryRows(db: MeshDb): FederatedRegistryRow[] {
     .map((r) => ({ ...r, registered_at: r.registered_at ?? 0, epoch: r.epoch ?? 1 }));
 }
 
+// ---- the retention (the refonte2-D: the tables grow without bounds) ----
+
+export const RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+
+/** Purge the delivered history: the SENT outbox rows and the TERMINAL tasks
+ * older than 7 days. The queued/failed outbox rows and the open tasks stay
+ * (the live state). Called from the wake tick (the cheap indexed scans). */
+export function purgeDeliveredHistory(db: MeshDb, now: number): { outbox: number; tasks: number } {
+  const outbox = db.conn.run("DELETE FROM outbox WHERE state = 'sent' AND next_at < ?", [
+    now - RETENTION_MS,
+  ]).changes;
+  const tasks = db.conn.run(
+    `DELETE FROM tasks WHERE state IN ('completed','failed','canceled') AND updated_at < ?`,
+    [now - RETENTION_MS],
+  ).changes;
+  return { outbox, tasks };
+}
+
 // ---- the board (the refonte P4: the shared status state, not DMs) ----
 
 export const BOARD_KEYS = ["task", "blocker", "state", "eta"] as const;
@@ -1392,7 +1410,14 @@ export function boardGet(db: MeshDb, pool?: string): Array<{ box: string; line: 
     rows.sort(
       (a, b) => (order.get(a.key as BoardKey) ?? 99) - (order.get(b.key as BoardKey) ?? 99),
     );
-    out.push({ box: box.name, line: rows.map((r) => `${r.key}=${r.value}`).join("; ") });
+    const age = (now: number) => {
+      const s = Math.round((Date.now() - now) / 1000);
+      return s < 90 ? `${s}s` : s < 5400 ? `${Math.round(s / 60)}m` : `${Math.round(s / 3600)}h`;
+    };
+    out.push({
+      box: box.name,
+      line: rows.map((r) => `${r.key}=${r.value} (${age(r.updated_at)})`).join("; "),
+    });
   }
   return out;
 }

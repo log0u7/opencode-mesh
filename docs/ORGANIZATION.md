@@ -5,7 +5,7 @@ from flat to hierarchical to pools spread across hosts — all built from the
 same primitives: named
 mailboxes (`mesh_register`), pools (`mesh_join` / `mesh_leave` / `team:*`
 broadcasts), direct messages (`mesh_send` to a mailbox), synchronous
-request/response (`mesh_wait` with `reply_to`), presence (`●` fresh, `○`
+request/response (`mesh_ask`/`mesh_reply`, server-side correlation), presence (`●` fresh, `○`
 warm) and the wake loop for idle sessions.
 
 Two invariants hold in every model:
@@ -14,7 +14,7 @@ Two invariants hold in every model:
   (lead arbitration), `alert:`. No discussion in pools — it would flood every
   member's inbox and the wake loop would prompt them all.
 - **Discussion is direct.** Questions, brainstorms and tasks are DMs between
-  mailboxes; the sender can block on `mesh_wait(id, timeout)` for a
+  mailboxes; the sender can `mesh_ask` for a
   synchronous answer within one turn.
 
 Pools federate across paired hosts since 0.10.0 (Model 5), but each host
@@ -57,7 +57,7 @@ agents. No single point of coordination failure.
 ## Model 2 — Centralized orchestrator
 
 One session (`tower`) joins every pool. It reads announcements, distributes
-tasks by DM (with `mesh_wait` for sync answers), and consolidates for the
+tasks by DM (with `mesh_ask` for the answers that must arrive in-turn), and consolidates for the
 human lead — who only arbitrates.
 
 ```mermaid

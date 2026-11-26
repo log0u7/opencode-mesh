@@ -5,6 +5,7 @@ import {
   askTask,
   deliverMessage,
   getTask,
+  purgeDeliveredHistory,
   replyTask,
   sweepTasks,
   inboxRead,
@@ -1219,6 +1220,63 @@ describe("C1 (refonte2): the digest fires ONCE — the later transitions notify 
       "SELECT m.body FROM messages m WHERE m.subject LIKE 'task % completed' ORDER BY m.created_at DESC",
     )!;
     expect(individual.body).toContain("rep 2 final");
+    db.close();
+  });
+});
+
+describe("D (refonte2): the retention purges the delivered history", () => {
+  it("the SENT outbox and the TERMINAL tasks purge after 7 days; the live state stays", () => {
+    const db = openMeshDb(":memory:");
+    const now = Date.now();
+    registerMailbox(db, { name: "alice", session_id: "s1", now: 1000 });
+    registerMailbox(db, { name: "bob", session_id: "s2", now: 1000 });
+    // L'outbox: sent ancien (purge), sent recent (reste), queued (reste).
+    db.conn.run(
+      `INSERT INTO outbox (id, payload, state, attempts, next_at, created_at) VALUES ('o-old', '{}', 'sent', 1, ?, ?)`,
+      [now - 8 * 24 * 3600 * 1000, now - 8 * 24 * 3600 * 1000],
+    );
+    db.conn.run(
+      `INSERT INTO outbox (id, payload, state, attempts, next_at, created_at) VALUES ('o-new', '{}', 'sent', 1, ?, ?)`,
+      [now - 1000, now - 1000],
+    );
+    db.conn.run(
+      `INSERT INTO outbox (id, payload, state, attempts, next_at, created_at) VALUES ('o-q', '{}', 'queued', 0, ?, ?)`,
+      [now - 8 * 24 * 3600 * 1000, now - 8 * 24 * 3600 * 1000],
+    );
+    // Les tasks: completed ancienne (purge), failed recente (reste), submitted (reste).
+    db.conn.run(
+      `INSERT INTO tasks (id, from_box, to_box, question, state, created_at, updated_at) VALUES ('t-old', 'alice', 'bob', 'q', 'completed', ?, ?)`,
+      [now - 8 * 24 * 3600 * 1000, now - 8 * 24 * 3600 * 1000],
+    );
+    db.conn.run(
+      `INSERT INTO tasks (id, from_box, to_box, question, state, created_at, updated_at) VALUES ('t-new', 'alice', 'bob', 'q', 'failed', ?, ?)`,
+      [now - 1000, now - 1000],
+    );
+    db.conn.run(
+      `INSERT INTO tasks (id, from_box, to_box, question, state, created_at, updated_at) VALUES ('t-open', 'alice', 'bob', 'q', 'submitted', ?, ?)`,
+      [now - 8 * 24 * 3600 * 1000, now - 8 * 24 * 3600 * 1000],
+    );
+    const res = purgeDeliveredHistory(db, now);
+    expect(res.outbox).toBe(1);
+    expect(res.tasks).toBe(1);
+    expect(
+      db.conn.get<{ n: number }>("SELECT COUNT(*) AS n FROM outbox WHERE id = 'o-old'")!.n,
+    ).toBe(0);
+    expect(
+      db.conn.get<{ n: number }>("SELECT COUNT(*) AS n FROM outbox WHERE id = 'o-new'")!.n,
+    ).toBe(1);
+    expect(db.conn.get<{ n: number }>("SELECT COUNT(*) AS n FROM outbox WHERE id = 'o-q'")!.n).toBe(
+      1,
+    );
+    expect(
+      db.conn.get<{ n: number }>("SELECT COUNT(*) AS n FROM tasks WHERE id = 't-old'")!.n,
+    ).toBe(0);
+    expect(
+      db.conn.get<{ n: number }>("SELECT COUNT(*) AS n FROM tasks WHERE id = 't-new'")!.n,
+    ).toBe(1);
+    expect(
+      db.conn.get<{ n: number }>("SELECT COUNT(*) AS n FROM tasks WHERE id = 't-open'")!.n,
+    ).toBe(1);
     db.close();
   });
 });

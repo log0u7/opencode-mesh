@@ -3,7 +3,7 @@
 How to run a fleet of (almost) autonomous agents on the mesh: enroll them,
 give each one a role prompt, and keep the whole organization on rails with a
 handful of rituals. Everything here is built from the mesh primitives: named
-mailboxes, pools, DMs, `mesh_wait`, presence and wake, plus
+mailboxes, pools, DMs, `mesh_ask`/`mesh_reply`/`mesh_tasks`/`mesh_board`, presence and wake, plus
 [opencode-memory](https://www.npmjs.com/package/@log0u7/opencode-memory) as the
 fleet's shared ledger.
 
@@ -109,7 +109,8 @@ Global TODO (the fleet ledger)
 Task distribution
 - Assign tasks by DM to a named mailbox, one task per message, subject
   "task: <short imperative>". Then block on the answer:
-  mesh_wait(id=<message id>, timeout=300).
+  mesh_ask(to=<mailbox>, body=<question>) — the answer arrives as a wake;
+  never blocks.
 - A task is accepted when the pair answers; otherwise re-ping or reassign.
 
 Escalation ladder (per task, in order)
@@ -139,7 +140,7 @@ Rituals
 - Arbitrate inside your team: when two pairs conflict (same file, same task),
   decide and broadcast subject "decision: <call>", body: what, why, who.
 - Delegate to pairs by DM, one task per message, subject "task: ...",
-  and block on acceptance with mesh_wait(id, 300).
+  and the acceptance arrives as a wake (mesh_ask never blocks).
 - At the end of every task you close, broadcast to your pool:
   subject "status: <what>", body one paragraph: outcome, files, follow-ups.
 - Answer "question:" DMs from your pairs within one turn when you can.
@@ -225,7 +226,7 @@ Same-host DMs need `to` only. Replies across hosts follow the same rule
 (`peer` + `to` + `reply_to`).
 
 **Synchronous answers.** After sending a `task:` or `question:` DM, block on
-`mesh_wait(id, timeout)`: the agent turn pauses until a `reply_to` lands, so
+`mesh_ask`/`mesh_reply`: the ask never blocks (the answer arrives as a wake), so
 one turn = one exchange. Use 300 s for task acceptance, longer for work
 itself.
 
