@@ -207,8 +207,6 @@ export function startOutboxSender(
       const conn = resolvePeerTarget(db, nodeQuery);
       if (!conn) return "no known address";
       if (payload.type === "task-ask" || payload.type === "task-reply") {
-        // The dedicated task endpoints (the same pairing auth as /mail).
-        const endpoint = payload.type === "task-ask" ? "/task-ask" : "/task-reply";
         const ok = await postTaskWire({
           url: conn.url,
           ...(conn.tls ? { tls: true } : {}),
@@ -252,6 +250,25 @@ export function sweepOutbox(
   rebrowse: () => void,
 ): Promise<{ sent: number; failed: number }> {
   return processOutbox(db, Date.now(), async (payload) => {
+    // The task payloads route to the dedicated endpoints (the same routing
+    // as the background sender — the lazy sweep must not lose them).
+    if (payload.type === "task-ask" || payload.type === "task-reply") {
+      const fedNode = federatedByName(db, payload.to_box)?.node_id ?? payload.node_id;
+      const target = findSendablePeer(db, fedNode);
+      if (!target) return "no paired peer";
+      const conn = resolvePeerTarget(db, fedNode);
+      if (!conn) return "no known address";
+      const ok = await postTaskWire({
+        url: conn.url,
+        ...(conn.tls ? { tls: true } : {}),
+        ...(conn.pk !== null ? { pk: conn.pk } : {}),
+        token: target.token ?? "",
+        from: identity.node_id,
+        proof: pairingProof(identity, target.token ?? ""),
+        payload,
+      });
+      return ok === "ok" ? null : ok;
+    }
     const target = findSendablePeer(db, payload.node_id);
     if (!target) return "no paired peer";
     const conn = resolvePeerTarget(db, payload.node_id);

@@ -302,7 +302,13 @@ export const MeshV2 = Plugin.define({
         body?: string;
         reply_to?: string;
         origin_id?: string;
-        task?: { id: string; result?: string; state?: string };
+        task?: {
+          id: string;
+          group_id?: string | null;
+          deadline?: number | null;
+          result?: string;
+          state?: string;
+        };
       };
       if (event.type === "registry") return; // the registry rides its own pusher
       if (event.type === "task-reply" && d.task?.id) {
@@ -329,11 +335,13 @@ export const MeshV2 = Plugin.define({
           type: "task-ask",
           task: {
             id: d.task.id,
-            from_box: d.from_box ?? null,
+            // The asker's remote reference: node/box (the /task-ask
+            // composite — the mirror detection + the reply routing read it).
+            from_box: `${d.from ?? ""}/${d.from_box ?? ""}`,
             to_box: d.to ?? "",
             question: d.body ?? "",
-            group_id: null,
-            deadline: null,
+            group_id: d.task.group_id ?? null,
+            deadline: d.task.deadline ?? null,
             ...(d.task.result !== undefined ? { result: d.task.result } : {}),
             state: (d.task.state ?? "completed") as TaskState,
           },

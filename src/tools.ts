@@ -32,7 +32,6 @@ import {
   getTask,
   listTasks,
   replyTask,
-  sweepTasks,
   type TaskState,
 } from "./lib/mail.js";
 import { journalQuery } from "./lib/journal.js";
@@ -694,6 +693,13 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
           typeof args.deadline === "number" && args.deadline > 0
             ? Date.now() + args.deadline * 1000
             : null;
+        // The federated resolution BEFORE the row insert: an unknown target
+        // must not leave an orphan submitted row (never swept, no deadline).
+        const isLocal = mailboxByName(db, to);
+        const fed = isLocal ? null : federatedByName(db, to);
+        if (!isLocal && (!fed || fed.node_id === null)) {
+          return `error: unknown mailbox/pool ${to}`;
+        }
         const task = askTask(db, {
           from_box,
           to_box: to,
@@ -703,13 +709,13 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
         });
         // A FEDERATED target (refonte P2.5): the ask crosses via the outbox;
         // the reply comes back through /task-reply.
-        if (!mailboxByName(db, to)) {
+        if (!isLocal) {
           const fed = federatedByName(db, to);
-          if (!fed || fed.node_id === null) return `error: unknown mailbox/pool ${to}`;
           queueTaskAsk(db, task, Date.now());
           await sweepOutbox(db, identity, () => mesh.rebrowse?.());
+          const fedNodeId = fed?.node_id ?? "";
           return JSON.stringify(
-            { task_id: task.id, group: task.group_id, queued_for: fed.node_id.slice(0, 8) },
+            { task_id: task.id, group: task.group_id, queued_for: fedNodeId.slice(0, 8) },
             null,
             2,
           );
@@ -793,6 +799,7 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
         const sessionBoxes = mailboxesBySession(db, sid);
         const box = sessionBoxes[0]?.name;
         touchMailbox(db, sid, Date.now());
+        if (!box) return "error: run mesh_register first";
         const key = typeof args.key === "string" ? args.key : "";
         if (!(BOARD_KEYS as readonly string[]).includes(key))
           return `error: key must be one of ${BOARD_KEYS.join(" | ")}`;

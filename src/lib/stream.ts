@@ -35,10 +35,17 @@ export class StreamHub {
     set.add(res);
     if (!this.heartbeat) {
       // The keep-alive: a comment line every 25s — proxies and idle
-      // timeouts do not close the stream.
+      // timeouts do not close the stream. Writes guarded: a dying socket
+      // must not crash the heartbeat (the drop listener cleans up).
       this.heartbeat = setInterval(() => {
         for (const set of this.streams.values()) {
-          for (const res of set) res.write(": hb\n\n");
+          for (const res of set) {
+            try {
+              res.write(": hb\n\n");
+            } catch {
+              set.delete(res);
+            }
+          }
         }
       }, 25_000);
     }
@@ -50,7 +57,11 @@ export class StreamHub {
         this.heartbeat = undefined;
       }
     };
+    // The 'close' AND 'error' listeners: a socket dying between writes
+    // raises 'error' on the response — an unhandled 'error' event would
+    // crash the host process.
     res.on("close", drop);
+    res.on("error", drop);
     return drop;
   }
 
@@ -121,6 +132,7 @@ export function openPeerStream(
   let res: IncomingMessage | undefined;
 
   const connect = (): void => {
+    timer = undefined;
     if (stopped) return;
     const doRequest = target.tls ? httpsRequest : httpRequest;
     const req = doRequest(
@@ -177,7 +189,7 @@ export function openPeerStream(
   };
 
   const schedule = (): void => {
-    if (stopped) return;
+    if (stopped || timer !== undefined) return; // one pending reconnect max
     failures += 1;
     const backoff = Math.min(1000 * 2 ** failures, 60_000);
     timer = setTimeout(connect, backoff);

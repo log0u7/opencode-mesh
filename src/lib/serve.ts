@@ -321,8 +321,10 @@ async function handle(
       json(res, body.error === "too_large" ? 413 : 400, { error: "body too large" });
       return;
     }
-    const from = parseMail(body.body)?.from ?? "";
-    const proof = parseMail(body.body)?.proof ?? "";
+    // The auth rides the HEADERS (the task payloads carry no mail-shaped
+    // proof field — postTaskWire signs the headers like /mail does).
+    const from = String(req.headers["x-mesh-sender"] ?? "");
+    const proof = String(req.headers["x-mesh-proof"] ?? "");
     const peer = authenticate(db, req, from, proof);
     if (!peer) {
       json(res, 401, { error: "unauthorized" });
@@ -379,10 +381,13 @@ async function handle(
       json(res, body.error === "too_large" ? 413 : 400, { error: "body too large" });
       return;
     }
-    const from = parseMail(body.body)?.from ?? "";
-    const proof = parseMail(body.body)?.proof ?? "";
+    const from = String(req.headers["x-mesh-sender"] ?? "");
+    const proof = String(req.headers["x-mesh-proof"] ?? "");
     const peer = authenticate(db, req, from, proof);
     if (!peer) {
+      console.warn(
+        `[task-reply 401] from=${JSON.stringify(from)} proof.len=${proof.length} auth=${String(req.headers["authorization"] ?? "").slice(0, 20)}`,
+      );
       json(res, 401, { error: "unauthorized" });
       return;
     }

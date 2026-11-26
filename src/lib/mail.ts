@@ -1232,7 +1232,11 @@ export function replyTask(
   // pause is a deliberate answer the asker must see). working/submitted never.
   const notifyNow = ["completed", "failed", "canceled", "input_required"].includes(state);
   if (!notifyNow) return { ok: true, notified: false };
-  if (task.group_id && !groupReady(db, task.group_id)) return { ok: true, notified: false };
+  // The MIRROR tasks (the cross-host): the group gate does NOT apply — the
+  // group's other tasks live on the ASKER'S node, the replies cross
+  // individually and the ASKER aggregates the digest.
+  if (task.group_id && !task.from_box?.includes("/") && !groupReady(db, task.group_id))
+    return { ok: true, notified: false };
   if (!task.from_box) return { ok: true, notified: false };
   // The MIRROR detection (refonte P2.5): the asker's box is not a LOCAL box
   // — the task came from another node. The reply crosses BACK through the

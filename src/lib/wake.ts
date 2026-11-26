@@ -5,7 +5,6 @@ import { pid } from "node:process";
 import type { MeshDb } from "./db.js";
 import { openSqlite } from "./sqlite.js";
 import {
-  claimFlash,
   claimFlashWithContent,
   deliverMessage,
   sweepTasks,
@@ -374,7 +373,13 @@ export function startWakeLoop(options: WakeOptions): WakeHandle {
               `flash v=${pluginVersion()} pid=${pid} box=${box.name} fresh=${claim.claimed} content=1 dataVersion=${dv?.data_version ?? "?"}`,
             );
           }
-          if (stopped) return;
+          if (stopped) {
+            // Disposed DURING the in-flight onTick: the rows are CLAIMED AND
+            // CONSUMED — without the release they die read and unannounced
+            // (the permanent silent loss class).
+            releaseFlash(options.db, box.name, claim.at);
+            return;
+          }
           try {
             await options.prompt(
               box.session_id,
