@@ -483,7 +483,13 @@ export async function postTaskWire(target: {
   proof: string;
   tls?: boolean;
   pk?: string;
-  payload: { type?: string; to_box?: string; origin_id?: string; task?: unknown };
+  payload: {
+    type?: string;
+    to_box?: string;
+    from_box?: string | null;
+    origin_id?: string;
+    task?: unknown;
+  };
 }): Promise<string> {
   const endpoint = target.payload.type === "task-ask" ? "/task-ask" : "/task-reply";
   const headers = {
@@ -494,6 +500,7 @@ export async function postTaskWire(target: {
   };
   const body = JSON.stringify({
     from: target.from,
+    ...(target.payload.from_box ? { from_box: target.payload.from_box } : {}),
     to_box: target.payload.to_box,
     origin_id: target.payload.origin_id,
     task: target.payload.task,

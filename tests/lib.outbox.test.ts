@@ -517,3 +517,82 @@ describe("P2.5 the cross-host round trip VIA THE LAZY SWEEP (the mr-review findi
     rmSync(dirB, { recursive: true, force: true });
   });
 });
+
+describe("P2.5 the cross-host ASK VIA THE REAL WIRE (the mr-review finding: the POST shape)", () => {
+  it("the ask rides postTaskWire -> /task-ask -> the mirror carries node/box", {
+    timeout: 15_000,
+  }, async () => {
+    // === LE NODE B (le respondant): le serveur TLS + la box bob ===
+    const dirB = mkdtempSync(join(tmpdir(), "ask-b-"));
+    const dbB = openMeshDb(join(dirB, "mesh.db"));
+    registerMailbox(dbB, { name: "bob", session_id: "s-b", now: 1000 });
+    const identityB = loadOrCreateIdentity(join(dirB, "id-b"));
+    const tlsB = buildTlsMaterial(identityB);
+    const { server: serverB, port: portB } = await startMeshServer({
+      db: dbB,
+      port: 0,
+      tls: true,
+      tlsMaterial: tlsB,
+      self: { node_id: identityB.node_id, pk: identityB.public_key, hostname: "b" },
+    });
+    // === LE NODE A (l'asker): la row + le pairing + l'ask queue ===
+    const dirA = mkdtempSync(join(tmpdir(), "ask-a-"));
+    const dbA = openMeshDb(join(dirA, "mesh.db"));
+    registerMailbox(dbA, { name: "alice", session_id: "s-a", now: 1000 });
+    const identityA = loadOrCreateIdentity(join(dirA, "id-a"));
+    // Les pairings mutuels (le meme token, les pks croises).
+    pairWithToken(dbA, {
+      node_id: identityB.node_id,
+      hostname: "b",
+      fingerprint: "ff00",
+      token: "tok-shared",
+      public_key: identityB.public_key,
+      addresses: [`127.0.0.1:${portB}`],
+    });
+    pairWithToken(dbB, {
+      node_id: identityA.node_id,
+      hostname: "a",
+      fingerprint: "ff00",
+      token: "tok-shared",
+      public_key: identityA.public_key,
+    });
+    // La box bob = FEDEREE vue depuis A (l'epoch 2).
+    mergeFederatedRegistry(
+      dbA,
+      [
+        {
+          name: "bob",
+          session_id: "ses-b",
+          role: "ops",
+          pools: "[]",
+          primary_pool: null,
+          registered_at: Date.now() - 1000,
+          epoch: 2,
+        },
+      ],
+      identityB.node_id,
+    );
+    const task = askTask(dbA, { from_box: "alice", to_box: "bob", question: "quel etat?" });
+    queueTaskAsk(dbA, task, Date.now());
+    // LE SWEEP: postTaskWire -> POST /task-ask sur B (le vrai wire, le trou
+    // du from_box cache etait ici: le test direct handleTaskAsk ne le
+    // voyait pas).
+    await sweepOutbox(dbA, identityA, () => {});
+    // Le miroir chez B: from_box = node-a/alice (le composite COMPLET).
+    const mirror = dbB.conn.get<{ state: string; from_box: string }>(
+      "SELECT state, from_box FROM tasks WHERE id = ?",
+      [task.id],
+    )!;
+    expect(mirror.state).toBe("submitted");
+    expect(mirror.from_box).toBe(`${identityA.node_id}/alice`);
+    // Le message tache dans la box bob.
+    expect(
+      dbB.conn.get<{ n: number }>("SELECT COUNT(*) AS n FROM deliveries WHERE to_box = 'bob'")?.n,
+    ).toBe(1);
+    serverB.close();
+    dbA.close();
+    dbB.close();
+    rmSync(dirA, { recursive: true, force: true });
+    rmSync(dirB, { recursive: true, force: true });
+  });
+});

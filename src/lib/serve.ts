@@ -385,8 +385,11 @@ async function handle(
     const proof = String(req.headers["x-mesh-proof"] ?? "");
     const peer = authenticate(db, req, from, proof);
     if (!peer) {
+      // The token/proof VALUES never hit the log: the presence and the
+      // length only (a valid token with a bad proof must not leak its
+      // prefix onto disk).
       console.warn(
-        `[task-reply 401] from=${JSON.stringify(from)} proof.len=${proof.length} auth=${String(req.headers["authorization"] ?? "").slice(0, 20)}`,
+        `[task-reply 401] from present=${from.length > 0} proof.len=${proof.length} auth present=${"authorization" in req.headers}`,
       );
       json(res, 401, { error: "unauthorized" });
       return;
