@@ -5,6 +5,24 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.30.1] - 2026-11-26
+
+### Fixed
+
+- The wake flash carries the oldest pending message id: `mesh: N unread - "subject"
+  (reply id: <id>)`. Wake-woken agents could only answer bare (reply_to NULL -
+  the flash showed the subject, not the id) and those replies are invisible to
+  mesh_wait's reply_to correlation: the waiter starved to its full timeout with
+  the reply sitting in its box (reproduced isolated: the reply landed 11s into a
+  45s wait, the wait never returned). Root cause of the "orq blocked on wait"
+  storm, live since the wake feature.
+- mesh_wait's timeout message lists the uncorrelated unread in the box (id,
+  sender, subject, reply_to state) instead of a bare timeout line: the caller
+  drains and recovers immediately instead of re-waiting blind.
+- mesh_wait default timeout 120s -> 60s: every blocked second exposes the turn
+  to the host's user-prompt interrupt, and the live fleet test showed every real
+  reply lands within ~60s. The long blocking wait has no legitimate use.
+
 ## [0.30.0] - 2026-11-25
 
 ### Added

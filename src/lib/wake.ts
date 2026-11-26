@@ -362,14 +362,20 @@ export function startWakeLoop(options: WakeOptions): WakeHandle {
         // above the prompt: never an inherited or cached state. Compact
         // notification (0.16.0): count + first pending subject, truncated to
         // 60 chars — the message stays self-carrier, the agent knows
-        // mesh_inbox from its standing guidance.
+        // mesh_inbox from its standing guidance. The reply id rides along
+        // (0.30.1): the woken agent answers with reply_to=<id> — without it
+        // its bare replies are invisible to mesh_wait's correlation (the
+        // 02:17 repro: the reply sat in the box, the waiter starved).
         const subject = stat.subject;
         const preview =
           subject === null ? "" : subject.length > 60 ? `${subject.slice(0, 59)}…` : subject;
+        const replyHint = stat.id ? ` (reply id: ${stat.id})` : "";
         try {
           await options.prompt(
             box.session_id,
-            preview === "" ? `mesh: ${fresh} unread` : `mesh: ${fresh} unread — "${preview}"`,
+            preview === ""
+              ? `mesh: ${fresh} unread${replyHint}`
+              : `mesh: ${fresh} unread — "${preview}"${replyHint}`,
             `msg_${randomUUID()}`,
           );
         } catch (error) {

@@ -469,6 +469,25 @@ describe("wake gates (0.16.0 token economy)", () => {
     expect(statOf(db, "a")?.unread).toBe(2);
     db.close();
   });
+
+  it("wakeBoxStats: id is the OLDEST unread delivery's id — the wake flash carries the reply target (0.30.1)", () => {
+    const db = openMeshDb(":memory:");
+    registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
+    const first = deliverMessage(db, {
+      from: "n",
+      to_box: "a",
+      subject: "first",
+      body: "b",
+      created_at: 1000,
+    });
+    if (!first.ok) throw new Error("delivery failed");
+    deliverMessage(db, { from: "n", to_box: "a", subject: "second", body: "b", created_at: 2000 });
+    // The reply correlation (mesh_wait) only matches on reply_to: the woken
+    // agent needs the id IN the flash or its replies starve the waiter
+    // (the 02:17 repro: orq's reply sat uncorrelated, the wait timed out).
+    expect(statOf(db, "a")?.id).toBe(first.id);
+    db.close();
+  });
 });
 
 describe("resend dedup window (0.29.0: the minutes-apart re-send class)", () => {
