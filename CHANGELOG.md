@@ -5,6 +5,32 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.33.3] - 2026-11-26
+
+### Fixed
+
+- The cross-node task reply now LANDS (the load-test findings, verified in
+  code): tasks.target_node (the node owning to_box, filled at mesh_ask) and
+  tasks.asker_node (the mirror's asking node, from the authenticated peer)
+  replace the "node/box" composite parse everywhere.
+- The stream consumer ACKS the task events: the dispatch returns the applied
+  origin_id for task-reply and task-ask (idempotent) — the sender's row goes
+  sent instead of dying "pushed but never acked" at 12 attempts.
+- The task-reply owner check reads tasks.target_node (no box resolution at
+  reply time), both on the stream dispatch and POST /task-reply.
+- The outbox stream push is a FIRST-attempt path only: the retries (attempts
+  >= 1) go POST, the synchronous response marks the row.
+- The complete registry re-pushes to every paired peer at plugin setup and
+  at every peer stream (re)connection — the post-reboot roster convergence
+  needs no drain.
+
+### Added
+
+- tests/fed.tasks.test.ts: the two-node real-network regressions (the ask
+  round trip with 0 dead-letter, the homonym-box crossing, the dropped
+  stream event falling back to POST, the rebooted node's registry
+  reconvergence).
+
 ## [0.33.2] - 2026-11-26
 
 ### Added

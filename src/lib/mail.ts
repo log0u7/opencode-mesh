@@ -1064,6 +1064,12 @@ export type TaskRow = {
   question: string;
   result: string | null;
   state: TaskState;
+  /** The node owning to_box (filled at mesh_ask from the federated row);
+   * NULL = a local task. The owner check for a crossing reply. */
+  target_node: string | null;
+  /** On a MIRROR row: the asking node (filled by handleTaskAsk from the
+   * authenticated peer). NULL = local. Drives the cross detection. */
+  asker_node: string | null;
   created_at: number;
   updated_at: number;
   deadline: number | null;
@@ -1089,15 +1095,20 @@ export function askTask(
 ): TaskRow {
   const id = randomUUID();
   const now = Date.now();
+  // The OWNER of to_box (the 0.33.3-A): the federated row names the node —
+  // the owner check for a crossing reply reads this column, never a
+  // "node/box" parse. NULL = a local task.
+  const targetNode = federatedByName(db, input.to_box)?.node_id ?? null;
   db.conn.run(
-    `INSERT INTO tasks (id, from_box, to_box, group_id, question, result, state, created_at, updated_at, deadline)
-     VALUES (?, ?, ?, ?, ?, NULL, 'submitted', ?, ?, ?)`,
+    `INSERT INTO tasks (id, from_box, to_box, group_id, question, result, state, target_node, created_at, updated_at, deadline)
+     VALUES (?, ?, ?, ?, ?, NULL, 'submitted', ?, ?, ?, ?)`,
     [
       id,
       input.from_box,
       input.to_box,
       input.group_id ?? null,
       input.question,
+      targetNode,
       now,
       now,
       input.deadline ?? null,
@@ -1131,6 +1142,8 @@ export function askTask(
     question: input.question,
     result: null,
     state: "submitted",
+    target_node: targetNode,
+    asker_node: null,
     created_at: now,
     updated_at: now,
     deadline: input.deadline ?? null,
@@ -1219,13 +1232,14 @@ function replyTaskInner(
   // The MIRROR tasks (the cross-host): the group gate does NOT apply — the
   // group's other tasks live on the ASKER'S node, the replies cross
   // individually and the ASKER aggregates the digest.
-  if (task.group_id && !task.from_box?.includes("/") && !groupReady(db, task.group_id))
+  if (task.group_id && task.asker_node == null && !groupReady(db, task.group_id))
     return { ok: true, notified: false };
   if (!task.from_box) return { ok: true, notified: false };
-  // The MIRROR detection (refonte P2.5): the asker's box is not a LOCAL box
-  // — the task came from another node. The reply crosses BACK through the
-  // outbox (the tools layer queues task-reply); no local notification.
-  if (!mailboxByName(db, task.from_box)) return { ok: true, notified: false, cross: true };
+  // The MIRROR detection (the 0.33.3-B): the row carries the asking NODE
+  // (asker_node, filled by handleTaskAsk) — a homonym local box never
+  // swallows the reply. It crosses BACK through the outbox (the tools
+  // layer queues task-reply); no local notification.
+  if (task.asker_node != null) return { ok: true, notified: false, cross: true };
   // The GROUP digest fires ONCE (the refonte2-C1): group_notified_at marks
   // the moment — the LATER transitions (input_required -> completed, a
   // second failure...) notify INDIVIDUALLY, never re-digest (the duplicate

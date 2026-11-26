@@ -1,12 +1,13 @@
 import { randomUUID } from "node:crypto";
 import type { MeshDb } from "./db.js";
-import { postTaskWire, sendMail } from "./client.js";
+import { postRegistrySync, postTaskWire, sendMail } from "./client.js";
 import { pairingProof, type NodeIdentity } from "./identity.js";
-import { findSendablePeer, resolvePeerTarget } from "./peers.js";
+import { findSendablePeer, listPeers, resolvePeerTarget } from "./peers.js";
 import {
   deliverMessage,
   federatedByName,
   getTask,
+  localRegistryRows,
   mailboxByName,
   mailboxByName as mailboxesByNameLocal,
   type TaskState,
@@ -225,7 +226,7 @@ export function markOutboxSentByOrigin(
 export async function processOutbox(
   db: MeshDb,
   now: number,
-  deliver: (payload: OutboxPayload) => Promise<string | null>,
+  deliver: (payload: OutboxPayload, attempts: number) => Promise<string | null>,
 ): Promise<{ sent: number; failed: number }> {
   const rows = claimOutboxDue(db, now);
   // The per-peer concurrency (the refonte2-B4): the rows GROUP by node —
@@ -244,7 +245,9 @@ export async function processOutbox(
     [...byNode.values()].map(async (group) => {
       for (const row of group) {
         try {
-          const error = await deliver(row.payload);
+          // The attempts ride with the row (the 0.33.3-E): the stream is a
+          // first-attempt path only, the retries go POST.
+          const error = await deliver(row.payload, row.attempts);
           if (error === "streamed") {
             // Pushed over the stream, NOT acked yet: the row stays queued —
             // the receiver's /ack marks it sent; the claim's 30s next_at is
@@ -282,6 +285,7 @@ export async function deliverOutboxRow(
     | { isOpen(nodeId: string): boolean; push(nodeId: string, event: unknown): number }
     | undefined,
   payload: OutboxPayload,
+  attempts = 0,
 ): Promise<string | null> {
   // The task payloads route by the FEDERATED box (the owner resolved at
   // delivery), except task-reply: the EXPLICIT composite node (the
@@ -293,9 +297,12 @@ export async function deliverOutboxRow(
         ? (federatedByName(db, payload.to_box)?.node_id ?? payload.node_id)
         : payload.node_id;
   if (!nodeQuery) return "no target node";
-  // The STREAM first: an open peer stream gets the event instantly (no
-  // POST, no latency).
-  if (hub?.isOpen(nodeQuery)) {
+  // The STREAM first — but ONLY on the first attempt (the 0.33.3-E): a
+  // stream push is at-most-once (the ack flows back from the receiver's
+  // consumer); an UNACKED first attempt falls back to the POST path on the
+  // retries (the attempts >= 1 rows go POST — the synchronous response
+  // marks the row sent or the error retried).
+  if (attempts === 0 && hub?.isOpen(nodeQuery)) {
     const delivered = hub.push(nodeQuery, {
       type: payload.type ?? "mail",
       data: {
@@ -379,8 +386,8 @@ export function startOutboxSender(
   hub?: { isOpen(nodeId: string): boolean; push(nodeId: string, event: unknown): number },
 ): { stop(): void } {
   const sweep = () => {
-    void processOutbox(db, Date.now(), (payload) =>
-      deliverOutboxRow(db, identity, rebrowse, hub, payload),
+    void processOutbox(db, Date.now(), (payload, attempts) =>
+      deliverOutboxRow(db, identity, rebrowse, hub, payload, attempts),
     );
   };
   const timer = setInterval(sweep, intervalMs);
@@ -452,21 +459,24 @@ export function queueTaskAsk(
 /** The responder's side (POST /task-ask): create the MIRROR row (the same
  * id — the reply correlation is the id itself) and deliver the task message
  * to the local responder's box. */
-export function handleTaskAsk(db: MeshDb, payload: OutboxPayload): void {
+export function handleTaskAsk(db: MeshDb, payload: OutboxPayload, askerNode: string): void {
   const t = payload.task;
   if (!t) return;
   const now = Date.now();
   const existing = db.conn.get<{ id: string }>("SELECT id FROM tasks WHERE id = ?", [t.id]);
   if (existing) return;
   db.conn.run(
-    `INSERT INTO tasks (id, from_box, to_box, group_id, question, result, state, created_at, updated_at, deadline)
-     VALUES (?, ?, ?, ?, ?, NULL, 'submitted', ?, ?, ?)`,
+    `INSERT INTO tasks (id, from_box, to_box, group_id, question, result, state, asker_node, created_at, updated_at, deadline)
+     VALUES (?, ?, ?, ?, ?, NULL, 'submitted', ?, ?, ?, ?)`,
     [
       t.id,
+      // The BARE box (the 0.33.3-B): the asking NODE lives in asker_node —
+      // the "node/box" composite is dead.
       payload.from_box ?? null,
       t.to_box,
       t.group_id ?? null,
       t.question,
+      askerNode,
       now,
       now,
       t.deadline,
@@ -485,9 +495,33 @@ export function handleTaskAsk(db: MeshDb, payload: OutboxPayload): void {
   });
 }
 
+/** The registry re-push (the 0.33.3-F): the sender's COMPLETE local
+ * registry POSTs to every paired peer — at plugin setup and at every peer
+ * stream (re)connection. The post-reboot convergence: a restarted node
+ * refreshes its peers' federated rows without waiting for a drain. */
+export async function syncRegistryToPeers(db: MeshDb, identity: NodeIdentity): Promise<number> {
+  let pushed = 0;
+  for (const peer of listPeers(db)) {
+    if (!peer.paired) continue;
+    const target = findSendablePeer(db, peer.node_id);
+    const conn = resolvePeerTarget(db, peer.node_id);
+    if (!target || !conn) continue;
+    const res = await postRegistrySync({
+      url: conn.url,
+      ...(conn.tls ? { tls: true } : {}),
+      ...(conn.pk !== null ? { pk: conn.pk } : {}),
+      token: target.token ?? "",
+      from: identity.node_id,
+      proof: pairingProof(identity, target.token ?? ""),
+      registry: localRegistryRows(db),
+    });
+    if (res === "ok") pushed += 1;
+  }
+  return pushed;
+}
+
 /** The responder's side: the reply to a MIRROR task crosses back to the
- * asker's node (the mirror's from_box is NOT a local box). */
-export function queueTaskReply(
+ * asker's node (the mirror's from_box is NOT a local box). */ export function queueTaskReply(
   db: MeshDb,
   taskId: string,
   result: string,
@@ -496,18 +530,14 @@ export function queueTaskReply(
 ): string | null {
   const task = getTask(db, taskId);
   if (!task) return null;
-  // The mirror detection: the asker's box is not local (a federated row).
-  if (mailboxByName(db, task.from_box ?? "")) return null;
-  // The asker's remote reference: "node/box" (the /task-ask composite) —
-  // the node drives the delivery, the box rides for the asker's records.
-  const sep = (task.from_box ?? "").indexOf("/");
-  const askerNode = sep > 0 ? task.from_box!.slice(0, sep) : "";
-  const askerBox = sep > 0 ? task.from_box!.slice(sep + 1) : (task.from_box ?? "");
+  // The mirror detection (the 0.33.3-B): the row carries the asking NODE —
+  // a homonym local box (alice on both nodes) never swallows the reply.
+  if (task.asker_node == null) return null;
   const row = queueOutbox(
     db,
     {
-      node_id: askerNode,
-      to_box: askerBox,
+      node_id: task.asker_node,
+      to_box: task.from_box ?? "",
       from_box: task.to_box,
       subject: `task-reply ${task.id.slice(0, 8)}`,
       body: result,
