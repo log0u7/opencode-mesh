@@ -1146,7 +1146,11 @@ export function askTask(
   // A FEDERATED target (refonte P2.5): the ask travels through the outbox
   // (the tools layer queues task-ask) — a local delivery would sink into an
   // addressing-only row.
-  if (!mailboxByName(db, input.to_box)) return getTask(db, id)!;
+  if (!mailboxByName(db, input.to_box)) {
+    const row = getTask(db, id);
+    if (!row) throw new Error("the task row vanished after the insert");
+    return row;
+  }
   deliverMessage(db, {
     from: "mesh-tasks",
     from_box: input.from_box,

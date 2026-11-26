@@ -396,6 +396,9 @@ export const MeshV2 = Plugin.define({
       db,
       onTick: async () => {
         await sweepOutbox(db, identity, () => browseHandle?.refresh());
+        // The new pairings (mid-session) get their streams within one tick:
+        // the pairing writes fire this instance's WAL watcher.
+        openStreams();
       },
       ...(options.wake === false ? { intervalMs: 0 } : {}),
       ...(options.wakeIntervalMs !== undefined ? { intervalMs: options.wakeIntervalMs } : {}),

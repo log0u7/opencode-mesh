@@ -9,17 +9,25 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { request } from "node:http";
 import { connect } from "node:net";
 
+import { sendMail, getPools } from "../src/lib/client.js";
 import { openMeshDb } from "../src/lib/db.js";
 import {
   inboxRows,
   MESSAGE_TTL_MS,
   receiveMessage,
+  joinPool,
   registerMailbox,
   unreadMessages,
 } from "../src/lib/mail.js";
-import { pairingProof, pairingProofPayload, signPairingProof } from "../src/lib/identity.js";
+import {
+  loadOrCreateIdentity,
+  pairingProof,
+  pairingProofPayload,
+  signPairingProof,
+} from "../src/lib/identity.js";
 import { pairWithToken, upsertDiscoveredPeer, createPairingToken } from "../src/lib/peers.js";
 import { pairCodeThrottled, startMeshServer } from "../src/lib/serve.js";
+import { buildTlsMaterial } from "../src/lib/tls.js";
 import type { HostCapa } from "../src/lib/capa.js";
 
 let dir: string;
@@ -902,5 +910,129 @@ describe("the task wire routes (refonte P2.5)", () => {
       db.conn.get<{ n: number }>("SELECT COUNT(*) AS n FROM deliveries WHERE to_box = 'alice'")?.n,
     ).toBe(2);
     server.close();
+  });
+});
+
+describe("the wire client's error branches (the refonte coverage)", () => {
+  it("sendMail maps the auth failure to unauthorized and the server error to error", async () => {
+    const { db, server, url } = await start();
+    // Le mauvais token: 401 -> "unauthorized".
+    const unauthorized = await sendMail({
+      url,
+      token: "wrong-token",
+      from: "node-x",
+      subject: "s",
+      body: "b",
+    });
+    expect(unauthorized).toBe("unauthorized");
+    // La DB fermee: la route 500 -> "error".
+    db.close();
+    const error = await sendMail({
+      url,
+      token: "tok-peer1",
+      from: "node-x",
+      subject: "s",
+      body: "b",
+    });
+    expect(error).toBe("error");
+    // Le port mort: "unreachable".
+    const dead = await sendMail({
+      url: "http://127.0.0.1:1",
+      token: "t",
+      from: "node-x",
+      subject: "s",
+      body: "b",
+    });
+    expect(dead).toBe("unreachable");
+    server.close();
+  });
+
+  it("getPools: null on unreachable, the pools on a valid peer", async () => {
+    const { db, server, url } = await start();
+    pairWithToken(db, {
+      node_id: "peer-1",
+      hostname: "laptop",
+      fingerprint: "ff00",
+      token: "tok-peer1",
+    });
+    registerMailbox(db, { name: "alice", session_id: "s-a", now: 1000 });
+    joinPool(db, "alice", "team:x");
+    const pools = await getPools({
+      url,
+      token: "tok-peer1",
+      from: "peer-1",
+      proof: "p",
+    });
+    expect(pools).not.toBeNull();
+    const dead = await getPools({ url: "http://127.0.0.1:1", token: "t", from: "x", proof: "p" });
+    expect(dead).toBeNull();
+    server.close();
+  });
+});
+
+describe("the wire client: the TLS paths (the refonte coverage)", () => {
+  it("sendMail over TLS: ok, unauthorized, and the pin mismatch branches", {
+    timeout: 10_000,
+  }, async () => {
+    const identityA = loadOrCreateIdentity(join(dir, "id-a"));
+    const tlsA = buildTlsMaterial(identityA);
+    const db = openMeshDb(join(dir, "mesh.db"));
+    registerMailbox(db, { name: "alice", session_id: "s-a", now: 1000 });
+    const { server, port } = await startMeshServer({
+      db,
+      port: 0,
+      tls: true,
+      tlsMaterial: tlsA,
+      self: { node_id: "node-a", pk: identityA.public_key, hostname: "a" },
+    });
+    // Le mauvais token sur TLS: "unauthorized".
+    const unauthorized = await sendMail({
+      url: `https://127.0.0.1:${port}`,
+      tls: true,
+      pk: identityA.public_key,
+      token: "wrong",
+      from: "node-x",
+      subject: "s",
+      body: "b",
+    });
+    expect(unauthorized).toBe("unauthorized");
+    // Le mauvais pin (une autre cle): "pin-mismatch".
+    const identityX = loadOrCreateIdentity(join(dir, "id-x"));
+    const pinMismatch = await sendMail({
+      url: `https://127.0.0.1:${port}`,
+      tls: true,
+      pk: identityX.public_key,
+      token: "tok-a",
+      from: "node-x",
+      subject: "s",
+      body: "b",
+    });
+    expect(pinMismatch).toBe("pin-mismatch");
+    // Le bon pin + le bon token: "ok" — le mail atterrit. Le sender doit
+    // etre un pair PAIRED (le bearer token identifie le peer).
+    pairWithToken(db, {
+      node_id: "node-x",
+      hostname: "x",
+      fingerprint: "ff00",
+      token: "tok-a",
+      public_key: identityX.public_key,
+    });
+    const ok = await sendMail({
+      url: `https://127.0.0.1:${port}`,
+      tls: true,
+      pk: identityA.public_key,
+      token: "tok-a",
+      from: "node-x",
+      to: "alice",
+      subject: "tls-mail",
+      body: "b",
+    });
+    expect(ok).toBe("ok");
+    const landed = db.conn.get<{ n: number }>(
+      "SELECT COUNT(*) AS n FROM deliveries WHERE to_box = 'alice'",
+    )?.n;
+    expect(landed).toBe(1);
+    server.close();
+    db.close();
   });
 });

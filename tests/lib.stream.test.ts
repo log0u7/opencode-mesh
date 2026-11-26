@@ -84,3 +84,104 @@ describe("the stream round trip (refonte 3.1): the push delivers without any POS
     rmSync(dir, { recursive: true, force: true });
   });
 });
+
+describe("the stream client: the reconnect (refonte 3.1)", () => {
+  it("a stream drop schedules the reconnect; a dead target retries without crashing", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "wake-reconnect-"));
+    const db = openMeshDb(join(dir, "mesh.db"));
+    registerMailbox(db, { name: "alice", session_id: "s1", now: 1000 });
+    const identityB = loadOrCreateIdentity(join(dir, "id-b"));
+    const { server, port, hub } = await startMeshServer({
+      db,
+      port: 0,
+      tls: false,
+      self: { node_id: "node-a", pk: "", hostname: "a" },
+    });
+    pairWithToken(db, {
+      node_id: identityB.node_id,
+      hostname: "b",
+      fingerprint: "ff00",
+      token: "tok-b",
+      public_key: identityB.public_key,
+    });
+    const drops: number[] = [];
+    const client = openPeerStream(
+      {
+        url: `http://127.0.0.1:${port}`,
+        token: "tok-b",
+        from: identityB.node_id,
+        proof: pairingProof(identityB, "tok-b"),
+      },
+      {
+        onEvent: () => {},
+        onDrop: () => drops.push(Date.now()),
+      },
+    );
+    await new Promise((r) => setTimeout(r, 300));
+    expect(hub.isOpen(identityB.node_id)).toBe(true);
+    // Le serveur meurt: la stream droppe, le client reconnecte (le retry).
+    server.close();
+    server.closeAllConnections();
+    await new Promise((r) => setTimeout(r, 500));
+    expect(drops.length).toBeGreaterThanOrEqual(1);
+    // Le client tourne toujours (les retries vers le port mort ne crashent pas).
+    client.stop();
+    hub.stop();
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("the hub push survives a broken stream (the write throws, the set prunes)", () => {
+    const hub = new StreamHub();
+    const broken = {
+      writeHead: () => {},
+      write: (() => {
+        let writes = 0;
+        return () => {
+          writes += 1;
+          if (writes > 1) throw new Error("EPIPE");
+        };
+      })(),
+      on: () => {},
+      end: () => {},
+    } as unknown as Parameters<typeof hub.add>[1];
+    hub.add("peer-x", broken);
+    expect(hub.isOpen("peer-x")).toBe(true);
+    const n = hub.push("peer-x", { type: "mail", data: {} });
+    expect(n).toBe(0);
+    expect(hub.isOpen("peer-x")).toBe(false);
+    hub.stop();
+  });
+});
+
+describe("the stream hub: the multi-add (the heartbeat created once)", () => {
+  it("two streams on the same node: both get the push, the heartbeat exists once", () => {
+    const hub = new StreamHub();
+    const frames1: string[] = [];
+    const frames2: string[] = [];
+    const fake = (sink: string[]) => {
+      let writes = 0;
+      return {
+        writeHead: () => {},
+        write: (frame: string) => {
+          writes += 1;
+          sink.push(frame);
+          void writes;
+        },
+        on: () => {},
+        end: () => {},
+      } as unknown as Parameters<typeof hub.add>[1];
+    };
+    const drop1 = hub.add("peer-1", fake(frames1));
+    const drop2 = hub.add("peer-1", fake(frames2));
+    expect(hub.isOpen("peer-1")).toBe(true);
+    const n = hub.push("peer-1", { type: "mail", data: { x: 1 } });
+    expect(n).toBe(2);
+    expect(frames1.length).toBe(2); // : connected + l'event
+    expect(frames2.length).toBe(2);
+    drop1();
+    drop2();
+    expect(hub.isOpen("peer-1")).toBe(false);
+    hub.stop();
+  });
+});

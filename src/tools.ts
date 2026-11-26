@@ -500,10 +500,12 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
           return from_box === null ? null : lastUnansweredFrom(db, from_box, to);
         };
         const selfSendLocal = async (): Promise<string> => {
+          // Narrowed once: the closure loses the outer non-null narrowing.
+          const targetBox = to ?? "";
           const result = deliverMessage(db, {
             from: identity.node_id,
             from_box,
-            to_box: to!,
+            to_box: targetBox,
             subject: String(args.subject),
             body: String(args.body),
             reply_to: to === null ? null : replyToFor(to),
@@ -516,7 +518,7 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
           if (!result.ok && fanout && result.error === "empty_broadcast") {
             const origin = randomUUID();
             const forwardedOnly = await fanout.fanout({
-              to_box: to!,
+              to_box: targetBox,
               origin_id: origin,
               from_box,
               subject: String(args.subject),
@@ -564,7 +566,7 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
           let forwarded: string[] = [];
           if (fanout && result.recipients.length > 0) {
             forwarded = await fanout.fanout({
-              to_box: to!,
+              to_box: targetBox,
               origin_id: result.id,
               from_box,
               subject: String(args.subject),

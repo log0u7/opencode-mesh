@@ -322,7 +322,8 @@ export function queueTaskAsk(
  * id — the reply correlation is the id itself) and deliver the task message
  * to the local responder's box. */
 export function handleTaskAsk(db: MeshDb, payload: OutboxPayload): void {
-  const t = payload.task!;
+  const t = payload.task;
+  if (!t) return;
   const now = Date.now();
   const existing = db.conn.get<{ id: string }>("SELECT id FROM tasks WHERE id = ?", [t.id]);
   if (existing) return;
