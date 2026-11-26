@@ -161,6 +161,85 @@ export async function processOutbox(
   return { sent, failed };
 }
 
+/** THE single delivery function (the refonte 2-A): ONE copy of the routing
+ * (stream-first, the task endpoints, the mail) — the background sender and
+ * the lazy sweep both call it. Two divergent copies shipped a task reply
+ * down /mail and marked it sent (the mr-review round-4 B1: an error 401 is
+ * truthy, `ok ? null : ok` maps it to null = delivered). The contract:
+ * null = delivered, a non-empty string = the failure reason. */
+export async function deliverOutboxRow(
+  db: MeshDb,
+  identity: NodeIdentity,
+  rebrowse: () => void,
+  hub:
+    | { isOpen(nodeId: string): boolean; push(nodeId: string, event: unknown): number }
+    | undefined,
+  payload: OutboxPayload,
+): Promise<string | null> {
+  // The task payloads route by the FEDERATED box (the owner resolved at
+  // delivery), except task-reply: the EXPLICIT composite node (the
+  // name-collision safe — two nodes can carry the same bare box name).
+  const nodeQuery =
+    payload.type === "task-reply" && payload.node_id
+      ? payload.node_id
+      : payload.type === "task-ask"
+        ? (federatedByName(db, payload.to_box)?.node_id ?? payload.node_id)
+        : payload.node_id;
+  if (!nodeQuery) return "no target node";
+  // The STREAM first: an open peer stream gets the event instantly (no
+  // POST, no latency).
+  if (hub?.isOpen(nodeQuery)) {
+    const delivered = hub.push(nodeQuery, {
+      type: payload.type ?? "mail",
+      data: {
+        from: identity.node_id,
+        from_box: payload.from_box,
+        to: payload.to_box,
+        subject: payload.subject,
+        body: payload.body,
+        reply_to: payload.reply_to,
+        origin_id: payload.origin_id,
+        ...(payload.type === "task-ask" || payload.type === "task-reply"
+          ? { task: payload.task }
+          : {}),
+      },
+    });
+    if (delivered > 0) return null;
+  }
+  const target = findSendablePeer(db, nodeQuery);
+  if (!target) return "no paired peer";
+  const conn = resolvePeerTarget(db, nodeQuery);
+  if (!conn) return "no known address";
+  if (payload.type === "task-ask" || payload.type === "task-reply") {
+    const ok = await postTaskWire({
+      url: conn.url,
+      ...(conn.tls ? { tls: true } : {}),
+      ...(conn.pk !== null ? { pk: conn.pk } : {}),
+      token: target.token ?? "",
+      from: identity.node_id,
+      proof: pairingProof(identity, target.token ?? ""),
+      payload,
+    });
+    return ok === "ok" ? null : ok;
+  }
+  const sent = await sendMail({
+    url: conn.url,
+    ...(conn.tls ? { tls: true } : {}),
+    ...(conn.pk !== null ? { pk: conn.pk } : {}),
+    token: target.token ?? "",
+    from: identity.node_id,
+    subject: payload.subject,
+    body: payload.body,
+    proof: pairingProof(identity, target.token ?? ""),
+    ...(payload.to_box ? { to: payload.to_box } : {}),
+    ...(payload.from_box ? { from_box: payload.from_box } : {}),
+    ...(payload.reply_to ? { reply_to: payload.reply_to } : {}),
+    origin_id: payload.origin_id,
+  });
+  if (sent === "unreachable") rebrowse();
+  return sent === "ok" ? null : sent;
+}
+
 /** The background sender: every tick, claim the due rows and deliver — the
  * peer conn is resolved FRESH at delivery (a moved peer, a fresh mDNS
  * announce, a re-paired token are picked up without the asking agent ever
@@ -174,129 +253,26 @@ export function startOutboxSender(
   hub?: { isOpen(nodeId: string): boolean; push(nodeId: string, event: unknown): number },
 ): { stop(): void } {
   const timer = setInterval(() => {
-    void processOutbox(db, Date.now(), async (payload) => {
-      // The task payloads route by the FEDERATED box (the owner resolved at
-      // delivery), not by node_id.
-      const nodeQuery =
-        payload.type === "task-reply" && payload.node_id
-          ? payload.node_id // the explicit asker's node (the name-collision safe)
-          : payload.type === "task-ask"
-            ? (federatedByName(db, payload.to_box)?.node_id ?? payload.node_id)
-            : payload.node_id;
-      if (!nodeQuery) return "no target node";
-      // The STREAM first (refonte 3.1): an open peer stream gets the event
-      // pushed instantly — no POST, no latency.
-      if (hub?.isOpen(nodeQuery)) {
-        const delivered = hub.push(nodeQuery, {
-          type: payload.type ?? "mail",
-          data: {
-            from: identity.node_id,
-            from_box: payload.from_box,
-            to: payload.to_box,
-            subject: payload.subject,
-            body: payload.body,
-            reply_to: payload.reply_to,
-            origin_id: payload.origin_id,
-            ...(payload.type === "task-ask" || payload.type === "task-reply"
-              ? { task: payload.task }
-              : {}),
-          },
-        });
-        if (delivered > 0) return null;
-      }
-      const target = findSendablePeer(db, nodeQuery);
-      if (!target) return "no paired peer";
-      const conn = resolvePeerTarget(db, nodeQuery);
-      if (!conn) return "no known address";
-      if (payload.type === "task-ask" || payload.type === "task-reply") {
-        const ok = await postTaskWire({
-          url: conn.url,
-          ...(conn.tls ? { tls: true } : {}),
-          ...(conn.pk !== null ? { pk: conn.pk } : {}),
-          token: target.token ?? "",
-          from: identity.node_id,
-          proof: pairingProof(identity, target.token ?? ""),
-          payload,
-        });
-        return ok ? null : ok;
-      }
-      const sent = await sendMail({
-        url: conn.url,
-        ...(conn.tls ? { tls: true } : {}),
-        ...(conn.pk !== null ? { pk: conn.pk } : {}),
-        token: target.token ?? "",
-        from: identity.node_id,
-        subject: payload.subject,
-        body: payload.body,
-        proof: pairingProof(identity, target.token ?? ""),
-        ...(payload.to_box ? { to: payload.to_box } : {}),
-        ...(payload.from_box ? { from_box: payload.from_box } : {}),
-        ...(payload.reply_to ? { reply_to: payload.reply_to } : {}),
-        origin_id: payload.origin_id,
-      });
-      if (sent === "unreachable") rebrowse();
-      return sent === "ok" ? null : sent;
-    });
+    void processOutbox(db, Date.now(), (payload) =>
+      deliverOutboxRow(db, identity, rebrowse, hub, payload),
+    );
   }, intervalMs);
   return {
     stop: () => clearInterval(timer),
   };
 }
 
-/** The lazy sweep: the standard deliver path, callable from the tools (the
- * mesh_inbox/mesh_status entries sweep before reading — the delivery happens
- * when someone looks, without depending on a background timer). */
+/** The lazy sweep: ONE deliver copy (deliverOutboxRow) — the delivery
+ * happens when someone looks, without depending on a background timer. */
 export function sweepOutbox(
   db: MeshDb,
   identity: NodeIdentity,
   rebrowse: () => void,
+  hub?: { isOpen(nodeId: string): boolean; push(nodeId: string, event: unknown): number },
 ): Promise<{ sent: number; failed: number }> {
-  return processOutbox(db, Date.now(), async (payload) => {
-    // The task payloads route to the dedicated endpoints (the same routing
-    // as the background sender — the lazy sweep must not lose them).
-    if (payload.type === "task-ask" || payload.type === "task-reply") {
-      // task-reply: the EXPLICIT composite node (the name-collision safe);
-      // task-ask: the federated owner resolved by name.
-      const fedNode =
-        payload.type === "task-reply" && payload.node_id
-          ? payload.node_id
-          : (federatedByName(db, payload.to_box)?.node_id ?? payload.node_id);
-      const target = findSendablePeer(db, fedNode);
-      if (!target) return "no paired peer";
-      const conn = resolvePeerTarget(db, fedNode);
-      if (!conn) return "no known address";
-      const ok = await postTaskWire({
-        url: conn.url,
-        ...(conn.tls ? { tls: true } : {}),
-        ...(conn.pk !== null ? { pk: conn.pk } : {}),
-        token: target.token ?? "",
-        from: identity.node_id,
-        proof: pairingProof(identity, target.token ?? ""),
-        payload,
-      });
-      return ok === "ok" ? null : ok;
-    }
-    const target = findSendablePeer(db, payload.node_id);
-    if (!target) return "no paired peer";
-    const conn = resolvePeerTarget(db, payload.node_id);
-    if (!conn) return "no known address";
-    const sent = await sendMail({
-      url: conn.url,
-      ...(conn.tls ? { tls: true } : {}),
-      ...(conn.pk !== null ? { pk: conn.pk } : {}),
-      token: target.token ?? "",
-      from: identity.node_id,
-      subject: payload.subject,
-      body: payload.body,
-      proof: pairingProof(identity, target.token ?? ""),
-      ...(payload.to_box ? { to: payload.to_box } : {}),
-      ...(payload.from_box ? { from_box: payload.from_box } : {}),
-      ...(payload.reply_to ? { reply_to: payload.reply_to } : {}),
-      origin_id: payload.origin_id,
-    });
-    if (sent === "unreachable") rebrowse();
-    return sent === "ok" ? null : sent;
-  });
+  return processOutbox(db, Date.now(), (payload) =>
+    deliverOutboxRow(db, identity, rebrowse, hub, payload),
+  );
 }
 
 /** The cross-host task payloads (the refonte P2.5): the task travels as an

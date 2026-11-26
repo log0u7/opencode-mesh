@@ -651,3 +651,76 @@ describe("3.2 (refonte): the task-reply routing prefers the EXPLICIT node (the n
     db.close();
   });
 });
+
+describe("A1 (refonte2): the delivery contract — an error NEVER marks the row sent", () => {
+  it("postTaskWire 'error 401' keeps the row QUEUED with attempts+1 (the B1 fix)", {
+    timeout: 10_000,
+  }, async () => {
+    const dir = mkdtempSync(join(tmpdir(), "a1-b1-"));
+    // A: le serveur TLS + la box alice.
+    const dbA = openMeshDb(join(dir, "a.db"));
+    registerMailbox(dbA, { name: "alice", session_id: "s-a", now: 1000 });
+    const identityA = loadOrCreateIdentity(join(dir, "id-a"));
+    const tlsA = buildTlsMaterial(identityA);
+    const { server, port } = await startMeshServer({
+      db: dbA,
+      port: 0,
+      tls: true,
+      tlsMaterial: tlsA,
+      self: { node_id: identityA.node_id, pk: identityA.public_key, hostname: "a" },
+    });
+    // B: le demandeur — le pairing avec le MAUVAIS token (le 401 au wire).
+    const dbB = openMeshDb(join(dir, "b.db"));
+    const identityB = loadOrCreateIdentity(join(dir, "id-b"));
+    pairWithToken(dbB, {
+      node_id: identityA.node_id,
+      hostname: "a",
+      fingerprint: "ff00",
+      token: "wrong-token",
+      public_key: identityA.public_key,
+      addresses: [`127.0.0.1:${port}`],
+    });
+    pairWithToken(dbA, {
+      node_id: identityB.node_id,
+      hostname: "b",
+      fingerprint: "ff00",
+      token: "wrong-token",
+      public_key: identityB.public_key,
+    });
+    queueOutbox(
+      dbB,
+      payload({
+        origin_id: "o-b1",
+        node_id: identityA.node_id,
+        to_box: "alice",
+        type: "task-reply",
+        task: { id: "t-b1", result: "r", state: "completed" },
+      }),
+      Date.now(),
+    );
+    // LE SENDER (la copie divergente): postTaskWire -> "error 401" — la row
+    // doit rester QUEUED (le OLD code: ok truthy -> null -> SENT: la tache
+    // disparaissait, le mr-review round-4 B1).
+    const sender = startOutboxSender(dbB, identityB, () => {}, 30);
+    let b1row: { state: string; attempts: number } | undefined;
+    for (let i = 0; i < 40; i += 1) {
+      await new Promise((r) => setTimeout(r, 100));
+      b1row = dbB.conn.get<{ state: string; attempts: number }>(
+        "SELECT state, attempts FROM outbox",
+      );
+      if (b1row && b1row.attempts >= 1) break;
+    }
+    sender.stop();
+    expect(b1row?.state).toBe("queued");
+    expect(b1row?.attempts).toBeGreaterThanOrEqual(1);
+    const row = dbB.conn.get<{ state: string; attempts: number }>(
+      "SELECT state, attempts FROM outbox",
+    )!;
+    expect(row.state).toBe("queued");
+    expect(row.attempts).toBe(1);
+    server.close();
+    dbA.close();
+    dbB.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+});
