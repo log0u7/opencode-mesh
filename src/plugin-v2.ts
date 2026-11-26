@@ -293,7 +293,7 @@ export const MeshV2 = Plugin.define({
     // picked up without the asking agent ever knowing).
     // The stream client + the hub (refonte 3.1): the SSE streams per peer —
     // the receive side never polls; the outbox pushes over the open streams.
-    const dispatch = (event: { type: string; data: unknown }) => {
+    const dispatch = (eventPeerNodeId: string) => (event: { type: string; data: unknown }) => {
       const d = event.data as {
         from?: string;
         from_box?: string;
@@ -301,6 +301,7 @@ export const MeshV2 = Plugin.define({
         subject?: string;
         body?: string;
         reply_to?: string;
+        kind?: "notify" | "fyi";
         origin_id?: string;
         task?: {
           id: string;
@@ -348,6 +349,10 @@ export const MeshV2 = Plugin.define({
         });
         return;
       }
+      // The SAME validation as /mail (the refonte2-C7): the events arrive
+      // over the stream OPENED TO an authenticated peer — its events carry
+      // ITS node id; anything else is a spoof, dropped.
+      if (d.from !== undefined && d.from !== eventPeerNodeId) return;
       deliverMessage(db, {
         from: d.from ?? "",
         from_box: d.from_box ?? null,
@@ -355,6 +360,7 @@ export const MeshV2 = Plugin.define({
         subject: d.subject ?? "",
         body: d.body ?? "",
         reply_to: d.reply_to ?? null,
+        kind: d.kind ?? "notify",
         origin_id: d.origin_id ?? null,
       });
     };
@@ -383,7 +389,7 @@ export const MeshV2 = Plugin.define({
             proof: pairingProof(identity, token),
           },
           {
-            onEvent: dispatch,
+            onEvent: dispatch(peer.node_id),
             // The drop: remove from the LIVE map; the client keeps its own
             // reconnection loop (openStreams will never duplicate it).
             onDrop: () => streamClients.delete(peer.node_id),

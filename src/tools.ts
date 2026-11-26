@@ -619,6 +619,7 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
               subject: String(args.subject),
               body: String(args.body),
               reply_to: to !== null ? replyToFor(to) : null,
+              kind,
               origin_id: randomUUID(),
             },
             Date.now(),

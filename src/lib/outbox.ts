@@ -293,6 +293,7 @@ export async function deliverOutboxRow(
         subject: payload.subject,
         body: payload.body,
         reply_to: payload.reply_to,
+        kind: payload.kind ?? "notify",
         origin_id: payload.origin_id,
         ...(payload.type === "task-ask" || payload.type === "task-reply"
           ? { task: payload.task }
