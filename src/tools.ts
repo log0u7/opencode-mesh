@@ -26,6 +26,7 @@ import {
   unreadCount,
   unreadMessages,
   unmatchedUnread,
+  waitReplyBroad,
   waitReplyRead,
 } from "./lib/mail.js";
 import { journalQuery } from "./lib/journal.js";
@@ -193,6 +194,14 @@ export const WORKER_TOOL_BLOCKLIST = new Set([
   "mesh_worker_stop",
   "mesh_worker_remove",
 ]);
+
+/** The hard cap (0.31.0): a wait parks the whole turn and makes the agent
+ * unreachable — every blocked second invites the host's user-prompt
+ * interrupt. 30s covers the fast-RPC case; anything longer is the wake
+ * pattern's job (send, end the turn, drain on the flash). */
+export const MESH_WAIT_MAX_S = 30;
+export const meshWaitClamp = (timeout: number | undefined): number =>
+  Math.min(typeof timeout === "number" && timeout > 0 ? timeout : MESH_WAIT_MAX_S, MESH_WAIT_MAX_S);
 
 export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
   const {
@@ -651,22 +660,22 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
     {
       name: "mesh_wait",
       description:
-        "Wait for a reply to a sent message (matching its reply_to). Blocks the turn: request/response completes within it. Replies that arrive through the wake path may carry no reply_to — the timeout lists them so you can drain instead.",
+        "Wait (max 30s) for a reply to a sent message. Only when your next step in THIS turn depends on the answer. Otherwise send, end the turn, the wake brings the reply.",
       fields: [
         str("id", "Message id from mesh_send output"),
-        num("timeout", "Seconds to wait (default 60)"),
+        num("timeout", "Seconds to wait (default 30, hard-capped at 30)"),
       ],
       execute: async (args, context) => {
         const sid = sessionID(context);
         touchMailbox(db, sid, Date.now());
-        // Default 60 (0.30.1, was 120): every second a wait blocks the turn it
-        // is exposed to the host's user-prompt interrupt — and the live test
-        // showed every real reply lands within ~60s anyway.
-        const seconds = typeof args.timeout === "number" ? args.timeout : 60;
+        const seconds = meshWaitClamp(typeof args.timeout === "number" ? args.timeout : undefined);
         const deadline = Date.now() + seconds * 1000;
         while (Date.now() < deadline) {
-          // Atomic fetch+ack, same race fix as mesh_inbox (0.16.1).
-          const row = waitReplyRead(db, String(args.id), sid);
+          // Atomic fetch+ack, same race fix as mesh_inbox (0.16.1). The
+          // broadened matcher (0.31.0) also returns on any message from the
+          // request's recipient box — the correlation survives a reply that
+          // skipped the auto-fill.
+          const row = waitReplyBroad(db, String(args.id), sid);
           if (row) {
             return JSON.stringify(row, null, 2);
           }
