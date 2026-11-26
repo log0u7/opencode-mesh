@@ -72,7 +72,15 @@ jobs:
             # the operator clear the zombie.
             REGISTERED="$(npm view "$PKG@$VER" version 2>/dev/null || true)"
             if [ -n "$REGISTERED" ]; then
-              echo "::error::zombie: $PKG@$VER is registered but its tarball is lost. npm unpublish $PKG@$VER --force, then re-run this workflow."
+              # Fastly caches NEGATIVE responses: a curl 404 during blob
+              # propagation gets re-served ~10 min (live on 0.31.0 — a healthy
+              # version looked lost). npm pack is the REAL client path: a pack
+              # success means the blob serves and the curl lied.
+              if npm pack "$PKG@$VER" --pack-destination /tmp >/dev/null 2>&1; then
+                echo "verified (npm pack): $PKG@$VER serves — the curl 404 was a cached negative"
+                exit 0
+              fi
+              echo "::error::zombie: $PKG@$VER is registered but its tarball is lost (npm pack fails). BEFORE unpublishing: run npm pack $PKG@$VER yourself past the ~10 min Fastly negative-cache window — a pack success means the version is HEALTHY. If it still fails: npm unpublish $PKG@$VER --force, then re-run this workflow."
               exit 1
             fi
           done
