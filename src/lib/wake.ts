@@ -3,14 +3,17 @@ import { pid } from "node:process";
 
 import type { MeshDb } from "./db.js";
 import {
+  claimFlash,
   deliverMessage,
   listMailboxes,
   mailboxByName,
+  releaseFlash,
   unreadBoxCount,
   wakeBoxStats,
   withTransaction,
 } from "./mail.js";
 import { pluginWarn, storeLogDir } from "./plugin-log.js";
+import { pluginVersion } from "./version.js";
 
 // The host's mid-turn signal. The live wire (opencode v2, generated client
 // types) carries BOTH families under `data`: session.execution.* (durable
@@ -96,9 +99,15 @@ export type WakeOptions = {
   /** One diagnostic line per flash (pid, box, fresh, data_version) beside
    * the store. Off by default — the ghost-counter hunt switch. */
   debugWake?: boolean;
+  /** The base flash-reminder cadence (the claim staleness): rows flashed
+   * longer ago are re-claimed and the box is reminded. Doubled per mute
+   * cycle by the fatigue guard. Default FATIGUE_MUTE_TTL_MS. */
+  fatigueTtlMs?: number;
   /** Poll interval in ms. 0 disables the loop. Default 5000. */
   intervalMs?: number;
-  /** Minimum delay between two consecutive wake prompts per mailbox. Default 60000. */
+  /** DEPRECATED (0.32.0): inert — the flash single-flight arbitrates the
+   * cadence in the DB; the reminder cadence is fatigueTtlMs. Accepted for
+   * options compat, never read. */
   cooldownMs?: number;
   /** Consecutive undrained prompts before giving up on a box. Default 3. */
   maxUndrainedPrompts?: number;
@@ -196,7 +205,6 @@ export function startWakeLoop(options: WakeOptions): WakeHandle {
   // 0.17.0 the sender can flag one deliberate broadcast wake:true.
   const wakePools = options.wakePools ?? false;
   const escalateTo = options.escalateTo ?? "orq";
-  const lastPromptAt = new Map<string, number>();
   const lastUnread = new Map<string, number>();
   const undrained = new Map<string, number>();
   const mutedSince = new Map<string, number>();
@@ -208,7 +216,6 @@ export function startWakeLoop(options: WakeOptions): WakeHandle {
   // phantom-unread class. Set at queue time, cleared when the session goes
   // busy (a delivered prompt CAUSES the turn, so the busy event is the
   // delivery receipt).
-  const pendingPrompt = new Map<string, number>();
   let stopped = false;
   let failures = 0;
   // Overlap guard (0.18.0): a prompt slower than the interval must not run
@@ -238,19 +245,6 @@ export function startWakeLoop(options: WakeOptions): WakeHandle {
       // plus one at prompt time. Boxes without unread deliveries are absent
       // from the result — their fatigue maps are cleared below like before.
       const statsByName = new Map(wakeBoxStats(options.db).map((s) => [s.box, s]));
-      // Clear in-flight gates: (a) delivered — the delivery causes a turn, the
-      // turn's busy event shows here as sessionRunning; (b) expired — a turn
-      // shorter than the poll interval fits entirely between two ticks, so
-      // the busy event can go unobserved; the TTL releases the gate and
-      // bounds any stuck state at the cost of at most one duplicate flash
-      // per TTL.
-      if (options.sessionRunning) {
-        for (const [sessionID, ts] of pendingPrompt) {
-          if (options.sessionRunning(sessionID) || now - ts >= PROMPT_GATE_TTL_MS) {
-            pendingPrompt.delete(sessionID);
-          }
-        }
-      }
       for (const box of listMailboxes(options.db)) {
         const stat = statsByName.get(box.name);
         const previous = lastUnread.get(box.name) ?? 0;
@@ -281,6 +275,11 @@ export function startWakeLoop(options: WakeOptions): WakeHandle {
           escalated.delete(box.name);
         }
         const cycles = undrained.get(box.name) ?? 0;
+        // The claim staleness for this pass: the base reminder cadence is the
+        // fatigue TTL — rows flashed longer ago are RE-claimed (the starved
+        // box reminds without new mail: the orq/6admin episode). The fatigue
+        // branch below widens it to the current (doubled) mute TTL.
+        let claimStaleAfter = options.fatigueTtlMs ?? FATIGUE_MUTE_TTL_MS;
         // Fatigue guard: prompted MAX times, never drained, count unchanged
         // → mute. Fatigue mute TTL (0.28.2): a muted box never unmuted by
         // itself — the purge requires the count to drop, which requires the
@@ -298,23 +297,16 @@ export function startWakeLoop(options: WakeOptions): WakeHandle {
           // doubles the TTL (10 -> 20 -> 40 -> 80 min cap) — a blocked agent
           // costs one reminder per doubling instead of one per 10 minutes.
           const cycle = muteCycles.get(box.name) ?? 0;
-          const ttl = Math.min(FATIGUE_MUTE_TTL_MS * 2 ** cycle, FATIGUE_MUTE_MAX_MS);
+          const base = options.fatigueTtlMs ?? FATIGUE_MUTE_TTL_MS;
+          const ttl = Math.min(base * 2 ** cycle, FATIGUE_MUTE_MAX_MS);
           if (now - mutedAt < ttl) continue;
+          claimStaleAfter = ttl;
           if (cycle >= ESCALATE_AFTER_MUTE_CYCLES) {
             escalateBox(options.db, escalateTo, box.name, cycle, stat.subject, escalated);
           }
           undrained.delete(box.name);
           mutedSince.set(box.name, now);
           muteCycles.set(box.name, cycle + 1);
-        }
-        // Prompt only on new mail (count grew) and outside the per-mailbox
-        // cooldown, so an agent idle in front of unread mail is reminded,
-        // not spammed.
-        if (
-          unread <= previous &&
-          now - (lastPromptAt.get(box.name) ?? 0) < (options.cooldownMs ?? DEFAULT_WAKE_COOLDOWN_MS)
-        ) {
-          continue;
         }
         const bound =
           typeof box.session_id === "string" &&
@@ -325,21 +317,23 @@ export function startWakeLoop(options: WakeOptions): WakeHandle {
           // pre-restart id): its live session will re-register and re-bind.
           continue;
         }
-        // Collapse gate: a prompt for this session is still queued — the host
-        // delivers it one idle cycle at a time and its turn drains the box.
-        // Queueing another only manufactures a stale phantom. Only engage
-        // when a sessionRunning callback exists (no busy signal, no delivery
-        // receipt — the gate would never clear).
-        if (options.sessionRunning && pendingPrompt.has(box.session_id)) {
-          continue;
-        }
         if (options.sessionRunning?.(box.session_id)) {
           // Mid-turn: a queued prompt would fire with a stale unread count
           // after the turn acked the mail. The turn-start check-in reads the
-          // box anyway (AGENTS.md convention) — skip.
+          // box anyway (AGENTS.md convention) — skip. BEFORE the claim: rows
+          // claimed and then skipped would never be announced (the post-turn
+          // tick only claims NULL rows).
           continue;
         }
-        lastPromptAt.set(box.name, now);
+        // The single-flight claim (0.32.0): the flash is DB-arbitrated across
+        // every instance and process sharing the store. 0 claimed = someone
+        // else announced these rows (or nothing fresh) — skip. The reminder
+        // path (the fatigue mute fall-through) re-claims rows whose flash is
+        // older than the mute TTL.
+        const claim = claimFlash(options.db, box.name, now, claimStaleAfter);
+        if (claim.claimed === 0) {
+          continue;
+        }
         undrained.set(box.name, cycles + 1);
         // The flash recomputes from the database at the moment it is emitted
         // (0.24.6): the tick-start grouped stat can be seconds old by the time
@@ -364,12 +358,9 @@ export function startWakeLoop(options: WakeOptions): WakeHandle {
           const dv = options.db.conn.get<{ data_version: number }>("PRAGMA data_version");
           pluginWarn(
             storeLogDir(options.db.path),
-            `flash pid=${pid} box=${box.name} fresh=${fresh} dataVersion=${dv?.data_version ?? "?"}`,
+            `flash v=${pluginVersion()} pid=${pid} box=${box.name} fresh=${fresh} dataVersion=${dv?.data_version ?? "?"}`,
           );
         }
-        // Collapse gate set ONLY now — after every bail: a bail here queues no
-        // prompt, and a gate set without one would mute the session forever.
-        if (options.sessionRunning) pendingPrompt.set(box.session_id, now);
         // Dispose during this tick (stop() below the running interval): the
         // prompt would fire into a torn-down host binding.
         if (stopped) return;
@@ -390,8 +381,10 @@ export function startWakeLoop(options: WakeOptions): WakeHandle {
             `msg_${randomUUID()}`,
           );
         } catch (error) {
-          // The prompt never queued: drop the gate so the next tick may retry.
-          pendingPrompt.delete(box.session_id);
+          // The prompt never fired: RELEASE the claim so the next tick
+          // re-claims and retries — a kept claim would starve the mail
+          // silently (claimed but never announced).
+          releaseFlash(options.db, box.name, claim.at);
           throw error;
         }
         // The prompt resolved after dispose: do not touch any further box.

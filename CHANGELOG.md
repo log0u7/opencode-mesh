@@ -5,6 +5,39 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.32.0] - 2026-11-26
+
+### Fixed
+
+- The flash single-flight (F1): the "already announced" decision lives in the
+  SHARED database instead of per-instance memory. Two plugin instances' wake
+  loops each iterate ALL boxes with their own pendingPrompt/lastPromptAt
+  maps — neither saw the other's gate, 6admin got prompted 13s apart and
+  answered twice (two identical DMs, live). deliveries.flashed_at (schema
+  v17) + claimFlash(): one atomic UPDATE claims the box's announceable
+  unreads; 0 claimed = another instance announced them. The fatigue reminder
+  re-claims rows flashed before the reminder TTL (the starved box still
+  reminds), and a prompt whose host refused RELEASES its claim (a kept claim
+  starves the mail silently). pendingPrompt/lastPromptAt/cooldown are gone:
+  per-instance memory no longer carries any routing decision.
+- The 2-minute absolute collapse window (F2): an identical re-send within
+  2 minutes collapses EVEN IF the original was already read — the wake
+  double-prompt re-sent 13s after the receiver drained, and the dedup's
+  active-ping rule delivered it fresh. Past the window the active-ping
+  contract is unchanged.
+- The mesh_wait timeout names the clamp (F4): "requested 60s" returning
+  "within 30s" with no word about the clamp read as a mechanical abort or
+  an agent silence. The message now says "requested Ns, clamped at
+  MESH_WAIT_MAX_S=30 — send, end the turn, the wake brings the reply" and
+  carries the doctrine on every timeout.
+
+### Added
+
+- mesh_status exposes plugin_version (F3): the LOADED plugin version — the
+  runtime truth the config pin only intends. The convergence survey asked
+  agents for their loaded version and got guesses; the process now names
+  its own package, and the debugWake flash line is prefixed with v=.
+
 ## [0.31.0] - 2026-11-26
 
 ### Fixed

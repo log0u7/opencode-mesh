@@ -15,7 +15,7 @@ export type MeshDb = {
 
 // Bump when a schema change needs a migration step; the version anchors future
 // migrations that cannot be expressed as idempotent `CREATE ... IF NOT EXISTS`.
-const SCHEMA_VERSION = 16;
+const SCHEMA_VERSION = 17;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS peers (
@@ -159,6 +159,18 @@ function migrate(conn: SqliteConn): void {
   if (!mailboxColumns.includes("registered_at")) {
     conn.exec("ALTER TABLE mailboxes ADD COLUMN registered_at INTEGER");
     conn.exec("UPDATE mailboxes SET registered_at = created_at WHERE registered_at IS NULL");
+  }
+  // v17: deliveries.flashed_at — the flash single-flight (0.32.0). The claim
+  // "this delivery has been announced to its session" lives in the SHARED
+  // database instead of per-instance memory (two plugin instances' wake
+  // loops could not see each other's pendingPrompt maps: the double-flash
+  // class — 6admin re-prompted 13s apart, two identical replies). NULL =
+  // never flashed.
+  const deliveryColumns = conn
+    .all<{ name: string }>("PRAGMA table_info(deliveries)")
+    .map((row) => row.name);
+  if (!deliveryColumns.includes("flashed_at")) {
+    conn.exec("ALTER TABLE deliveries ADD COLUMN flashed_at INTEGER");
   }
   // v5: messages.origin_id (cross-host broadcast dedup).
   if (!messageColumns.includes("origin_id")) {

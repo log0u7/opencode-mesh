@@ -1,7 +1,7 @@
 export interface SqliteConn {
   all<T = unknown>(sql: string, params?: unknown[]): T[];
   get<T = unknown>(sql: string, params?: unknown[]): T | null;
-  run(sql: string, params?: unknown[]): void;
+  run(sql: string, params?: unknown[]): { changes: number };
   exec(sql: string): void;
   /** Is a transaction open on this connection? A leaked BEGIN pins the WAL
    * snapshot forever — the phantom-unread class — so callers assert on it. */
@@ -45,9 +45,10 @@ function createPreparedConn(db: NodeSqliteDatabase): SqliteConn {
       const stmt = db.prepare(sql);
       return (stmt.get(...(params ?? [])) as T | undefined) ?? null;
     },
-    run(sql: string, params?: unknown[]): void {
+    run(sql: string, params?: unknown[]): { changes: number } {
       const stmt = db.prepare(sql);
-      stmt.run(...(params ?? []));
+      const res = stmt.run(...(params ?? [])) as { changes?: number | bigint } | undefined;
+      return { changes: Number(res?.changes ?? 0) };
     },
     exec(sql: string): void {
       db.exec(sql);
@@ -69,8 +70,9 @@ function createBunConn(db: BunSqliteDatabase): SqliteConn {
     get<T = unknown>(sql: string, params?: unknown[]): T | null {
       return (db.query(sql).get(...(params ?? [])) as T | undefined) ?? null;
     },
-    run(sql: string, params?: unknown[]): void {
-      db.run(sql, params ?? []);
+    run(sql: string, params?: unknown[]): { changes: number } {
+      const res = db.run(sql, params ?? []) as { changes?: number | bigint } | undefined;
+      return { changes: Number(res?.changes ?? 0) };
     },
     exec(sql: string): void {
       db.run(sql);

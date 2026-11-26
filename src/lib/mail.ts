@@ -85,6 +85,10 @@ export const MESSAGE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 // the burst retries were already covered, the interruption-resume class was
 // not. The rolling recent_mails purge bounds the rows.
 export const RESEND_WINDOW_MS = 6 * 60 * 60 * 1000;
+/** The absolute collapse window (0.32.0): an identical re-send this fast is
+ * mechanical (the wake double-prompt), never a human ping — collapsed even
+ * when the original was already read. */
+export const RESEND_ABSOLUTE_WINDOW_MS = 2 * 60 * 1000;
 
 // Content key of the re-send defense. to_box stays in the key so a broadcast
 // to one box never swallows the same text to another, and reply_to so an
@@ -304,11 +308,19 @@ export function deliverMessage(db: MeshDb, input: DeliverInput): DeliverResult {
   // sender re-executed its sends following a local crash). Runs after the
   // origin_id check: cross-host replays dedup there, real re-sends here.
   const contentHash = mailContentHash(input);
-  const resent = db.conn.get<{ message_id: string }>(
-    "SELECT message_id FROM recent_mails WHERE hash = ? AND ts > ?",
+  const resent = db.conn.get<{ message_id: string; ts: number }>(
+    "SELECT message_id, ts FROM recent_mails WHERE hash = ? AND ts > ?",
     [contentHash, created_at - RESEND_WINDOW_MS],
   );
   if (resent) {
+    // The absolute window (0.32.0): an identical re-send within 2 minutes
+    // collapses EVEN IF the original was already read. The wake double-prompt
+    // class re-sends 13s after the receiver drained — a genuine human ping
+    // never re-writes the identical bytes that fast, and the single-flight
+    // claim (F1) is the source fix; this window is the belt-and-braces net.
+    if (created_at - resent.ts < RESEND_ABSOLUTE_WINDOW_MS) {
+      return { ok: true, id: resent.message_id, recipients: [] };
+    }
     // The dedup protects the UNREAD backlog (the re-send burst class): an
     // identical re-send AFTER the original was read is an active ping —
     // deliver it fresh (0.29.0 review). The original's read state lives on
@@ -961,6 +973,40 @@ export function lastUnansweredFrom(
     [fromBox, toBox, Date.now() - sinceMs, fromBox],
   );
   return row?.id ?? null;
+}
+
+/** The flash single-flight (0.32.0): claim the box's announceable unreads
+ * ATOMICALLY in the shared database — the decision "already flashed" lives
+ * in the store every instance sees, not in per-instance memory (two plugin
+ * instances' wake loops each iterate ALL boxes with their own pendingPrompt
+ * maps: neither saw the other's gate, 6admin got prompted 13s apart and
+ * answered twice). Returns the claimed row count: 0 = nothing fresh (or
+ * another instance just claimed it) — skip the prompt. Rows whose flash is
+ * older than staleAfterMs are RE-claimed: that is the reminder path (the
+ * fatigue mute re-prompts through it), 0 = first flash only. */
+export function claimFlash(
+  db: MeshDb,
+  box: string,
+  now: number,
+  staleAfterMs: number,
+): { claimed: number; at: number } {
+  const res = db.conn.run(
+    `UPDATE deliveries SET flashed_at = ?
+     WHERE to_box = ? AND status = 'unread'
+       AND (flashed_at IS NULL OR flashed_at <= ?)`,
+    [now, box, now - staleAfterMs],
+  );
+  return { claimed: res.changes, at: now };
+}
+
+/** Release a flash claim whose prompt FAILED: the rows go back to NULL so
+ * the next tick re-claims them — a claimed-but-never-announced delivery is
+ * the silent-starvation class (the flash died, the mail looks announced). */
+export function releaseFlash(db: MeshDb, box: string, at: number): void {
+  db.conn.run("UPDATE deliveries SET flashed_at = NULL WHERE to_box = ? AND flashed_at = ?", [
+    box,
+    at,
+  ]);
 }
 
 /** The local registry rows this node owns (for the /registry-sync push). */
