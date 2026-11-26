@@ -714,11 +714,6 @@ export type WakeBoxStat = {
   wakeable: boolean;
   /** Subject of the box's OLDEST unread delivery (the wake preview). */
   subject: string;
-  /** Id of that same OLDEST unread delivery: the wake flash carries it so the
-   * woken agent can answer with reply_to=<id> — without it, wake-path replies
-   * are invisible to mesh_wait's correlation (the 02:17 repro: the reply sat
-   * in the box, the waiter starved to its full timeout). */
-  id: string | null;
 };
 
 /** Per-box unread stats for the wake loop, in ONE grouped statement: before
@@ -731,7 +726,7 @@ export type WakeBoxStat = {
  * rows (pre-origin_id) count as direct, like every other gate. */
 export function wakeBoxStats(db: MeshDb): WakeBoxStat[] {
   return db.conn
-    .all<{ box: string; unread: number; wakeable: number; subject: string; id: string | null }>(
+    .all<{ box: string; unread: number; wakeable: number; subject: string }>(
       `SELECT d.to_box AS box,
               COUNT(*) AS unread,
               MAX(CASE WHEN m.wake = 1
@@ -740,10 +735,7 @@ export function wakeBoxStats(db: MeshDb): WakeBoxStat[] {
                        THEN 1 ELSE 0 END) AS wakeable,
               (SELECT m3.subject FROM deliveries d3 JOIN messages m3 ON m3.id = d3.message_id
                 WHERE d3.to_box = d.to_box AND d3.status = 'unread'
-                ORDER BY d3.created_at ASC, d3.id ASC LIMIT 1) AS subject,
-              (SELECT m4.id FROM deliveries d4 JOIN messages m4 ON m4.id = d4.message_id
-                WHERE d4.to_box = d.to_box AND d4.status = 'unread'
-                ORDER BY d4.created_at ASC, d4.id ASC LIMIT 1) AS id
+                ORDER BY d3.created_at ASC, d3.id ASC LIMIT 1) AS subject
        FROM deliveries d JOIN messages m ON m.id = d.message_id
        WHERE d.status = 'unread'
          AND d.to_box NOT IN (SELECT name FROM mailboxes WHERE node_id IS NOT NULL)
@@ -754,7 +746,6 @@ export function wakeBoxStats(db: MeshDb): WakeBoxStat[] {
       unread: row.unread,
       wakeable: row.wakeable === 1,
       subject: row.subject,
-      id: row.id,
     }));
 }
 
