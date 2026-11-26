@@ -13,6 +13,7 @@ import {
   withTransaction,
 } from "./mail.js";
 import { pluginWarn, storeLogDir } from "./plugin-log.js";
+import { pluginVersion } from "./version.js";
 
 // The host's mid-turn signal. The live wire (opencode v2, generated client
 // types) carries BOTH families under `data`: session.execution.* (durable
@@ -355,7 +356,7 @@ export function startWakeLoop(options: WakeOptions): WakeHandle {
           const dv = options.db.conn.get<{ data_version: number }>("PRAGMA data_version");
           pluginWarn(
             storeLogDir(options.db.path),
-            `flash pid=${pid} box=${box.name} fresh=${fresh} dataVersion=${dv?.data_version ?? "?"}`,
+            `flash v=${pluginVersion()} pid=${pid} box=${box.name} fresh=${fresh} dataVersion=${dv?.data_version ?? "?"}`,
           );
         }
         // Dispose during this tick (stop() below the running interval): the

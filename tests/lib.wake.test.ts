@@ -1037,6 +1037,9 @@ describe("P5 (0.31.0): debugWake — the flash leaves a diagnostic line", () => 
     expect(log).toContain("box=a");
     expect(log).toContain("fresh=1");
     expect(log).toMatch(/dataVersion=\d+/);
+    // The loaded plugin version rides the diagnostic line: the flash names
+    // WHICH code flashed (the process version, not the config pin).
+    expect(log).toMatch(/v=\d+\.\d+\.\d+/);
     db.close();
     rmSync(dir, { recursive: true, force: true });
   });

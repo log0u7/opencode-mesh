@@ -7,6 +7,7 @@ import type { MeshDb } from "./lib/db.js";
 import type { Fanout } from "./lib/fanout.js";
 import { buildOfferBlob, parseOfferBlob } from "./lib/offer-blob.js";
 import { listOwnAddresses, type AddressOptions } from "./lib/providers.js";
+import { pluginVersion } from "./lib/version.js";
 import { pairingProof, type NodeIdentity } from "./lib/identity.js";
 import {
   deliverMessage,
@@ -244,6 +245,7 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
               paired: p.paired,
               addresses: p.addresses,
             })),
+            plugin_version: pluginVersion(),
             mailboxes: listMailboxes(db).map((b) => ({
               name: b.name,
               role: b.role,

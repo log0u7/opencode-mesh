@@ -266,6 +266,15 @@ describe("mesh_wait", () => {
   });
 });
 
+describe("P3+ (0.32.0): mesh_status exposes the loaded plugin version", () => {
+  it("carries plugin_version: the runtime truth the agents could only guess (the convergence lesson)", async () => {
+    const { call } = setup();
+    const out = await call("mesh_status", {}, "s1");
+    const status = JSON.parse(out) as { plugin_version: string };
+    expect(status.plugin_version).toMatch(/^\d+\.\d+\.\d+/);
+  });
+});
+
 describe("P3 (0.31.0): the reply correlation is server-side", () => {
   it("a bare answer auto-carries reply_to = the pending question it answers", async () => {
     const { db, call } = setup();
