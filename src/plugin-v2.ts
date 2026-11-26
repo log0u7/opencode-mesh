@@ -412,9 +412,9 @@ export const MeshV2 = Plugin.define({
     const wake = startWakeLoop({
       db,
       onTick: async () => {
-        await sweepOutbox(db, identity, () => browseHandle?.refresh());
-        // The new pairings (mid-session) get their streams within one tick:
-        // the pairing writes fire this instance's WAL watcher.
+        // The outbox sweep: GONE from the tick (the refonte2-B4 — the
+        // background sender owns the delivery; the queueOutbox nudge wakes
+        // it). The tick keeps: the streams for the new pairings.
         openStreams();
       },
       ...(options.wake === false ? { intervalMs: 0 } : {}),

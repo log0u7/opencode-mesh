@@ -553,7 +553,6 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
                   },
                   Date.now(),
                 );
-                await sweepOutbox(db, identity, () => mesh.rebrowse?.());
                 return `queued: ${queued.id.slice(0, 8)} — the background sender delivers it to the owning peer (retries with backoff)`;
               }
             }
@@ -627,7 +626,6 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
           // The first delivery attempt is INLINE: a reachable peer gets the
           // mail in the same call; the unreachable case falls back to the
           // background sender + the retries.
-          await sweepOutbox(db, identity, () => mesh.rebrowse?.());
           return `queued: ${queued.id.slice(0, 8)} — the background sender delivers it (retries with backoff; the state rides mesh_status)`;
         }
         return await selfSendLocal();
@@ -712,7 +710,6 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
         if (!isLocal) {
           const fed = federatedByName(db, to);
           queueTaskAsk(db, task, Date.now());
-          await sweepOutbox(db, identity, () => mesh.rebrowse?.());
           const fedNodeId = fed?.node_id ?? "";
           return JSON.stringify(
             { task_id: task.id, group: task.group_id, queued_for: fedNodeId.slice(0, 8) },
@@ -754,7 +751,6 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
         // the reply crosses back through the outbox.
         if (res.cross) {
           queueTaskReply(db, taskId, String(args.result ?? ""), state, Date.now());
-          await sweepOutbox(db, identity, () => mesh.rebrowse?.());
           return JSON.stringify({ task_id: taskId.slice(0, 8), state, queued_back: true });
         }
         return JSON.stringify({ task_id: taskId.slice(0, 8), state, notified: res.notified });

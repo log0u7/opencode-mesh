@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { appendFileSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -166,10 +166,13 @@ describe("two-node integration", () => {
     // empty).
     expect(sent).toContain("queued:");
     let inbox = "";
-    for (let i = 0; i < 40; i += 1) {
+    for (let i = 0; i < 120; i += 1) {
       inbox = String(await a.tool?.mesh_inbox?.execute({}, ctx()));
       if (inbox.includes('"s"')) break;
+      await new Promise((r) => setTimeout(r, 250));
     }
+    expect(inbox).toContain('"s"');
+
     expect(inbox).toContain('"s"');
 
     await a.dispose?.();

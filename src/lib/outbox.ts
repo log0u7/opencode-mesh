@@ -56,7 +56,20 @@ export const OUTBOX_BACKOFF_BASE_MS = 30_000;
 export const OUTBOX_BACKOFF_CAP_MS = 10 * 60 * 1000;
 export const OUTBOX_MAX_ATTEMPTS = 12;
 
-/** Queue a remote delivery: the row lands, the caller answers "queued". */
+// The nudge registry (the refonte2-B4): queueOutbox WAKES the sender — a
+// trigger, never an await. The tools' turns never block on a sweep: the
+// row lands, the nudge fires, the background sender delivers.
+const nudges = new Set<() => void>();
+
+/** The sender registers its immediate-sweep hook (a nudge = the non-blocking
+ * trigger; the interval stays as the safety net). */
+export function registerOutboxNudge(nudge: () => void): () => void {
+  nudges.add(nudge);
+  return () => nudges.delete(nudge);
+}
+
+/** Queue a remote delivery: the row lands, the caller answers "queued", the
+ * sender is nudged. */
 export function queueOutbox(db: MeshDb, payload: OutboxPayload, now: number): OutboxRow {
   const id = randomUUID();
   db.conn.run(
@@ -64,6 +77,13 @@ export function queueOutbox(db: MeshDb, payload: OutboxPayload, now: number): Ou
      VALUES (?, ?, 'queued', 0, ?, ?)`,
     [id, JSON.stringify(payload), now, now],
   );
+  for (const nudge of nudges) {
+    try {
+      nudge();
+    } catch {
+      // The nudge must never take the queue down with it.
+    }
+  }
   return {
     id,
     payload,
@@ -106,14 +126,24 @@ export function claimOutboxDue(db: MeshDb, now: number): OutboxRow[] {
 
 /** Mark a delivery sent. */
 export function markOutboxSent(db: MeshDb, id: string, now: number): void {
-  db.conn.run("UPDATE outbox SET state = 'sent', next_at = ? WHERE id = ?", [now, id]);
+  try {
+    db.conn.run("UPDATE outbox SET state = 'sent', next_at = ? WHERE id = ?", [now, id]);
+  } catch {
+    // The store closed under the in-flight sweep (the dispose race): the
+    // end-of-process state, not a delivery failure.
+  }
 }
 
 /** Mark a delivery failed: the attempts grow, the backoff doubles (capped).
  * Past OUTBOX_MAX_ATTEMPTS the row goes to 'failed' (dead-letter — visible
  * in mesh_status, never re-thrown at an agent). */
 export function markOutboxFailed(db: MeshDb, id: string, now: number, error: string): void {
-  const row = db.conn.get<{ attempts: number }>("SELECT attempts FROM outbox WHERE id = ?", [id]);
+  let row: { attempts: number } | null;
+  try {
+    row = db.conn.get<{ attempts: number }>("SELECT attempts FROM outbox WHERE id = ?", [id]);
+  } catch {
+    return; // the store closed under the in-flight sweep (the dispose race)
+  }
   if (!row) return;
   const attempts = row.attempts + 1;
   if (attempts >= OUTBOX_MAX_ATTEMPTS) {
@@ -141,23 +171,37 @@ export async function processOutbox(
   deliver: (payload: OutboxPayload) => Promise<string | null>,
 ): Promise<{ sent: number; failed: number }> {
   const rows = claimOutboxDue(db, now);
+  // The per-peer concurrency (the refonte2-B4): the rows GROUP by node —
+  // a dead peer's timeouts never block the other peers' deliveries (the
+  // head-of-line class). Within a node: sequential (the ordering holds).
+  const byNode = new Map<string, typeof rows>();
+  for (const row of rows) {
+    const node = row.payload.node_id;
+    const group = byNode.get(node) ?? [];
+    group.push(row);
+    byNode.set(node, group);
+  }
   let sent = 0;
   let failed = 0;
-  for (const row of rows) {
-    try {
-      const error = await deliver(row.payload);
-      if (error === null) {
-        markOutboxSent(db, row.id, now);
-        sent += 1;
-      } else {
-        markOutboxFailed(db, row.id, now, error);
-        failed += 1;
+  await Promise.all(
+    [...byNode.values()].map(async (group) => {
+      for (const row of group) {
+        try {
+          const error = await deliver(row.payload);
+          if (error === null) {
+            markOutboxSent(db, row.id, now);
+            sent += 1;
+          } else {
+            markOutboxFailed(db, row.id, now, error);
+            failed += 1;
+          }
+        } catch (error) {
+          markOutboxFailed(db, row.id, now, String(error).slice(0, 200));
+          failed += 1;
+        }
       }
-    } catch (error) {
-      markOutboxFailed(db, row.id, now, String(error).slice(0, 200));
-      failed += 1;
-    }
-  }
+    }),
+  );
   return { sent, failed };
 }
 
@@ -207,9 +251,13 @@ export async function deliverOutboxRow(
     if (delivered > 0) return null;
   }
   const target = findSendablePeer(db, nodeQuery);
-  if (!target) return "no paired peer";
+  if (!target) {
+    return "no paired peer";
+  }
   const conn = resolvePeerTarget(db, nodeQuery);
-  if (!conn) return "no known address";
+  if (!conn) {
+    return "no known address";
+  }
   if (payload.type === "task-ask" || payload.type === "task-reply") {
     const ok = await postTaskWire({
       url: conn.url,
@@ -252,13 +300,18 @@ export function startOutboxSender(
   intervalMs = 1_000,
   hub?: { isOpen(nodeId: string): boolean; push(nodeId: string, event: unknown): number },
 ): { stop(): void } {
-  const timer = setInterval(() => {
+  const sweep = () => {
     void processOutbox(db, Date.now(), (payload) =>
       deliverOutboxRow(db, identity, rebrowse, hub, payload),
     );
-  }, intervalMs);
+  };
+  const timer = setInterval(sweep, intervalMs);
+  const unNudge = registerOutboxNudge(sweep);
   return {
-    stop: () => clearInterval(timer),
+    stop: () => {
+      clearInterval(timer);
+      unNudge();
+    },
   };
 }
 

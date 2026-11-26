@@ -596,3 +596,36 @@ describe("P2 (refonte): the ask/reply tools — the federated ask queues, the cr
     db.close();
   });
 });
+
+describe("B4 (refonte2): the tools NEVER block on the outbox sweeps", () => {
+  it("mesh_send to a BLACK-HOLE peer answers in well under 1s (no sweep await)", {
+    timeout: 10_000,
+  }, async () => {
+    const net = await import("node:net");
+    // Le black-hole: accepte la connexion, ne repond JAMAIS — le sendMail
+    // tient son timeout (10s): le await sweep du OLD code gelait le tour
+    // pendant ce temps. Le NEW: queue + trigger, la reponse immediate.
+    const blackHole = net.createServer((socket) => {
+      socket.on("data", () => {}); // accepte, ignore
+    });
+    await new Promise<void>((r) => blackHole.listen(0, "127.0.0.1", r));
+    const holePort = (blackHole.address() as { port: number }).port;
+    const { db, call } = setup();
+    await call("mesh_register", { name: "alice" }, "s1");
+    pairWithToken(db, {
+      node_id: "dead-peer",
+      hostname: "dead",
+      fingerprint: "ff",
+      token: "tok-dead",
+      public_key: "test-pk",
+      addresses: [`127.0.0.1:${holePort}`],
+    });
+    const t0 = Date.now();
+    const out = await call("mesh_send", { peer: "dead-peer", subject: "s", body: "b" }, "s1");
+    const dt = Date.now() - t0;
+    expect(out).toContain("queued:");
+    expect(dt).toBeLessThan(1000);
+    blackHole.close();
+    db.close();
+  });
+});
