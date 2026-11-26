@@ -5,6 +5,17 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.31.1] - 2026-11-26
+
+### Fixed
+
+- Republish: the npm registry accepted the 0.31.0 packument write but LOST
+  the tarball (GET 404 on the official dist URL, four minutes after the
+  publish step printed its success line) — the zombie metadata blocks any
+  0.31.0 re-publish (E409). Same content as 0.31.0, re-tagged; latest moves
+  here. Lesson recorded: the publish step's success line is not proof — the
+  tarball GET plus the packument entry are.
+
 ## [0.31.0] - 2026-11-26
 
 ### Fixed
