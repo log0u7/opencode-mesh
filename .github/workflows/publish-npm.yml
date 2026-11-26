@@ -50,7 +50,7 @@ jobs:
           OK=0
           for i in $(seq 1 18); do
             URL="$(npm view "$PKG@$VER" dist.tarball 2>/dev/null || true)"
-            if [ -n "$URL" ] && [ "$(curl -s -o /dev/null -w '%{http_code}' "$URL")" = "200" ]; then
+            if [ -n "$URL" ] && [ "$(curl -s --max-time 30 -o /dev/null -w '%{http_code}' "$URL")" = "200" ]; then
               echo "verified: $URL"
               OK=1
               break
