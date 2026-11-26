@@ -22,6 +22,9 @@ export type Mailbox = {
    * registry pushed at its rebind) — addressing-only, never a delivery
    * target, never woken. */
   node_id: string | null;
+  /** The LOGICAL clock per name (the refonte 3.2): incremented at each
+   * rebind, the federation LWW resolves on it instead of the wall clock. */
+  epoch: number;
 };
 
 export type RegisterMailboxInput = {
@@ -124,6 +127,7 @@ function rowToMailbox(row: MailboxRow): Mailbox {
   return {
     name: row.name,
     session_id: row.session_id,
+    epoch: row.epoch ?? 1,
     role: row.role ?? null,
     pools: parsePools(row.pools),
     bind_key: row.bind_key ?? null,
@@ -136,6 +140,7 @@ function rowToMailbox(row: MailboxRow): Mailbox {
 type MailboxRow = {
   name: string;
   node_id: string | null;
+  epoch?: number;
   session_id: string;
   role: string | null;
   pools: string;
@@ -164,14 +169,15 @@ export function registerMailbox(db: MeshDb, input: RegisterMailboxInput): Mailbo
   // A re-register without a primary keeps the declared one (identity trait,
   // same lifetime as bind_key).
   db.conn.run(
-    `INSERT INTO mailboxes (name, session_id, role, pools, bind_key, primary_pool, last_seen, created_at, registered_at)
-     VALUES (?, ?, ?, '[]', ?, ?, ?, ?, ?)
+    `INSERT INTO mailboxes (name, session_id, role, pools, bind_key, primary_pool, last_seen, created_at, registered_at, epoch)
+     VALUES (?, ?, ?, '[]', ?, ?, ?, ?, ?, 1)
      ON CONFLICT(name) DO UPDATE SET session_id = excluded.session_id,
        role = excluded.role,
        bind_key = COALESCE(excluded.bind_key, mailboxes.bind_key),
        primary_pool = COALESCE(excluded.primary_pool, mailboxes.primary_pool),
        last_seen = excluded.last_seen,
        registered_at = excluded.registered_at,
+       epoch = COALESCE(mailboxes.epoch, 0) + 1,
        node_id = NULL`,
     [
       input.name,
@@ -803,6 +809,9 @@ export type FederatedRegistryRow = {
   pools: string;
   primary_pool: string | null;
   registered_at: number;
+  /** The LOGICAL clock per name (the refonte 3.2): the LWW resolves on it
+   * when present; absent = a pre-3.2 peer, the legacy wall-clock rules. */
+  epoch?: number;
 };
 
 /**
@@ -894,9 +903,11 @@ export function mergeFederatedRegistry(
         registered_at: number | null;
         last_seen: number;
         bind_key: string | null;
-      }>("SELECT node_id, registered_at, last_seen, bind_key FROM mailboxes WHERE name = ?", [
-        row.name,
-      ]);
+        epoch: number | null;
+      }>(
+        "SELECT node_id, registered_at, last_seen, bind_key, epoch FROM mailboxes WHERE name = ?",
+        [row.name],
+      );
       if (local) {
         if (local.node_id === null || local.node_id === "") {
           // This node owns the name. Three guards before a takeover: (1) a LIVE
@@ -908,18 +919,27 @@ export function mergeFederatedRegistry(
           // explicit rebind on the other side transferred it).
           if (local.bind_key !== null && local.bind_key !== "") continue;
           if (local.last_seen > now - LIVE_LOCAL_LAST_SEEN_MS) continue;
-          const localAt = local.registered_at ?? 0;
-          if (row.registered_at <= localAt) continue;
+          // The EPOCH first (the refonte 3.2): the logical clock per name —
+          // a wall clock can lie (the clock-skew class), an epoch cannot.
+          // The TRANSITIONAL guard: an epoch-less inbound (a pre-3.2 peer)
+          // NEVER takes a local name — the takeover requires the new
+          // protocol; the legacy wall-clock transfer is retired.
+          if ((row.epoch ?? 0) === 0) continue;
+          const localEpoch = local.epoch ?? 0;
+          if ((row.epoch ?? 0) <= localEpoch) continue;
         } else if (local.node_id !== senderNodeId) {
           // A federated row owned by a THIRD node: the sender must be the owner
           // to update it — the third-party re-broadcast never overwrites.
           continue;
+        } else if ((row.epoch ?? 0) > 0) {
+          if ((row.epoch ?? 0) <= (local.epoch ?? 0)) continue;
         } else if ((local.registered_at ?? 0) >= row.registered_at) {
           continue;
         }
         db.conn.run(
           `UPDATE mailboxes SET session_id = ?, role = ?, pools = ?, primary_pool = ?,
-         registered_at = ?, last_seen = ?, bind_key = NULL, node_id = ? WHERE name = ?`,
+         registered_at = ?, last_seen = ?, bind_key = NULL, node_id = ?,
+         epoch = ? WHERE name = ?`,
           [
             row.session_id,
             row.role,
@@ -928,13 +948,14 @@ export function mergeFederatedRegistry(
             row.registered_at,
             Date.now(),
             senderNodeId,
+            row.epoch ?? (local.epoch ?? 0) + 1,
             row.name,
           ],
         );
       } else {
         db.conn.run(
-          `INSERT INTO mailboxes (name, session_id, role, pools, bind_key, primary_pool, last_seen, created_at, registered_at, node_id)
-         VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)`,
+          `INSERT INTO mailboxes (name, session_id, role, pools, bind_key, primary_pool, last_seen, created_at, registered_at, node_id, epoch)
+         VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?)`,
           [
             row.name,
             row.session_id,
@@ -945,6 +966,7 @@ export function mergeFederatedRegistry(
             Date.now(),
             row.registered_at,
             senderNodeId,
+            row.epoch ?? 1,
           ],
         );
       }
@@ -1263,9 +1285,9 @@ export function localRegistryRows(db: MeshDb): FederatedRegistryRow[] {
   // the peers (the PO fix 6).
   return db.conn
     .all<FederatedRegistryRow>(
-      "SELECT name, session_id, role, pools, primary_pool, registered_at FROM mailboxes WHERE node_id IS NULL",
+      "SELECT name, session_id, role, pools, primary_pool, registered_at, epoch FROM mailboxes WHERE node_id IS NULL",
     )
-    .map((r) => ({ ...r, registered_at: r.registered_at ?? 0 }));
+    .map((r) => ({ ...r, registered_at: r.registered_at ?? 0, epoch: r.epoch ?? 1 }));
 }
 
 // ---- the board (the refonte P4: the shared status state, not DMs) ----

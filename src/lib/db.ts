@@ -15,7 +15,7 @@ export type MeshDb = {
 
 // Bump when a schema change needs a migration step; the version anchors future
 // migrations that cannot be expressed as idempotent `CREATE ... IF NOT EXISTS`.
-const SCHEMA_VERSION = 21;
+const SCHEMA_VERSION = 22;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS peers (
@@ -171,6 +171,13 @@ function migrate(conn: SqliteConn): void {
     .map((row) => row.name);
   if (!deliveryColumns.includes("flashed_at")) {
     conn.exec("ALTER TABLE deliveries ADD COLUMN flashed_at INTEGER");
+  }
+  // v22: mailboxes.epoch — the LOGICAL clock per name (the refonte 3.2):
+  // incremented at each rebind, replaces registered_at (wall clock, the
+  // clock-skew class) in the federation LWW. Legacy rows backfill to 1.
+  if (!mailboxColumns.includes("epoch")) {
+    conn.exec("ALTER TABLE mailboxes ADD COLUMN epoch INTEGER");
+    conn.exec("UPDATE mailboxes SET epoch = 1 WHERE epoch IS NULL");
   }
   // v18: messages.kind — notify (wakes per the wake rules) vs fyi (never
   // wakes: read at the next drain or flash). Legacy rows read as notify.

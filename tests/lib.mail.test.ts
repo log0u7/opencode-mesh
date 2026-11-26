@@ -821,8 +821,11 @@ describe("registry federation (0.30.0)", () => {
           role: "ops",
           pools: "[]",
           primary_pool: null,
-          // The strictly newer registration: the ownership transfers.
+          // The strictly higher epoch (the refonte 3.2: the logical clock —
+          // the wall-clock transfer is retired, a pre-3.2 row never takes a
+          // name): the ownership transfers.
           registered_at: Date.now() - 500,
+          epoch: 2,
         },
       ],
       "node-ricinus",
@@ -1110,6 +1113,67 @@ describe("P2 (refonte): the tasks core — server-side correlation, one wake for
       "SELECT m.body FROM messages m JOIN deliveries d ON d.message_id = m.id WHERE d.to_box = 'alice'",
     )!;
     expect(got.body).toContain("deadline exceeded");
+    db.close();
+  });
+});
+
+describe("3.2 (refonte): the registry anti-entropy — the logical epoch per name", () => {
+  it("registerMailbox increments the epoch at each rebind; a new box starts at 1", () => {
+    const db = openMeshDb(":memory:");
+    const r1 = registerMailbox(db, { name: "orq", session_id: "s1", now: 1000 });
+    expect(r1.epoch).toBe(1);
+    // The rebind (a new session takes the name): the epoch grows.
+    const r2 = registerMailbox(db, { name: "orq", session_id: "s2", now: 2000 });
+    expect(r2.epoch).toBe(2);
+    db.close();
+  });
+
+  it("the merge resolves on (epoch, node_id): a higher epoch wins even with an older wall clock", () => {
+    const db = openMeshDb(":memory:");
+    registerMailbox(db, { name: "orq", session_id: "s1", now: 1000 });
+    // The local epoch is 1. An inbound row with epoch 5 and a registered_at
+    // OLDER than the local one: the EPOCH wins (the wall clock lied — the
+    // clock-skew class), the ownership transfers.
+    const applied = mergeFederatedRegistry(
+      db,
+      [
+        {
+          name: "orq",
+          session_id: "ses-foreign",
+          role: "po",
+          pools: "[]",
+          primary_pool: null,
+          registered_at: Date.now() - 60 * 60 * 1000,
+          epoch: 5,
+        },
+      ],
+      "node-b",
+    );
+    expect(applied).toBe(1);
+    expect(federatedByName(db, "orq")).not.toBeNull();
+    db.close();
+  });
+
+  it("the push carries the epoch; the receiver without it keeps its name (the epoch guard)", () => {
+    const db = openMeshDb(":memory:");
+    registerMailbox(db, { name: "orq", session_id: "s1", now: 1000 });
+    // An inbound row WITHOUT an epoch (a pre-3.2 peer): the legacy LWW rules
+    // apply (the live-session guard) — no blind takeover.
+    const applied = mergeFederatedRegistry(
+      db,
+      [
+        {
+          name: "orq",
+          session_id: "ses-foreign",
+          role: "po",
+          pools: "[]",
+          primary_pool: null,
+          registered_at: Date.now() - 1000,
+        },
+      ],
+      "node-b",
+    );
+    expect(applied).toBe(0);
     db.close();
   });
 });
