@@ -1219,6 +1219,29 @@ export function replyTask(
   result: string,
   state: TaskState = "completed",
 ): { ok: boolean; error?: string; notified: boolean; cross?: boolean } {
+  // BEGIN IMMEDIATE (the refonte2-C1): the concurrent replies to the same
+  // group serialize — two simultaneous last-replies cannot both fire the
+  // digest (the duplicate class); the sweep racing a reply serializes too.
+  db.conn.exec("BEGIN IMMEDIATE");
+  try {
+    const out = replyTaskInner(db, taskId, replyingBox, result, state);
+    db.conn.exec("COMMIT");
+    return out;
+  } catch (error) {
+    try {
+      db.conn.exec("ROLLBACK");
+    } catch {}
+    throw error;
+  }
+}
+
+function replyTaskInner(
+  db: MeshDb,
+  taskId: string,
+  replyingBox: string,
+  result: string,
+  state: TaskState = "completed",
+): { ok: boolean; error?: string; notified: boolean; cross?: boolean } {
   const task = getTask(db, taskId);
   if (!task) return { ok: false, error: "unknown task", notified: false };
   if (task.to_box !== replyingBox)
@@ -1248,6 +1271,28 @@ export function replyTask(
   // — the task came from another node. The reply crosses BACK through the
   // outbox (the tools layer queues task-reply); no local notification.
   if (!mailboxByName(db, task.from_box)) return { ok: true, notified: false, cross: true };
+  // The GROUP digest fires ONCE (the refonte2-C1): group_notified_at marks
+  // the moment — the LATER transitions (input_required -> completed, a
+  // second failure...) notify INDIVIDUALLY, never re-digest (the duplicate
+  // class: the digest re-firing at every transition).
+  if (task.group_id) {
+    const groupNotified = db.conn.get<{ n: number }>(
+      "SELECT COUNT(*) AS n FROM tasks WHERE group_id = ? AND group_notified_at IS NOT NULL",
+      [task.group_id],
+    )?.n;
+    if (groupNotified !== undefined && groupNotified > 0) {
+      deliverMessage(db, {
+        from: "mesh-tasks",
+        from_box: task.to_box,
+        to_box: task.from_box,
+        subject: `task ${task.id.slice(0, 8)} ${state}`,
+        body: `${result}\n(task ${task.id.slice(0, 8)}, state: ${state})`,
+        kind: "notify",
+      });
+      return { ok: true, notified: true };
+    }
+    db.conn.run("UPDATE tasks SET group_notified_at = ? WHERE group_id = ?", [now, task.group_id]);
+  }
   const body = task.group_id
     ? `The group is answered:\n${groupDigest(db, task.group_id)}`
     : `${result}\n(task ${taskId.slice(0, 8)}, state: ${state})`;
@@ -1265,16 +1310,27 @@ export function replyTask(
 /** The deadline sweeper: expired open tasks fail WITHOUT intervention and
  * the asker is notified (the group rules apply). Returns the swept count. */
 export function sweepTasks(db: MeshDb, now: number): number {
-  const expired = db.conn.all<{ id: string }>(
-    `SELECT id FROM tasks WHERE deadline IS NOT NULL AND deadline < ? AND state IN ('submitted','working','input_required')`,
-    [now],
-  );
-  for (const row of expired) {
-    const task = getTask(db, row.id);
-    if (!task) continue;
-    replyTask(db, row.id, task.to_box, "deadline exceeded", "failed");
+  // BEGIN IMMEDIATE (the refonte2-C1): the sweep races a reply — the
+  // serialization kills the double-digest / double-notification class.
+  db.conn.exec("BEGIN IMMEDIATE");
+  try {
+    const expired = db.conn.all<{ id: string }>(
+      `SELECT id FROM tasks WHERE deadline IS NOT NULL AND deadline < ? AND state IN ('submitted','working','input_required')`,
+      [now],
+    );
+    for (const row of expired) {
+      const task = getTask(db, row.id);
+      if (!task) continue;
+      replyTaskInner(db, row.id, task.to_box, "deadline exceeded", "failed");
+    }
+    db.conn.exec("COMMIT");
+    return expired.length;
+  } catch (error) {
+    try {
+      db.conn.exec("ROLLBACK");
+    } catch {}
+    throw error;
   }
-  return expired.length;
 }
 
 /** mesh_tasks: the compact listing (no blocking). group filters; the caller's

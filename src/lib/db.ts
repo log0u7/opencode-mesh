@@ -15,7 +15,7 @@ export type MeshDb = {
 
 // Bump when a schema change needs a migration step; the version anchors future
 // migrations that cannot be expressed as idempotent `CREATE ... IF NOT EXISTS`.
-const SCHEMA_VERSION = 22;
+const SCHEMA_VERSION = 23;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS peers (
@@ -239,6 +239,11 @@ function migrate(conn: SqliteConn): void {
       CREATE INDEX idx_tasks_to_state ON tasks(to_box, state);
       CREATE INDEX idx_tasks_group ON tasks(group_id);
     `);
+  }
+  // v23: tasks.group_notified_at (the refonte2-C1): the group digest fires
+  // ONCE — the later transitions notify individually.
+  if (!taskColumns.includes("group_notified_at")) {
+    conn.exec("ALTER TABLE tasks ADD COLUMN group_notified_at INTEGER");
   }
   // v5: messages.origin_id (cross-host broadcast dedup).
   if (!messageColumns.includes("origin_id")) {

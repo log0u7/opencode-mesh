@@ -1187,3 +1187,38 @@ describe("3.2 (refonte): the composite separator guard", () => {
     db.close();
   });
 });
+
+describe("C1 (refonte2): the digest fires ONCE — the later transitions notify individually", () => {
+  it("the group digest once; the later transitions deliver individual notifications", () => {
+    const db = openMeshDb(":memory:");
+    registerMailbox(db, { name: "alice", session_id: "s1", now: 1000 });
+    registerMailbox(db, { name: "bob", session_id: "s2", now: 1000 });
+    const t1 = askTask(db, { from_box: "alice", to_box: "bob", question: "q1", group_id: "g2" });
+    const t2 = askTask(db, { from_box: "alice", to_box: "bob", question: "q2", group_id: "g2" });
+    // Les deux reponses: le digest part UNE fois (la 2e reponse ferme le groupe).
+    replyTask(db, t1.id, "bob", "rep 1", "completed");
+    const r2 = replyTask(db, t2.id, "bob", "rep 2", "input_required");
+    expect(r2.notified).toBe(true);
+    const digestCount = db.conn.all<{ subject: string }>(
+      "SELECT subject FROM messages WHERE body LIKE 'The group is answered%'",
+    ).length;
+    expect(digestCount).toBe(1);
+    // La transition ULTERIEURE de t2 (input_required -> completed): la
+    // notification INDIVIDUELLE, jamais un second digest.
+    db.conn.run("UPDATE tasks SET state = 'input_required', updated_at = ? WHERE id = ?", [
+      Date.now(),
+      t2.id,
+    ]);
+    const r3 = replyTask(db, t2.id, "bob", "rep 2 final", "completed");
+    expect(r3.notified).toBe(true);
+    const digestCount2 = db.conn.all<{ subject: string }>(
+      "SELECT subject FROM messages WHERE body LIKE 'The group is answered%'",
+    ).length;
+    expect(digestCount2).toBe(1);
+    const individual = db.conn.get<{ body: string }>(
+      "SELECT m.body FROM messages m WHERE m.subject LIKE 'task % completed' ORDER BY m.created_at DESC",
+    )!;
+    expect(individual.body).toContain("rep 2 final");
+    db.close();
+  });
+});
