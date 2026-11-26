@@ -591,13 +591,48 @@ describe("resend dedup window (0.29.0: the minutes-apart re-send class)", () => 
       to_box: "a",
       subject: "rapport round",
       body: "round terminé",
-      created_at: 2000,
+      // 121s later: past the 2-minute absolute window (the 0.32.0 collapse)
+      // but inside the 6h freshness window — an active ping, not a duplicate.
+      created_at: 1000 + 121_000,
     });
     expect(second.ok).toBe(true);
     if (!second.ok) throw new Error("delivery failed");
     expect(second.id).not.toBe(first.id);
     expect(second.recipients).toEqual(["a"]);
     expect(unreadBoxCount(db, "a")).toBe(1);
+    db.close();
+  });
+
+  it("collapses an identical re-send within 2 minutes even when the original was read (the wake double-prompt class, 0.32.0)", () => {
+    const db = openMeshDb(":memory:");
+    registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
+    const first = deliverMessage(db, {
+      from: "6admin",
+      to_box: "a",
+      subject: "re: DNS",
+      body: "recette confirmee",
+      created_at: 1000,
+    });
+    if (!first.ok) throw new Error("delivery failed");
+    // The receiver acks the original (webmaster drained it while 6admin's
+    // double-prompted wake loop re-sent 13s later): the identical re-send
+    // inside 2 minutes is NEVER a human ping — collapse.
+    ackInbox(
+      db,
+      db.conn.all<{ id: string }>("SELECT id FROM deliveries WHERE to_box = 'a'").map((r) => r.id),
+    );
+    const second = deliverMessage(db, {
+      from: "6admin",
+      to_box: "a",
+      subject: "re: DNS",
+      body: "recette confirmee",
+      created_at: 1013,
+    });
+    expect(second.ok).toBe(true);
+    if (!second.ok) throw new Error("delivery failed");
+    expect(second.id).toBe(first.id);
+    expect(second.recipients).toEqual([]);
+    expect(unreadBoxCount(db, "a")).toBe(0);
     db.close();
   });
 
