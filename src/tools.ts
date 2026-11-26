@@ -9,7 +9,7 @@ import { buildOfferBlob, parseOfferBlob } from "./lib/offer-blob.js";
 import { listOwnAddresses, type AddressOptions } from "./lib/providers.js";
 import { pluginVersion } from "./lib/version.js";
 import { pairingProof, type NodeIdentity } from "./lib/identity.js";
-import { queueOutbox, sweepOutbox } from "./lib/outbox.js";
+import { queueOutbox, queueTaskAsk, queueTaskReply, sweepOutbox } from "./lib/outbox.js";
 import {
   deliverMessage,
   inboxRead,
@@ -727,9 +727,15 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
         if (!replyingBox)
           return "error: only the task's target mailbox may reply — run mesh_register with that box";
         const res = replyTask(db, taskId, replyingBox, String(args.result ?? ""), state);
-        return res.ok
-          ? JSON.stringify({ task_id: taskId.slice(0, 8), state, notified: res.notified })
-          : `error: ${res.error}`;
+        if (!res.ok) return `error: ${res.error}`;
+        // The MIRROR reply (refonte P2.5): the asker is on another node —
+        // the reply crosses back through the outbox.
+        if (res.cross) {
+          queueTaskReply(db, taskId, String(args.result ?? ""), state, Date.now());
+          await sweepOutbox(db, identity, () => mesh.rebrowse?.());
+          return JSON.stringify({ task_id: taskId.slice(0, 8), state, queued_back: true });
+        }
+        return JSON.stringify({ task_id: taskId.slice(0, 8), state, notified: res.notified });
       },
     },
     {

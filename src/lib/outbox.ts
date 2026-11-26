@@ -1,9 +1,9 @@
 import { randomUUID } from "node:crypto";
-import { appendFileSync } from "node:fs";
 import type { MeshDb } from "./db.js";
-import { sendMail } from "./client.js";
+import { postTaskWire, sendMail } from "./client.js";
 import { pairingProof, type NodeIdentity } from "./identity.js";
 import { findSendablePeer, resolvePeerTarget } from "./peers.js";
+import { deliverMessage, federatedByName, getTask, mailboxByName, type TaskState } from "./mail.js";
 
 // The outbox (the refonte P2.6): mesh_send writes the remote delivery here
 // and returns "queued" — the background sender delivers with ack and
@@ -26,6 +26,20 @@ export type OutboxPayload = {
   /** The delivery dedup (effectively-once): the sender carries origin_id —
    * a retried delivery collapses at the receiver. */
   origin_id: string;
+  /** The payload type (refonte P2.5): mail (default) | task-ask | task-reply
+   * — the sender routes the task payloads to the dedicated endpoints. */
+  type?: OutboxType;
+  /** The task fields for the task payloads. */
+  task?: {
+    id: string;
+    from_box: string | null;
+    to_box: string;
+    question?: string;
+    group_id?: string | null;
+    deadline?: number | null;
+    result?: string;
+    state?: TaskState;
+  };
 };
 
 export type OutboxRow = {
@@ -158,21 +172,33 @@ export function startOutboxSender(
   rebrowse: () => void,
   intervalMs = 1_000,
 ): { stop(): void } {
-  appendFileSync("/tmp/opencode/sender.log", "sender CREE\n");
   const timer = setInterval(() => {
-    appendFileSync("/tmp/opencode/sender.log", "tick\n");
-    void (async () => {
-      const due = db.conn.all<{ id: string }>(
-        "SELECT id FROM outbox WHERE state = 'queued' AND next_at <= ?",
-      ).length;
-      appendFileSync("/tmp/opencode/sender.log", `sweep: due=${due}\n`);
-      return null;
-    })();
     void processOutbox(db, Date.now(), async (payload) => {
-      const target = findSendablePeer(db, payload.node_id);
+      // The task payloads route by the FEDERATED box (the owner resolved at
+      // delivery), not by node_id.
+      const nodeQuery =
+        payload.type === "task-ask" || payload.type === "task-reply"
+          ? (federatedByName(db, payload.to_box)?.node_id ?? payload.node_id)
+          : payload.node_id;
+      if (!nodeQuery) return "no target node";
+      const target = findSendablePeer(db, nodeQuery);
       if (!target) return "no paired peer";
-      const conn = resolvePeerTarget(db, payload.node_id);
+      const conn = resolvePeerTarget(db, nodeQuery);
       if (!conn) return "no known address";
+      if (payload.type === "task-ask" || payload.type === "task-reply") {
+        // The dedicated task endpoints (the same pairing auth as /mail).
+        const endpoint = payload.type === "task-ask" ? "/task-ask" : "/task-reply";
+        const ok = await postTaskWire({
+          url: conn.url,
+          ...(conn.tls ? { tls: true } : {}),
+          ...(conn.pk !== null ? { pk: conn.pk } : {}),
+          token: target.token ?? "",
+          from: identity.node_id,
+          proof: pairingProof(identity, target.token ?? ""),
+          payload,
+        });
+        return ok ? null : ok;
+      }
       const sent = await sendMail({
         url: conn.url,
         ...(conn.tls ? { tls: true } : {}),
@@ -192,10 +218,7 @@ export function startOutboxSender(
     });
   }, intervalMs);
   return {
-    stop: () => {
-      appendFileSync("/tmp/opencode/sender.log", "STOP appele\n");
-      clearInterval(timer);
-    },
+    stop: () => clearInterval(timer),
   };
 }
 
@@ -229,4 +252,117 @@ export function sweepOutbox(
     if (sent === "unreachable") rebrowse();
     return sent === "ok" ? null : sent;
   });
+}
+
+/** The cross-host task payloads (the refonte P2.5): the task travels as an
+ * outbox row, the terminal state comes back through the same channel. The
+ * ASKER'S node is the source of truth; the responder's node holds a MIRROR
+ * row (the SAME id) so its mesh_reply works locally. */
+export type OutboxType = "mail" | "task-ask" | "task-reply";
+
+/** The asker's side: queue the task ask to the responder's node. */
+export function queueTaskAsk(
+  db: MeshDb,
+  task: {
+    id: string;
+    from_box: string | null;
+    to_box: string;
+    question: string;
+    group_id: string | null;
+    deadline: number | null;
+  },
+  now: number,
+): string {
+  const row = queueOutbox(
+    db,
+    {
+      node_id: "",
+      to_box: task.to_box,
+      from_box: task.from_box,
+      subject: `task ${task.id.slice(0, 8)}`,
+      body: task.question,
+      origin_id: task.id,
+      type: "task-ask",
+      task: {
+        id: task.id,
+        from_box: task.from_box,
+        to_box: task.to_box,
+        question: task.question,
+        group_id: task.group_id,
+        deadline: task.deadline,
+      },
+    } as OutboxPayload,
+    now,
+  );
+  return row.id;
+}
+
+/** The responder's side (POST /task-ask): create the MIRROR row (the same
+ * id — the reply correlation is the id itself) and deliver the task message
+ * to the local responder's box. */
+export function handleTaskAsk(db: MeshDb, payload: OutboxPayload): void {
+  const t = payload.task!;
+  const now = Date.now();
+  const existing = db.conn.get<{ id: string }>("SELECT id FROM tasks WHERE id = ?", [t.id]);
+  if (existing) return;
+  db.conn.run(
+    `INSERT INTO tasks (id, from_box, to_box, group_id, question, result, state, created_at, updated_at, deadline)
+     VALUES (?, ?, ?, ?, ?, NULL, 'submitted', ?, ?, ?)`,
+    [
+      t.id,
+      payload.from_box ?? null,
+      t.to_box,
+      t.group_id ?? null,
+      t.question,
+      now,
+      now,
+      t.deadline,
+    ],
+  );
+  deliverMessage(db, {
+    from: "mesh-tasks",
+    from_box: payload.from_box,
+    to_box: t.to_box,
+    subject: `task ${t.id.slice(0, 8)}: ${(t.question ?? "").slice(0, 60)}`,
+    body:
+      `${t.question ?? ""}\n\n` +
+      `Reply with: mesh_reply(task_id="${t.id}", result="...", state="completed") ` +
+      `— the asker is on another node: the reply travels back automatically.`,
+    kind: "notify",
+  });
+}
+
+/** The responder's side: the reply to a MIRROR task crosses back to the
+ * asker's node (the mirror's from_box is NOT a local box). */
+export function queueTaskReply(
+  db: MeshDb,
+  taskId: string,
+  result: string,
+  state: TaskState,
+  now: number,
+): string | null {
+  const task = getTask(db, taskId);
+  if (!task) return null;
+  // The mirror detection: the asker's box is not local (a federated row).
+  if (mailboxByName(db, task.from_box ?? "")) return null;
+  // The asker's remote reference: "node/box" (the /task-ask composite) —
+  // the node drives the delivery, the box rides for the asker's records.
+  const sep = (task.from_box ?? "").indexOf("/");
+  const askerNode = sep > 0 ? task.from_box!.slice(0, sep) : "";
+  const askerBox = sep > 0 ? task.from_box!.slice(sep + 1) : (task.from_box ?? "");
+  const row = queueOutbox(
+    db,
+    {
+      node_id: askerNode,
+      to_box: askerBox,
+      from_box: task.to_box,
+      subject: `task-reply ${task.id.slice(0, 8)}`,
+      body: result,
+      origin_id: `${task.id}:${state}`,
+      type: "task-reply",
+      task: { id: task.id, result, state },
+    } as OutboxPayload,
+    now,
+  );
+  return row.id;
 }

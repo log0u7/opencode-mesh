@@ -19,15 +19,19 @@ import {
   type SpawnReplayStore,
 } from "./distant-spawn.js";
 import { countRunningSpawnedByPeer } from "./workers.js";
+import { handleTaskAsk } from "./outbox.js";
 import {
   deliverMessage,
+  getTask,
   listMailboxes,
   MESSAGE_TTL_MS,
   purgeExpired,
   receiveMessage,
   mergeFederatedRegistry,
+  replyTask,
   unreadCount,
   withTransaction,
+  type TaskState,
 } from "./mail.js";
 import type { Fanout } from "./fanout.js";
 import { receiveMemorySync } from "./memory-sync.js";
@@ -280,6 +284,107 @@ async function handle(
       json(res, 200, { accepted });
     } catch {
       json(res, 500, { error: "memory-sync storage failed" });
+    }
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/task-ask") {
+    // Refonte P2.5: a peer's ask creates a MIRROR task row (the same id —
+    // the reply correlation is the id) and delivers the task message to the
+    // local responder's box. The auth = the pairing machinery like /mail.
+    const body = await readBody(req, 256 * 1024);
+    if ("error" in body) {
+      json(res, body.error === "too_large" ? 413 : 400, { error: "body too large" });
+      return;
+    }
+    const from = parseMail(body.body)?.from ?? "";
+    const proof = parseMail(body.body)?.proof ?? "";
+    const peer = authenticate(db, req, from, proof);
+    if (!peer) {
+      json(res, 401, { error: "unauthorized" });
+      return;
+    }
+    try {
+      const parsed = JSON.parse(body.body) as {
+        from_box?: string;
+        task?: {
+          id: string;
+          to_box: string;
+          question: string;
+          group_id?: string | null;
+          deadline?: number | null;
+        };
+      };
+      if (!parsed.task?.id || !parsed.task.to_box) {
+        json(res, 400, { error: "task payload malformed" });
+        return;
+      }
+      // The asker's remote reference: node/box composite — the replyTask's
+      // mirror detection reads it as non-local, and the reply crosses back
+      // to this node id.
+      const askerBox = `${peer.node_id}/${parsed.from_box ?? ""}`;
+      handleTaskAsk(db, {
+        node_id: peer.node_id,
+        to_box: parsed.task.to_box,
+        from_box: askerBox,
+        subject: `task ${parsed.task.id.slice(0, 8)}`,
+        body: parsed.task.question ?? "",
+        origin_id: parsed.task.id,
+        type: "task-ask",
+        task: {
+          id: parsed.task.id,
+          from_box: askerBox,
+          to_box: parsed.task.to_box,
+          question: parsed.task.question,
+          group_id: parsed.task.group_id ?? null,
+          deadline: parsed.task.deadline ?? null,
+        },
+      });
+      json(res, 200, { ok: true });
+    } catch {
+      json(res, 500, { error: "task-ask failed" });
+    }
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/task-reply") {
+    // Refonte P2.5: a peer's reply applies to the ORIGINAL task row (the
+    // source of truth) and notifies the local asker (the group digest rules).
+    const body = await readBody(req, 256 * 1024);
+    if ("error" in body) {
+      json(res, body.error === "too_large" ? 413 : 400, { error: "body too large" });
+      return;
+    }
+    const from = parseMail(body.body)?.from ?? "";
+    const proof = parseMail(body.body)?.proof ?? "";
+    const peer = authenticate(db, req, from, proof);
+    if (!peer) {
+      json(res, 401, { error: "unauthorized" });
+      return;
+    }
+    try {
+      const parsed = JSON.parse(body.body) as {
+        task?: { id: string; result?: string; state?: string };
+      };
+      if (!parsed.task?.id) {
+        json(res, 400, { error: "task payload malformed" });
+        return;
+      }
+      const task = getTask(db, parsed.task.id);
+      if (!task) {
+        json(res, 404, { error: "unknown task" });
+        return;
+      }
+      replyTask(
+        db,
+        parsed.task.id,
+        task.to_box,
+        parsed.task.result ?? "",
+        (parsed.task.state ?? "completed") as TaskState,
+      );
+      json(res, 200, { ok: true });
+    } catch {
+      json(res, 500, { error: "task-reply failed" });
     }
     return;
   }

@@ -1,7 +1,17 @@
 import { describe, expect, it } from "vitest";
 import { openMeshDb } from "../src/lib/db.js";
 import {
+  askTask,
+  getTask,
+  mergeFederatedRegistry,
+  registerMailbox,
+  replyTask,
+} from "../src/lib/mail.js";
+import {
   claimOutboxDue,
+  handleTaskAsk,
+  queueTaskAsk,
+  queueTaskReply,
   markOutboxFailed,
   OUTBOX_BACKOFF_BASE_MS,
   OUTBOX_MAX_ATTEMPTS,
@@ -91,5 +101,81 @@ describe("the outbox (refonte P2.6): queued, retried, effectively-once", () => {
     const lastFailureAt = now + 4 * OUTBOX_BACKOFF_BASE_MS;
     expect(nextAt!.next_at - lastFailureAt).toBeLessThanOrEqual(10 * 60 * 1000);
     db.close();
+  });
+});
+
+describe("P2.5 (refonte): the cross-host tasks — the asker's node is the source of truth", () => {
+  it("the round trip: ask crosses, the mirror replies, the reply applies back home", () => {
+    // === L'ASKER (le node A): la row originale + l'ask via l'outbox ===
+    const a = openMeshDb(":memory:");
+    registerMailbox(a, { name: "alice", session_id: "s-a", now: 1000 });
+    const fed = mergeFederatedRegistry(
+      a,
+      [
+        {
+          name: "bob-remote",
+          session_id: "ses-b",
+          role: "ops",
+          pools: "[]",
+          primary_pool: null,
+          registered_at: Date.now() - 1000,
+        },
+      ],
+      "node-b",
+    );
+    void fed;
+    const task = askTask(a, { from_box: "alice", to_box: "bob-remote", question: "quel etat?" });
+    queueTaskAsk(a, task, Date.now());
+    // La row originale + la row outbox task-ask.
+    expect(getTask(a, task.id)?.state).toBe("submitted");
+    const askRow = a.conn.get<{ payload: string; state: string }>(
+      "SELECT payload, state FROM outbox WHERE json_extract(payload,'$.type') = 'task-ask'",
+    )!;
+    expect(askRow.state).toBe("queued");
+
+    // === LE RESPONDANT (le node B): /task-ask cree le MIROIR (le meme id) ===
+    const b = openMeshDb(":memory:");
+    registerMailbox(b, { name: "bob-remote", session_id: "s-b", now: 1000 });
+    const askPayload = JSON.parse(askRow.payload) as Parameters<typeof handleTaskAsk>[1];
+    handleTaskAsk(b, { ...askPayload, from_box: "node-a/alice" });
+    const mirror = getTask(b, task.id)!;
+    expect(mirror.state).toBe("submitted");
+    expect(mirror.from_box).toBe("node-a/alice");
+    // Le message tache est dans la box du respondant.
+    expect(
+      b.conn.get<{ n: number }>("SELECT COUNT(*) AS n FROM deliveries WHERE to_box = 'bob-remote'")
+        ?.n,
+    ).toBe(1);
+
+    // === LE RESPONDANT repond: le miroir passe completed, la reply REPART par l'outbox ===
+    const rep = replyTask(b, task.id, "bob-remote", "build vert", "completed");
+    expect(rep.ok).toBe(true);
+    expect(rep.cross).toBe(true);
+    // La couche tools (mesh_reply) queue le cross-reply a la frontiere.
+    queueTaskReply(b, task.id, "build vert", "completed", Date.now());
+    const replyRow = b.conn.get<{ payload: string }>(
+      "SELECT payload FROM outbox WHERE json_extract(payload,'$.type') = 'task-reply'",
+    )!;
+    const replyPayload = JSON.parse(replyRow.payload);
+    expect(replyPayload.node_id).toBe("node-a");
+    expect(replyPayload.task.state).toBe("completed");
+
+    // === L'ASKER applique la reply (le /task-reply): la row originale + la notification ===
+    const applied = replyTask(
+      a,
+      task.id,
+      task.to_box,
+      replyPayload.task.result,
+      replyPayload.task.state,
+    );
+    expect(applied.ok).toBe(true);
+    expect(applied.notified).toBe(true);
+    expect(getTask(a, task.id)?.state).toBe("completed");
+    const got = a.conn.get<{ body: string }>(
+      "SELECT m.body FROM messages m JOIN deliveries d ON d.message_id = m.id WHERE d.to_box = 'alice'",
+    )!;
+    expect(got.body).toContain("build vert");
+    a.close();
+    b.close();
   });
 });

@@ -1121,6 +1121,10 @@ export function askTask(
     ],
   );
   const id8 = id.slice(0, 8);
+  // A FEDERATED target (refonte P2.5): the ask travels through the outbox
+  // (the tools layer queues task-ask) — a local delivery would sink into an
+  // addressing-only row.
+  if (!mailboxByName(db, input.to_box)) return getTask(db, id)!;
   deliverMessage(db, {
     from: "mesh-tasks",
     from_box: input.from_box,
@@ -1182,7 +1186,7 @@ export function replyTask(
   replyingBox: string,
   result: string,
   state: TaskState = "completed",
-): { ok: boolean; error?: string; notified: boolean } {
+): { ok: boolean; error?: string; notified: boolean; cross?: boolean } {
   const task = getTask(db, taskId);
   if (!task) return { ok: false, error: "unknown task", notified: false };
   if (task.to_box !== replyingBox)
@@ -1204,6 +1208,10 @@ export function replyTask(
   if (!notifyNow) return { ok: true, notified: false };
   if (task.group_id && !groupReady(db, task.group_id)) return { ok: true, notified: false };
   if (!task.from_box) return { ok: true, notified: false };
+  // The MIRROR detection (refonte P2.5): the asker's box is not a LOCAL box
+  // — the task came from another node. The reply crosses BACK through the
+  // outbox (the tools layer queues task-reply); no local notification.
+  if (!mailboxByName(db, task.from_box)) return { ok: true, notified: false, cross: true };
   const body = task.group_id
     ? `The group is answered:\n${groupDigest(db, task.group_id)}`
     : `${result}\n(task ${taskId.slice(0, 8)}, state: ${state})`;
