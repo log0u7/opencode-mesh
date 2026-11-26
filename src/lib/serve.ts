@@ -25,6 +25,7 @@ import {
   deliverMessage,
   getTask,
   listMailboxes,
+  mailboxByName,
   MESSAGE_TTL_MS,
   purgeExpired,
   receiveMessage,
@@ -435,6 +436,21 @@ async function handle(
       const task = getTask(db, parsed.task.id);
       if (!task) {
         json(res, 404, { error: "unknown task" });
+        return;
+      }
+      // The owner check (the refonte2-P3): the authenticated peer must own
+      // the task's TARGET box (the responder) — a third-party peer cannot
+      // answer someone else's task.
+      const targetMailbox = mailboxByName(db, task.to_box);
+      if (targetMailbox?.node_id !== peer.node_id) {
+        json(res, 403, { error: "only the task's owning node may reply" });
+        return;
+      }
+      // The state enum (the refonte2-P3): a bogus state would block the
+      // task open-and-terminal forever (the sweeper ignores it).
+      const VALID_STATES = ["working", "input_required", "completed", "failed", "canceled"];
+      if (!VALID_STATES.includes(parsed.task.state ?? "completed")) {
+        json(res, 400, { error: `state must be one of ${VALID_STATES.join(" | ")}` });
         return;
       }
       replyTask(

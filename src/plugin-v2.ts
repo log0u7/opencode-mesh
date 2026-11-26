@@ -315,13 +315,13 @@ export const MeshV2 = Plugin.define({
       if (event.type === "task-reply" && d.task?.id) {
         const task = getTask(db, d.task.id);
         if (task) {
-          replyTask(
-            db,
-            d.task.id,
-            task.to_box,
-            d.task.result ?? "",
-            (d.task.state ?? "completed") as TaskState,
-          );
+          // The owner check (the refonte2-P3): the event's from must be the
+          // task's owning node (the responder) — the spoof dropped.
+          if (d.from !== task.from_box?.split("/")[0]) return;
+          const VALID_STATES = ["working", "input_required", "completed", "failed", "canceled"];
+          const state = (d.task.state ?? "completed") as TaskState;
+          if (!VALID_STATES.includes(state)) return;
+          replyTask(db, d.task.id, task.to_box, d.task.result ?? "", state);
         }
         return;
       }
