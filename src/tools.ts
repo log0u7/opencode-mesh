@@ -9,7 +9,7 @@ import { buildOfferBlob, parseOfferBlob } from "./lib/offer-blob.js";
 import { listOwnAddresses, type AddressOptions } from "./lib/providers.js";
 import { pluginVersion } from "./lib/version.js";
 import { pairingProof, type NodeIdentity } from "./lib/identity.js";
-import { queueOutbox, queueTaskAsk, queueTaskReply, sweepOutbox } from "./lib/outbox.js";
+import { queueOutbox, queueTaskAsk, queueTaskReply } from "./lib/outbox.js";
 import { BOARD_KEYS, boardGet, boardSet, type BoardKey } from "./lib/mail.js";
 import {
   deliverMessage,
@@ -243,7 +243,7 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
               addresses: p.addresses,
             })),
             plugin_version: pluginVersion(),
-            ...(await sweepOutbox(db, identity, () => {})),
+
             outbox: {
               queued:
                 db.conn.get<{ n: number }>(
@@ -642,7 +642,6 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
         // The lazy outbox sweep (refonte P2.6): the delivery happens when
         // someone looks — the background timer is a convenience, not the
         // contract.
-        await sweepOutbox(db, identity, () => {});
 
         const sid = sessionID(context);
         touchMailbox(db, sid, Date.now());

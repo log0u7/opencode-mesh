@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { Plugin } from "@opencode/plugin";
 import { Bonjour } from "bonjour-service";
 
@@ -375,14 +376,30 @@ export const MeshV2 = Plugin.define({
     // dispose stops them all (the dropped ones are not in the live map).
     const everClients = new Map<string, { stop(): void }>();
     const streamClients = new Map<string, { stop(): void }>();
+    // The client KEY (the refonte2-P5): node + url + pk + the token hash —
+    // a RE-PAIRED peer (a new token) or a moved peer (a new url/key)
+    // INVALIDATES the old client: stop it, create a fresh one (the old one
+    // looped on 401/pin-mismatch forever until restart).
+    const clientKey = (nodeId: string, conn: { url: string; pk: string | null }, token: string) =>
+      `${nodeId}|${conn.url}|${conn.pk ?? ""}|${createHash("sha256").update(token).digest("hex").slice(0, 16)}`;
     const openStreams = (): void => {
       for (const peer of listPeers(db)) {
-        if (!peer.paired || streamClients.has(peer.node_id) || everClients.has(peer.node_id))
-          continue;
+        if (!peer.paired) continue;
         const conn = resolvePeerTarget(db, peer.node_id);
         if (!conn) continue;
         const token = findSendablePeer(db, peer.node_id)?.token ?? "";
-        const client = openPeerStream(
+        const key = clientKey(peer.node_id, conn, token);
+        const existing: { stop(): void; key?: string } | undefined = streamClients.get(
+          peer.node_id,
+        );
+        if (existing && existing.key === key) continue;
+        // The key CHANGED (a re-pair, a move): stop the stale client — its
+        // reconnect loop would hit 401/pin-mismatch forever.
+        if (existing) {
+          existing.stop();
+          streamClients.delete(peer.node_id);
+        }
+        const client: { stop(): void; key?: string } = openPeerStream(
           {
             url: conn.url,
             ...(conn.tls ? { tls: true } : {}),
@@ -393,9 +410,6 @@ export const MeshV2 = Plugin.define({
           },
           {
             onEvent: dispatch(peer.node_id),
-            // The ack (the refonte2-P1): the origin_id POSTed back to THIS
-            // peer (the sender of the pushed event) — the push alone is
-            // at-most-once.
             ack: (originId: string) =>
               void ackEvent(
                 {
@@ -408,11 +422,10 @@ export const MeshV2 = Plugin.define({
                 },
                 originId,
               ),
-            // The drop: remove from the LIVE map; the client keeps its own
-            // reconnection loop (openStreams will never duplicate it).
             onDrop: () => streamClients.delete(peer.node_id),
           },
         );
+        client.key = key;
         everClients.set(peer.node_id, client);
         streamClients.set(peer.node_id, client);
       }
@@ -448,13 +461,12 @@ export const MeshV2 = Plugin.define({
       sessionKnown: (sessionID) => sessionsSeen.has(sessionID) || liveSessions.has(sessionID),
       sessionRunning: (sessionID) => running.has(sessionID),
       escalateTo: options.escalateTo ?? "orq",
-      prompt: (sessionID, text, messageID, description) => {
+      prompt: (sessionID, text, messageID, description, kind) => {
         // The refonte2-C4: the SYNTHETIC delivery when the host supports it
         // (opencode >= 2.4: a synthetic message, not a user one; the
         // transport-retry idempotency key = the explicit id, unchanged).
-        // notify semantics: delivery "steer" (the next safe switch point) +
-        // resume true (the session wakes now). The fallback: the older
-        // prompt path (the queue delivery).
+        // notify: delivery "steer" + resume true (the session wakes now);
+        // fyi: resume FALSE (delivered at the next run, ZERO turns).
         if (typeof ctx.session.synthetic === "function") {
           return ctx.session.synthetic({
             sessionID,
@@ -462,7 +474,7 @@ export const MeshV2 = Plugin.define({
             text,
             description: description ?? null,
             delivery: "steer",
-            resume: true,
+            resume: kind !== "fyi",
           });
         }
         const input = { sessionID, id: messageID, text, delivery: "queue" as const };

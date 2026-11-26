@@ -624,51 +624,6 @@ export function inboxRead(db: MeshDb, session_id: string, ack: boolean): InboxRo
   });
 }
 
-/**
- * First unread reply for mesh_wait, with the same atomic fetch+ack as
- * inboxRead (same hot-swap race, same fix, same residual window).
- */
-export function waitReplyRead(db: MeshDb, reply_to: string, session_id: string): InboxRow | null {
-  return withTransaction(db, () => {
-    const row = firstReply(db, reply_to, session_id);
-    if (row) ackReply(db, row);
-    return row;
-  });
-}
-
-/** The wait matcher (0.31.0): the exact reply_to match first, then the
- * sender match — ANY message from the request's recipient box that arrived
- * after the request. A reply that bypassed the auto-fill (a legacy wire
- * path, a DB-level write) still returns the waiter: the correlation no
- * longer depends on anyone's discipline. The matched row is acked. */
-export function waitReplyBroad(db: MeshDb, reply_to: string, session_id: string): InboxRow | null {
-  return withTransaction(db, () => {
-    const exact = firstReply(db, reply_to, session_id);
-    if (exact) {
-      ackReply(db, exact);
-      return exact;
-    }
-    const request = db.conn.get<{ created_at: number }>(
-      "SELECT created_at FROM messages WHERE id = ?",
-      [reply_to],
-    );
-    const delivery = db.conn.get<{ to_box: string }>(
-      "SELECT to_box FROM deliveries WHERE message_id = ? ORDER BY created_at DESC LIMIT 1",
-      [reply_to],
-    );
-    const box = mailboxBySession(db, session_id);
-    if (!request || !delivery || !box) return null;
-    const stray = deliveryRows(db, box.name).find(
-      (r) => r.from_box === delivery.to_box && r.created_at > request.created_at,
-    );
-    if (stray) {
-      ackReply(db, stray);
-      return stray;
-    }
-    return null;
-  });
-}
-
 /** The unread rows that do NOT answer `reply_to` — the wake-path replies
  * (bare, reply_to NULL: the flash carries the subject, not the id) that would
  * otherwise starve a mesh_wait caller to its full timeout. Listed in the

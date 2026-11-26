@@ -15,7 +15,6 @@ import {
   unreadBoxCount,
   unreadCount,
   unreadMessages,
-  waitReplyRead,
   wakeBoxStats,
   ackInbox,
   withTransaction,
@@ -173,30 +172,6 @@ describe("transactional inbox read (0.16.1 hot-swap race fix)", () => {
 
     // The rollback means no delivery was read-marked: both rows are served.
     expect(inboxRead(db, "s1", true).map((r) => r.subject)).toEqual(["one", "two"]);
-    db.close();
-  });
-
-  it("waitReplyRead returns the reply and marks it read atomically (mesh_wait path)", () => {
-    const db = boxDb();
-    const q = deliverMessage(db, {
-      from: "n",
-      to_box: "a",
-      subject: "question",
-      body: "?",
-      created_at: 2000,
-    });
-    if (!q.ok) throw new Error("delivery failed");
-    deliverMessage(db, {
-      from: "n",
-      to_box: "a",
-      subject: "re: question",
-      body: "answer",
-      reply_to: q.id,
-      created_at: 3000,
-    });
-
-    expect(waitReplyRead(db, q.id, "s1")?.subject).toBe("re: question");
-    expect(waitReplyRead(db, q.id, "s1")).toBeNull();
     db.close();
   });
 });
