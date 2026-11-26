@@ -17,6 +17,7 @@ import {
   mailboxesBySession,
   localRegistryRows,
   federatedByName,
+  lastUnansweredFrom,
   mailboxByName,
   mailboxBySession,
   poolExists,
@@ -455,6 +456,15 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
             ? (sessionBoxes.find((b) => b.name === args.box)?.name ?? args.box)
             : (sessionBoxes[0]?.name ?? null);
         touchMailbox(db, sessionID(context), Date.now());
+        // P3 (0.31.0): the reply correlation is server-side. An agent that
+        // answers without reply_to (the storm root cause) gets the pending
+        // question's id filled in automatically — explicit always wins,
+        // pools/broadcasts never correlate.
+        const replyToFor = (to: string): string | null => {
+          if (typeof args.reply_to === "string" && args.reply_to.length > 0) return args.reply_to;
+          if (to === "all" || to.startsWith("team:")) return null;
+          return from_box === null ? null : lastUnansweredFrom(db, from_box, to);
+        };
         const selfSendLocal = async (): Promise<string> => {
           const result = deliverMessage(db, {
             from: identity.node_id,
@@ -462,7 +472,7 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
             to_box: to!,
             subject: String(args.subject),
             body: String(args.body),
-            reply_to: typeof args.reply_to === "string" ? args.reply_to : null,
+            reply_to: to === null ? null : replyToFor(to),
             wake,
           });
           // Federation: a broadcast with no LOCAL recipients (the sender is
@@ -508,8 +518,8 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
                       body: String(args.body),
                       to: federated.name,
                       ...(from_box !== null ? { from_box } : {}),
-                      ...(typeof args.reply_to === "string" && args.reply_to.length > 0
-                        ? { reply_to: args.reply_to }
+                      ...(replyToFor(federated.name) !== null
+                        ? { reply_to: replyToFor(federated.name)! }
                         : {}),
                       proof: pairingProof(identity, target.token ?? ""),
                     });
@@ -546,7 +556,7 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
         };
         const extras = {
           ...(to !== null ? { to } : {}),
-          ...(typeof args.reply_to === "string" ? { reply_to: args.reply_to } : {}),
+          ...(to !== null && replyToFor(to) !== null ? { reply_to: replyToFor(to)! } : {}),
           ...(from_box !== null ? { from_box } : {}),
         };
         if (peer !== null) {

@@ -264,6 +264,49 @@ describe("mesh_wait", () => {
   });
 });
 
+describe("P3 (0.31.0): the reply correlation is server-side", () => {
+  it("a bare answer auto-carries reply_to = the pending question it answers", async () => {
+    const { db, call } = setup();
+    await call("mesh_register", { name: "alice" }, "s1");
+    await call("mesh_register", { name: "bob" }, "s2");
+    const out = await call("mesh_send", { to: "bob", subject: "q", body: "?" }, "s1");
+    const sent = JSON.parse(out) as { id: string };
+    // Bob answers WITHOUT reply_to — the discipline the agents never had.
+    await call("mesh_send", { to: "alice", subject: "re: q", body: "!" }, "s2");
+    const row = db.conn.get<{ reply_to: string | null }>(
+      "SELECT reply_to FROM messages WHERE from_box = 'bob' AND subject = 're: q'",
+    );
+    expect(row?.reply_to).toBe(sent.id);
+  });
+
+  it("an explicit reply_to wins over the auto-fill", async () => {
+    const { db, call } = setup();
+    await call("mesh_register", { name: "alice" }, "s1");
+    await call("mesh_register", { name: "bob" }, "s2");
+    await call("mesh_send", { to: "bob", subject: "q", body: "?" }, "s1");
+    await call(
+      "mesh_send",
+      { to: "alice", subject: "re: q", body: "!", reply_to: "explicit-id" },
+      "s2",
+    );
+    const row = db.conn.get<{ reply_to: string | null }>(
+      "SELECT reply_to FROM messages WHERE from_box = 'bob'",
+    );
+    expect(row?.reply_to).toBe("explicit-id");
+  });
+
+  it("nothing pending: the answer carries no invented reply_to", async () => {
+    const { db, call } = setup();
+    await call("mesh_register", { name: "alice" }, "s1");
+    await call("mesh_register", { name: "bob" }, "s2");
+    await call("mesh_send", { to: "alice", subject: "cold call", body: "hi" }, "s2");
+    const row = db.conn.get<{ reply_to: string | null }>(
+      "SELECT reply_to FROM messages WHERE from_box = 'bob'",
+    );
+    expect(row?.reply_to).toBeNull();
+  });
+});
+
 describe("mesh_journal", () => {
   it("returns the header line plus compact JSON metadata without bodies", async () => {
     const { db, call } = setup();

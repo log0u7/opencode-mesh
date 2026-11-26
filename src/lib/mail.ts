@@ -903,6 +903,32 @@ export function mergeFederatedRegistry(
   });
 }
 
+/** The pending question a reply should answer, WITHOUT agent discipline:
+ * the last message `toBox` sent to `fromBox` (delivered in fromBox's box,
+ * inside the window) that no message from fromBox answers yet. The send
+ * path fills reply_to from it when the agent left it empty — the storm
+ * root cause (bare replies invisible to the correlation) dies at the
+ * source. Explicit reply_to always wins; nothing pending = NULL. */
+export function lastUnansweredFrom(
+  db: MeshDb,
+  fromBox: string,
+  toBox: string,
+  sinceMs = 30 * 60 * 1000,
+): string | null {
+  const row = db.conn.get<{ id: string }>(
+    `SELECT m.id FROM messages m
+     JOIN deliveries d ON d.message_id = m.id
+     WHERE d.to_box = ? AND m.from_box = ? AND m.created_at > ?
+       AND NOT EXISTS (
+         SELECT 1 FROM messages r WHERE r.reply_to = m.id AND r.from_box = ?
+       )
+     ORDER BY m.created_at DESC
+     LIMIT 1`,
+    [fromBox, toBox, Date.now() - sinceMs, fromBox],
+  );
+  return row?.id ?? null;
+}
+
 /** The local registry rows this node owns (for the /registry-sync push). */
 export function localRegistryRows(db: MeshDb): FederatedRegistryRow[] {
   // A NULL registered_at (a row that predates the column) reads as 0 — the
