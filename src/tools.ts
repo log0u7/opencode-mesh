@@ -27,7 +27,6 @@ import {
   unreadMessages,
   unmatchedUnread,
   waitReplyBroad,
-  waitReplyRead,
 } from "./lib/mail.js";
 import { journalQuery } from "./lib/journal.js";
 import { listLocks, releaseLock, tryLock } from "./lib/locks.js";
