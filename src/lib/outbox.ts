@@ -3,7 +3,14 @@ import type { MeshDb } from "./db.js";
 import { postTaskWire, sendMail } from "./client.js";
 import { pairingProof, type NodeIdentity } from "./identity.js";
 import { findSendablePeer, resolvePeerTarget } from "./peers.js";
-import { deliverMessage, federatedByName, getTask, mailboxByName, type TaskState } from "./mail.js";
+import {
+  deliverMessage,
+  federatedByName,
+  getTask,
+  mailboxByName,
+  mailboxByName as mailboxesByNameLocal,
+  type TaskState,
+} from "./mail.js";
 
 // The outbox (the refonte P2.6): mesh_send writes the remote delivery here
 // and returns "queued" — the background sender delivers with ack and
@@ -152,6 +159,33 @@ export function markOutboxFailed(db: MeshDb, id: string, now: number, error: str
       error,
       id,
     ]);
+    // The dead-letter is NEVER silent (the refonte2-C2): the sender's task
+    // (if the payload carries one) goes failed and the task's asker is
+    // notified — a lost delivery without a trace was the silent-loss class.
+    const payload = JSON.parse(
+      db.conn.get<{ payload: string }>("SELECT payload FROM outbox WHERE id = ?", [id])!.payload,
+    ) as OutboxPayload;
+    const taskId = payload.task?.id ?? payload.origin_id;
+    const task = taskId ? getTask(db, taskId) : null;
+    if (task && !["completed", "failed", "canceled"].includes(task.state)) {
+      try {
+        deliverMessage(db, {
+          from: "mesh-tasks",
+          from_box: task.to_box,
+          to_box: task.from_box ?? "",
+          subject: `task ${task.id.slice(0, 8)} failed: delivery dead-lettered`,
+          body: `The delivery failed ${attempts} times (${error.slice(0, 120)}). The task is FAILED.`,
+          kind: "notify",
+        });
+      } catch {}
+      if (mailboxesByNameLocal(db, task.to_box)) {
+        db.conn.run("UPDATE tasks SET result = ?, state = 'failed', updated_at = ? WHERE id = ?", [
+          `dead-letter: ${error.slice(0, 120)}`,
+          now,
+          taskId,
+        ]);
+      }
+    }
     return;
   }
   const backoff = Math.min(OUTBOX_BACKOFF_BASE_MS * 2 ** attempts, OUTBOX_BACKOFF_CAP_MS);
