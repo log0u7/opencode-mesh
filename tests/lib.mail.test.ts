@@ -15,8 +15,10 @@ import {
   ackInbox,
   withTransaction,
   mailboxByName,
+  listMailboxes,
   mergeFederatedRegistry,
   RESEND_WINDOW_MS,
+  federatedByName,
 } from "../src/lib/mail.js";
 
 /** The wake loop reads per-box stats in one grouped query; the gate tests
@@ -749,7 +751,7 @@ describe("registry federation (0.30.0)", () => {
       ],
       "node-ricinus",
     );
-    const row = mailboxByName(db, "sysops");
+    const row = federatedByName(db, "sysops");
     expect(row).not.toBeNull();
     db.close();
   });
@@ -775,7 +777,9 @@ describe("registry federation (0.30.0)", () => {
       "node-ricinus",
     );
     expect(applied).toBe(1);
-    const row = mailboxByName(db, "local");
+    // The transfer turns OUR row into an addressing row (node_id = the new
+    // owner): the name now lives on the peer.
+    const row = federatedByName(db, "local");
     expect(row?.session_id).toBe("ses-foreign");
     db.close();
   });
@@ -800,6 +804,61 @@ describe("registry federation (0.30.0)", () => {
     expect(applied).toBe(0);
     const row = mailboxByName(db, "local");
     expect(row?.session_id).toBe("s1");
+    db.close();
+  });
+});
+
+describe("P1 (0.31.0): a federated name is never a local box", () => {
+  const FED = {
+    name: "remote-dev",
+    session_id: "ses-remote",
+    role: "ops",
+    pools: '["team:x"]',
+    primary_pool: null,
+    registered_at: Date.now() - 1000,
+  };
+
+  function federatedDb() {
+    const db = openMeshDb(":memory:");
+    registerMailbox(db, { name: "alice", session_id: "s1", now: 1000 });
+    mergeFederatedRegistry(db, [FED], "node-b");
+    return db;
+  }
+
+  it("mailboxByName resolves LOCAL boxes only; federatedByName carries the routing row", () => {
+    const db = federatedDb();
+    // The local resolution must not see the federated row: every caller that
+    // decides "does this box live here?" would otherwise answer yes and sink
+    // mail into a box no local session drains.
+    expect(mailboxByName(db, "remote-dev")).toBeNull();
+    const fed = federatedByName(db, "remote-dev");
+    expect(fed?.name).toBe("remote-dev");
+    expect(fed?.node_id).toBe("node-b");
+    db.close();
+  });
+
+  it("deliverMessage to a federated name is unknown_mailbox, never a phantom delivery", () => {
+    const db = federatedDb();
+    const result = deliverMessage(db, {
+      from: "n1",
+      from_box: "alice",
+      to_box: "remote-dev",
+      subject: "dm",
+      body: "b",
+    });
+    expect(result).toEqual({ ok: false, error: "unknown_mailbox" });
+    db.close();
+  });
+
+  it("a federated pool membership does not surface as a local pool", () => {
+    const db = federatedDb();
+    // team:x exists ONLY on node-b: locally it has no members, so nothing
+    // local lists it (the sidebar and mesh_pools count node_id IS NULL).
+    const pools = new Set<string>();
+    for (const box of listMailboxes(db)) {
+      for (const p of box.pools) pools.add(p);
+    }
+    expect(pools.has("team:x")).toBe(false);
     db.close();
   });
 });

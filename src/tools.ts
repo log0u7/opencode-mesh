@@ -16,6 +16,7 @@ import {
   listMailboxes,
   mailboxesBySession,
   localRegistryRows,
+  federatedByName,
   mailboxByName,
   mailboxBySession,
   poolExists,
@@ -491,13 +492,8 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
             // DM to that peer — the same contract as peer + to, resolved by
             // name. The peer resolves its own box at arrival.
             if (result.error === "unknown_mailbox") {
-              const federated = db.conn.get<{
-                node_id: string;
-                name: string;
-              }>("SELECT node_id, name FROM mailboxes WHERE name = ? AND node_id IS NOT NULL", [
-                to,
-              ]);
-              if (federated) {
+              const federated = to === null ? null : federatedByName(db, to);
+              if (federated && federated.node_id !== null) {
                 const target = findSendablePeer(db, federated.node_id);
                 if (target) {
                   const conn = resolvePeerTarget(db, target.node_id);

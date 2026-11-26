@@ -205,13 +205,31 @@ export function mailboxesBySession(db: MeshDb, session_id: string): Mailbox[] {
 }
 
 export function mailboxByName(db: MeshDb, name: string): Mailbox | null {
-  const row = db.conn.get<MailboxRow>("SELECT * FROM mailboxes WHERE name = ?", [name]);
+  // LOCAL only (0.31.0): a federated row (node_id set) is addressing-only —
+  // a caller deciding "does this box live here?" must answer no, or mail
+  // sinks into a box no local session drains (the P1 phantom-box class).
+  const row = db.conn.get<MailboxRow>(
+    "SELECT * FROM mailboxes WHERE name = ? AND node_id IS NULL",
+    [name],
+  );
+  return row ? rowToMailbox(row) : null;
+}
+
+/** The federated registry row for a name (node_id set, pushed by a peer):
+ * the routing record — WHICH node owns the name — never a local box. */
+export function federatedByName(db: MeshDb, name: string): Mailbox | null {
+  const row = db.conn.get<MailboxRow>(
+    "SELECT * FROM mailboxes WHERE name = ? AND node_id IS NOT NULL",
+    [name],
+  );
   return row ? rowToMailbox(row) : null;
 }
 
 export function listMailboxes(db: MeshDb): Mailbox[] {
+  // LOCAL only (0.31.0): the sidebar, the counters and mesh_pools count the
+  // boxes that live HERE. Federated rows surface through the peers section.
   return db.conn
-    .all<MailboxRow>("SELECT * FROM mailboxes ORDER BY created_at ASC")
+    .all<MailboxRow>("SELECT * FROM mailboxes WHERE node_id IS NULL ORDER BY created_at ASC")
     .map(rowToMailbox);
 }
 
