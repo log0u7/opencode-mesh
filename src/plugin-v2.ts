@@ -35,7 +35,7 @@ import { createDurableStore } from "./lib/persist.js";
 import { createFanout } from "./lib/fanout.js";
 import { createHostCapa } from "./lib/capa.js";
 import { handleTaskAsk, startOutboxSender, sweepOutbox } from "./lib/outbox.js";
-import { openPeerStream } from "./lib/stream.js";
+import { ackEvent, openPeerStream } from "./lib/stream.js";
 import { startWakeLoop, createExecutionTracker, type HostEvent } from "./lib/wake.js";
 import { startSessionLister } from "./lib/sessions.js";
 import { MESH_GUIDANCE } from "./lib/guidance.js";
@@ -353,7 +353,9 @@ export const MeshV2 = Plugin.define({
       // over the stream OPENED TO an authenticated peer — its events carry
       // ITS node id; anything else is a spoof, dropped.
       if (d.from !== undefined && d.from !== eventPeerNodeId) return;
-      deliverMessage(db, {
+      // The applied origin_id returns: the stream client ACKs it (the
+      // refonte2-P1 — the push alone is at-most-once).
+      const applied = deliverMessage(db, {
         from: d.from ?? "",
         from_box: d.from_box ?? null,
         to_box: d.to ?? null,
@@ -363,6 +365,7 @@ export const MeshV2 = Plugin.define({
         kind: d.kind ?? "notify",
         origin_id: d.origin_id ?? null,
       });
+      return applied.ok ? (d.origin_id ?? null) : null;
     };
     // The client lifecycle (the refonte2-A3): ONE client per pair EVER —
     // the client manages its own reconnection; openStreams creates only if
@@ -390,6 +393,21 @@ export const MeshV2 = Plugin.define({
           },
           {
             onEvent: dispatch(peer.node_id),
+            // The ack (the refonte2-P1): the origin_id POSTed back to THIS
+            // peer (the sender of the pushed event) — the push alone is
+            // at-most-once.
+            ack: (originId: string) =>
+              void ackEvent(
+                {
+                  url: conn.url,
+                  ...(conn.tls ? { tls: true } : {}),
+                  ...(conn.pk !== null ? { pk: conn.pk } : {}),
+                  token,
+                  from: identity.node_id,
+                  proof: pairingProof(identity, token),
+                },
+                originId,
+              ),
             // The drop: remove from the LIVE map; the client keeps its own
             // reconnection loop (openStreams will never duplicate it).
             onDrop: () => streamClients.delete(peer.node_id),

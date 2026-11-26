@@ -62,8 +62,12 @@ describe("the stream round trip (refonte 3.1): the push delivers without any POS
         proof: pairingProof(identityB, "tok-b"),
       },
       {
-        onEvent: (e) => received.push(e),
+        onEvent: (e) => {
+          received.push(e);
+          return null;
+        },
         onDrop: () => {},
+        ack: () => {},
       },
     );
     // La connexion + l'enregistrement du stream (le handshake + la reponse).
@@ -116,8 +120,9 @@ describe("the stream client: the reconnect (refonte 3.1)", () => {
         proof: pairingProof(identityB, "tok-b"),
       },
       {
-        onEvent: () => {},
+        onEvent: () => undefined,
         onDrop: () => drops.push(Date.now()),
+        ack: () => {},
       },
     );
     await new Promise((r) => setTimeout(r, 300));
@@ -221,7 +226,7 @@ describe("A2 (refonte2): the TLS pinning on the stream", () => {
         from: identityB.node_id,
         proof: pairingProof(identityB, "tok-b"),
       },
-      { onEvent: () => {}, onDrop: () => {} },
+      { onEvent: () => undefined, onDrop: () => {}, ack: () => {} },
     );
     await new Promise((r) => setTimeout(r, 400));
     expect(hub?.isOpen(identityB.node_id)).toBe(true);
@@ -237,7 +242,7 @@ describe("A2 (refonte2): the TLS pinning on the stream", () => {
         from: identityB.node_id,
         proof: pairingProof(identityB, "tok-b"),
       },
-      { onEvent: () => {}, onDrop: () => {} },
+      { onEvent: () => undefined, onDrop: () => {}, ack: () => {} },
     );
     await new Promise((r) => setTimeout(r, 600));
     expect(hub?.isOpen(identityB.node_id)).toBe(false);
@@ -282,7 +287,7 @@ describe("A3 (refonte2): the client lifecycle — the reconnect does not multipl
         from: identityB.node_id,
         proof: pairingProof(identityB, "tok-b"),
       },
-      { onEvent: () => {}, onDrop: () => {} },
+      { onEvent: () => undefined, onDrop: () => {}, ack: () => {} },
     );
     let maxSeen = 0;
     for (let round = 0; round < 3; round += 1) {

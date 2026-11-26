@@ -170,10 +170,16 @@ import { request as httpsRequest } from "node:https";
 import type { PeerCertificate } from "node:tls";
 
 export type StreamClientHooks = {
-  /** Dispatch one received event (the same handling as the wire routes). */
-  onEvent: (event: StreamEvent) => void;
+  /** Dispatch one received event (the same handling as the wire routes).
+   * Returns the event's origin_id IF the dispatch applied it successfully
+   * (null/undefined = not applied — no ack). */
+  onEvent: (event: StreamEvent) => string | null | undefined;
   /** The stream dropped — the caller logs or rebrowses. */
   onDrop: () => void;
+  /** The ACK channel (the refonte2-P1): POST /ack {origin_id} to the
+   * stream's peer — the push alone is at-most-once, the ack makes it
+   * effectively-once. */
+  ack: (originId: string) => void;
 };
 
 /** Open ONE SSE stream to a peer and keep it alive (reconnect with a
@@ -262,7 +268,13 @@ export function openPeerStream(
             .trim();
           if (type && data && type !== "hb") {
             try {
-              hooks.onEvent({ type: type as StreamEvent["type"], data: JSON.parse(data) });
+              const applied = hooks.onEvent({
+                type: type as StreamEvent["type"],
+                data: JSON.parse(data),
+              });
+              // The ack AFTER a successful apply (the refonte2-P1): the
+              // sender's row goes sent only when the receiver APPLIED it.
+              if (applied) hooks.ack(applied);
             } catch {}
           }
         }

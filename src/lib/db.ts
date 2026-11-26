@@ -15,7 +15,7 @@ export type MeshDb = {
 
 // Bump when a schema change needs a migration step; the version anchors future
 // migrations that cannot be expressed as idempotent `CREATE ... IF NOT EXISTS`.
-const SCHEMA_VERSION = 23;
+const SCHEMA_VERSION = 24;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS peers (
@@ -205,6 +205,13 @@ function migrate(conn: SqliteConn): void {
       );
       CREATE INDEX idx_outbox_state_next ON outbox(state, next_at);
     `);
+  }
+  // v24: outbox.origin_id + the index (the refonte2-P1): the /ack resolves
+  // WITHOUT the full json_extract scan, and the mark filters the node.
+  if (!outboxColumns.includes("origin_id")) {
+    conn.exec("ALTER TABLE outbox ADD COLUMN origin_id TEXT");
+    conn.exec("UPDATE outbox SET origin_id = json_extract(payload, '$.origin_id')");
+    conn.exec("CREATE INDEX idx_outbox_origin ON outbox(origin_id)");
   }
   // v21: the board (the refonte P4) — the SHARED status state, not DMs:
   // box + key + value, the keys fixed (task/blocker/state/eta), written

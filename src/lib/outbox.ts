@@ -80,9 +80,9 @@ export function registerOutboxNudge(nudge: () => void): () => void {
 export function queueOutbox(db: MeshDb, payload: OutboxPayload, now: number): OutboxRow {
   const id = randomUUID();
   db.conn.run(
-    `INSERT INTO outbox (id, payload, state, attempts, next_at, created_at)
-     VALUES (?, ?, 'queued', 0, ?, ?)`,
-    [id, JSON.stringify(payload), now, now],
+    `INSERT INTO outbox (id, payload, origin_id, state, attempts, next_at, created_at)
+     VALUES (?, ?, ?, 'queued', 0, ?, ?)`,
+    [id, JSON.stringify(payload), payload.origin_id, now, now],
   );
   for (const nudge of nudges) {
     try {
@@ -200,11 +200,23 @@ export function markOutboxFailed(db: MeshDb, id: string, now: number, error: str
 /** The /ack applied (the refonte2-C6): the receiver confirmed the origin —
  * the row goes sent. The origin_id is the dedup key the receiver already
  * holds. */
-export function markOutboxSentByOrigin(db: MeshDb, originId: string, now: number): number {
-  const res = db.conn.run(
-    "UPDATE outbox SET state = 'sent', next_at = ? WHERE json_extract(payload, '$.origin_id') = ?",
-    [now, originId],
-  );
+export function markOutboxSentByOrigin(
+  db: MeshDb,
+  originId: string,
+  now: number,
+  fromNodeId?: string,
+): number {
+  // The node filter (the refonte2-P1): only the OWNER's ack applies — a
+  // third-party ack cannot mark someone else's row sent.
+  const res = fromNodeId
+    ? db.conn.run(
+        "UPDATE outbox SET state = 'sent', next_at = ? WHERE origin_id = ? AND json_extract(payload, '$.node_id') = ?",
+        [now, originId, fromNodeId],
+      )
+    : db.conn.run("UPDATE outbox SET state = 'sent', next_at = ? WHERE origin_id = ?", [
+        now,
+        originId,
+      ]);
   return res.changes;
 }
 
@@ -300,7 +312,21 @@ export async function deliverOutboxRow(
           : {}),
       },
     });
-    if (delivered > 0) return "streamed";
+    if (delivered > 0) {
+      // Pushed, NOT acked: the row stays queued, the attempts INCREMENT
+      // (the dead-letter is reachable if no /ack returns); the claim's 30s
+      // next_at is the resend window.
+      const row = db.conn.get<{ id: string; attempts: number }>(
+        "SELECT id, attempts FROM outbox WHERE json_extract(payload, '$.origin_id') = ?",
+        [payload.origin_id],
+      );
+      if (row && row.attempts + 1 >= OUTBOX_MAX_ATTEMPTS) {
+        markOutboxFailed(db, row.id, Date.now(), "pushed but never acked");
+      } else if (row) {
+        db.conn.run("UPDATE outbox SET attempts = attempts + 1 WHERE id = ?", [row.id]);
+      }
+      return "streamed";
+    }
   }
   const target = findSendablePeer(db, nodeQuery);
   if (!target) {

@@ -1368,9 +1368,10 @@ export const RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
  * older than 7 days. The queued/failed outbox rows and the open tasks stay
  * (the live state). Called from the wake tick (the cheap indexed scans). */
 export function purgeDeliveredHistory(db: MeshDb, now: number): { outbox: number; tasks: number } {
-  const outbox = db.conn.run("DELETE FROM outbox WHERE state = 'sent' AND next_at < ?", [
-    now - RETENTION_MS,
-  ]).changes;
+  const outbox = db.conn.run(
+    "DELETE FROM outbox WHERE state IN ('sent','failed') AND next_at < ?",
+    [now - RETENTION_MS],
+  ).changes;
   const tasks = db.conn.run(
     `DELETE FROM tasks WHERE state IN ('completed','failed','canceled') AND updated_at < ?`,
     [now - RETENTION_MS],
