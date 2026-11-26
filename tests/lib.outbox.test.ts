@@ -694,7 +694,13 @@ describe("A1 (refonte2): the delivery contract — an error NEVER marks the row 
         node_id: identityA.node_id,
         to_box: "alice",
         type: "task-reply",
-        task: { id: "t-b1", result: "r", state: "completed" },
+        task: {
+          id: "t-b1",
+          from_box: "node-b/me",
+          to_box: "alice",
+          result: "r",
+          state: "completed",
+        },
       }),
       Date.now(),
     );
@@ -702,7 +708,7 @@ describe("A1 (refonte2): the delivery contract — an error NEVER marks the row 
     // doit rester QUEUED (le OLD code: ok truthy -> null -> SENT: la tache
     // disparaissait, le mr-review round-4 B1).
     const sender = startOutboxSender(dbB, identityB, () => {}, 30);
-    let b1row: { state: string; attempts: number } | undefined;
+    let b1row: { state: string; attempts: number } | null = null;
     for (let i = 0; i < 40; i += 1) {
       await new Promise((r) => setTimeout(r, 100));
       b1row = dbB.conn.get<{ state: string; attempts: number }>(
