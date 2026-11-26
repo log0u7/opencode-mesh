@@ -15,6 +15,54 @@ export type StreamEvent = {
   data: unknown;
 };
 
+/** The applicative ack (the refonte2-C6): the receiver APPLIED the event —
+ * the POST tells the sender's /ack, which marks the outbox row sent. The
+ * push alone is at-most-once; the ack makes it effectively-once. */
+export async function ackEvent(
+  target: { url: string; token: string; from: string; proof: string; tls?: boolean; pk?: string },
+  originId: string,
+): Promise<void> {
+  const isTls = target.tls === true || target.url.startsWith("https:");
+  const u = new URL(target.url);
+  const headers = {
+    "content-type": "application/json",
+    authorization: `Bearer ${target.token}`,
+    "x-mesh-sender": target.from,
+    "x-mesh-proof": target.proof,
+  };
+  const body = JSON.stringify({ origin_id: originId });
+  try {
+    const requestOpts = {
+      hostname: u.hostname,
+      ...(u.port !== "" ? { port: Number(u.port) } : {}),
+      path: "/ack",
+      method: "POST",
+      headers,
+      signal: AbortSignal.timeout(5000),
+      ...(isTls
+        ? {
+            rejectUnauthorized: false,
+            ...(target.pk
+              ? {
+                  checkServerIdentity: (_host: string, cert: PeerCertificate) =>
+                    pinCheck(target.pk)(cert) ?? undefined,
+                }
+              : {}),
+          }
+        : {}),
+    };
+    const doRequest = isTls ? httpsRequest : httpRequest;
+    const req = doRequest(requestOpts, (response) => {
+      response.resume();
+    });
+    req.on("error", () => {});
+    req.end(body);
+  } catch {
+    // The ack is best-effort: the resend window (the claim's 30s) covers
+    // the missed acks (the origin_id dedup collapses the duplicate).
+  }
+}
+
 /** The hub: the OPEN peer streams, keyed by the authenticated node id. */
 export class StreamHub {
   private streams = new Map<string, Set<ServerResponse>>();
@@ -139,10 +187,31 @@ export function openPeerStream(
   let failures = 0;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let res: IncomingMessage | undefined;
+  // The watchdog (the refonte2-C6): NO byte for 60s = the socket is
+  // half-dead (the NAT dropped it) — destroy and reconnect. Reset on every
+  // byte AND every heartbeat.
+  let watchdog: ReturnType<typeof setInterval> | undefined;
+  let lastByteAt = Date.now();
+
+  const startWatchdog = (): void => {
+    lastByteAt = Date.now();
+    if (watchdog) return;
+    watchdog = setInterval(() => {
+      if (Date.now() - lastByteAt > 60_000) {
+        res?.destroy();
+        hooks.onDrop();
+        schedule();
+      }
+    }, 10_000);
+  };
 
   const connect = (): void => {
+    lastByteAt = Date.now();
+    if (watchdog) clearInterval(watchdog);
+    watchdog = undefined;
     timer = undefined;
     if (stopped) return;
+    startWatchdog();
     // The TLS pinning (the refonte2-A2): the mesh certs are SELF-SIGNED —
     // rejectUnauthorized off, the trust comes ENTIRELY from the SPKI pin
     // (the same gabarit as the wire's tlsRequest). The pk passed and
@@ -174,6 +243,7 @@ export function openPeerStream(
       failures = 0;
       let buffer = "";
       response.on("data", (chunk: Buffer) => {
+        lastByteAt = Date.now();
         buffer += chunk.toString();
         // The SSE frames: event: <type>\n data: <json>\n\n
         for (;;) {

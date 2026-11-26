@@ -197,6 +197,17 @@ export function markOutboxFailed(db: MeshDb, id: string, now: number, error: str
   ]);
 }
 
+/** The /ack applied (the refonte2-C6): the receiver confirmed the origin —
+ * the row goes sent. The origin_id is the dedup key the receiver already
+ * holds. */
+export function markOutboxSentByOrigin(db: MeshDb, originId: string, now: number): number {
+  const res = db.conn.run(
+    "UPDATE outbox SET state = 'sent', next_at = ? WHERE json_extract(payload, '$.origin_id') = ?",
+    [now, originId],
+  );
+  return res.changes;
+}
+
 /** The outbox sender: claim the due rows, deliver each through the caller's
  * transport, mark sent or failed. Returns { sent, failed } for the log. */
 export async function processOutbox(
@@ -222,6 +233,12 @@ export async function processOutbox(
       for (const row of group) {
         try {
           const error = await deliver(row.payload);
+          if (error === "streamed") {
+            // Pushed over the stream, NOT acked yet: the row stays queued —
+            // the receiver's /ack marks it sent; the claim's 30s next_at is
+            // the resend window (the half-dead socket class).
+            continue;
+          }
           if (error === null) {
             markOutboxSent(db, row.id, now);
             sent += 1;
@@ -282,7 +299,7 @@ export async function deliverOutboxRow(
           : {}),
       },
     });
-    if (delivered > 0) return null;
+    if (delivered > 0) return "streamed";
   }
   const target = findSendablePeer(db, nodeQuery);
   if (!target) {

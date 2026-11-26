@@ -532,11 +532,18 @@ export function startWakeLoop(options: WakeOptions): WakeHandle {
   let watcher: FSWatcher | undefined;
   let fallbackPoller: ReturnType<typeof setInterval> | undefined;
   try {
-    watcher = watch(`${options.db.path}-wal`, { persistent: false }, () => {
-      void maybeTick(false);
+    // watch the DIRECTORY (the refonte2-C5): the WAL file can be RECREATED
+    // (the checkpoint truncate) — watching the file loses the inode and the
+    // events die silently. Watch the dir, filter by the basename.
+    const walName = `${options.db.path.split("/").pop()}-wal`;
+    const walDir = options.db.path.split("/").slice(0, -1).join("/") || ".";
+    watcher = watch(walDir, { persistent: false }, (_eventType, filename) => {
+      if (filename === null || filename === walName) void maybeTick(false);
     });
   } catch {
-    fallbackPoller = setInterval(() => void maybeTick(true), 250);
+    // The fallback poller respects the data_version gate (the refonte2-C5):
+    // a force-tick here would run 4 FULL scans per second forever.
+    fallbackPoller = setInterval(() => void maybeTick(false), 250);
   }
   return {
     stop: () => {

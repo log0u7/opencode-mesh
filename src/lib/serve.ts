@@ -19,7 +19,7 @@ import {
   type SpawnReplayStore,
 } from "./distant-spawn.js";
 import { countRunningSpawnedByPeer } from "./workers.js";
-import { handleTaskAsk } from "./outbox.js";
+import { handleTaskAsk, markOutboxSentByOrigin } from "./outbox.js";
 import { StreamHub } from "./stream.js";
 import {
   deliverMessage,
@@ -292,6 +292,36 @@ async function handle(
       json(res, 200, { accepted });
     } catch {
       json(res, 500, { error: "memory-sync storage failed" });
+    }
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/ack") {
+    // Refonte2-C6: the receiver APPLIED an event and acks its origin — the
+    // outbox row goes sent (the push alone is at-most-once; the ack makes
+    // it effectively-once).
+    const from = String(req.headers["x-mesh-sender"] ?? "");
+    const proof = String(req.headers["x-mesh-proof"] ?? "");
+    const peer = authenticate(db, req, from, proof);
+    if (!peer) {
+      json(res, 401, { error: "unauthorized" });
+      return;
+    }
+    const body = await readBody(req, 64 * 1024);
+    if ("error" in body) {
+      json(res, 400, { error: "body too large" });
+      return;
+    }
+    try {
+      const parsed = JSON.parse(body.body) as { origin_id?: string };
+      if (!parsed.origin_id) {
+        json(res, 400, { error: "origin_id required" });
+        return;
+      }
+      const applied = markOutboxSentByOrigin(db, parsed.origin_id, Date.now());
+      json(res, 200, { ok: true, applied });
+    } catch {
+      json(res, 500, { error: "ack failed" });
     }
     return;
   }

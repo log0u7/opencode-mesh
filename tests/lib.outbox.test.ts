@@ -22,6 +22,7 @@ import {
   claimOutboxDue,
   handleTaskAsk,
   markOutboxFailed,
+  markOutboxSentByOrigin,
   processOutbox,
   queueOutbox,
   queueTaskAsk,
@@ -192,7 +193,7 @@ describe("P2.5 (refonte): the cross-host tasks — the asker's node is the sourc
 });
 
 describe("the outbox sender (refonte P2.6): stream-first + the retries", () => {
-  it("startOutboxSender: an open stream gets the push and the row marks sent", async () => {
+  it("startOutboxSender: an open stream gets the push (the row stays queued until the ack)", async () => {
     const db = openMeshDb(":memory:");
     const now = Date.now();
     const pushed: unknown[] = [];
@@ -208,8 +209,14 @@ describe("the outbox sender (refonte P2.6): stream-first + the retries", () => {
     await new Promise((r) => setTimeout(r, 120));
     sender.stop();
     expect(pushed.length).toBeGreaterThanOrEqual(1);
+    // The push is AT-MOST-ONCE without the ack: the row stays queued (the
+    // /ack from the receiver marks it sent — the C6 contract).
     const state = db.conn.get<{ state: string }>("SELECT state FROM outbox")!;
-    expect(state.state).toBe("sent");
+    expect(state.state).toBe("queued");
+    // L'ack: la row passe sent.
+    const acked = markOutboxSentByOrigin(db, "o-stream", Date.now());
+    expect(acked).toBe(1);
+    expect(db.conn.get<{ state: string }>("SELECT state FROM outbox")!.state).toBe("sent");
     db.close();
   });
 
