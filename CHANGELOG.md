@@ -5,6 +5,15 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.33.2] - 2026-11-26
+
+### Added
+
+- Regression test for the mesh_reply PREFIX resolution: the full id
+  resolves, the unique 8-char prefix resolves, the ambiguous prefix
+  refuses, a sub-8-char prefix stays unknown. (0.33.1 shipped the fix
+  without a test pinning the behavior.)
+
 ## [0.33.1] - 2026-11-26
 
 ### Fixed
