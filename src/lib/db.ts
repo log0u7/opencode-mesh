@@ -15,7 +15,7 @@ export type MeshDb = {
 
 // Bump when a schema change needs a migration step; the version anchors future
 // migrations that cannot be expressed as idempotent `CREATE ... IF NOT EXISTS`.
-const SCHEMA_VERSION = 24;
+const SCHEMA_VERSION = 25;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS peers (
@@ -228,7 +228,10 @@ function migrate(conn: SqliteConn): void {
       );
     `);
   }
-  const taskColumns = conn.all<{ name: string }>("PRAGMA table_info(tasks)").map((r) => r.name);
+  // The columns read BEFORE the create (the emptiness gate), re-read AFTER
+  // it (the 0.33.3): a fresh table ships the new columns — the stale empty
+  // array would ALTER them into duplicates.
+  let taskColumns = conn.all<{ name: string }>("PRAGMA table_info(tasks)").map((r) => r.name);
   if (taskColumns.length === 0) {
     conn.exec(`
       CREATE TABLE tasks (
@@ -239,6 +242,8 @@ function migrate(conn: SqliteConn): void {
         question TEXT NOT NULL,
         result TEXT,
         state TEXT NOT NULL DEFAULT 'submitted',
+        target_node TEXT,
+        asker_node TEXT,
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL,
         deadline INTEGER
@@ -246,11 +251,23 @@ function migrate(conn: SqliteConn): void {
       CREATE INDEX idx_tasks_to_state ON tasks(to_box, state);
       CREATE INDEX idx_tasks_group ON tasks(group_id);
     `);
+    taskColumns = conn.all<{ name: string }>("PRAGMA table_info(tasks)").map((r) => r.name);
   }
   // v23: tasks.group_notified_at (the refonte2-C1): the group digest fires
   // ONCE — the later transitions notify individually.
   if (!taskColumns.includes("group_notified_at")) {
     conn.exec("ALTER TABLE tasks ADD COLUMN group_notified_at INTEGER");
+  }
+  // v25: tasks.target_node + tasks.asker_node (the 0.33.3): the cross-node
+  // task routing stops parsing the "node/box" composite — target_node is
+  // the node owning to_box (filled at mesh_ask), asker_node is the asking
+  // node on a MIRROR row (filled by handleTaskAsk from the authenticated
+  // peer). NULL target_node = a local task.
+  if (!taskColumns.includes("target_node")) {
+    conn.exec("ALTER TABLE tasks ADD COLUMN target_node TEXT");
+  }
+  if (!taskColumns.includes("asker_node")) {
+    conn.exec("ALTER TABLE tasks ADD COLUMN asker_node TEXT");
   }
   // v5: messages.origin_id (cross-host broadcast dedup).
   if (!messageColumns.includes("origin_id")) {

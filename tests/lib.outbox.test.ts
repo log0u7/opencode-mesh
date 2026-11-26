@@ -149,10 +149,12 @@ describe("P2.5 (refonte): the cross-host tasks — the asker's node is the sourc
     const b = openMeshDb(":memory:");
     registerMailbox(b, { name: "bob-remote", session_id: "s-b", now: 1000 });
     const askPayload = JSON.parse(askRow.payload) as Parameters<typeof handleTaskAsk>[1];
-    handleTaskAsk(b, { ...askPayload, from_box: "node-a/alice" });
+    // (0.33.3-B) la boite nue + le noeud demandeur en colonne.
+    handleTaskAsk(b, { ...askPayload, from_box: "alice" }, "node-a");
     const mirror = getTask(b, task.id)!;
     expect(mirror.state).toBe("submitted");
-    expect(mirror.from_box).toBe("node-a/alice");
+    expect(mirror.from_box).toBe("alice");
+    expect(mirror.asker_node).toBe("node-a");
     // Le message tache est dans la box du respondant.
     expect(
       b.conn.get<{ n: number }>("SELECT COUNT(*) AS n FROM deliveries WHERE to_box = 'bob-remote'")
@@ -237,15 +239,15 @@ describe("the outbox sender (refonte P2.6): stream-first + the retries", () => {
   });
 });
 
-describe("P2.5 (refonte): the task-reply cross path — queueTaskReply parses the node", () => {
-  it("the asker's remote reference node/box drives the delivery", () => {
+describe("P2.5 (refonte): the task-reply cross path — the asker_node column", () => {
+  it("the asking node drives the delivery (the column, not a node/box parse)", () => {
     const db = openMeshDb(":memory:");
     registerMailbox(db, { name: "bob-remote", session_id: "s-b", now: 1000 });
-    // Le miroir: from_box = le composite node/box (le /task-ask l'ecrit).
+    // Le miroir (0.33.3-B): from_box = la boite NUE, asker_node = le noeud.
     const now = Date.now();
     db.conn.run(
-      `INSERT INTO tasks (id, from_box, to_box, group_id, question, result, state, created_at, updated_at, deadline)
-       VALUES ('task-x', 'node-a/alice', 'bob-remote', NULL, 'q', NULL, 'submitted', ?, ?, NULL)`,
+      `INSERT INTO tasks (id, from_box, to_box, group_id, question, result, state, asker_node, created_at, updated_at, deadline)
+       VALUES ('task-x', 'alice', 'bob-remote', NULL, 'q', NULL, 'submitted', 'node-a', ?, ?, NULL)`,
       [now, now],
     );
     const id = queueTaskReply(db, "task-x", "reponse", "completed", now);
@@ -474,24 +476,28 @@ describe("P2.5 the cross-host round trip VIA THE LAZY SWEEP (the mr-review findi
     queueTaskAsk(dbA, task, Date.now());
 
     // === LE NODE B: /task-ask (le handler) cree le miroir ===
-    // Le payload: le from_box composite node-a/alice (le serveur l'ecrit).
-    handleTaskAsk(dbB, {
-      node_id: identityA.node_id,
-      to_box: "bob",
-      from_box: `${identityA.node_id}/alice`,
-      subject: `task ${task.id.slice(0, 8)}`,
-      body: "quel etat?",
-      origin_id: task.id,
-      type: "task-ask",
-      task: {
-        id: task.id,
-        from_box: `${identityA.node_id}/alice`,
+    // (0.33.3-B) la boite nue + asker_node = le pair authentifie.
+    handleTaskAsk(
+      dbB,
+      {
+        node_id: identityA.node_id,
         to_box: "bob",
-        question: "quel etat?",
-        group_id: null,
-        deadline: null,
+        from_box: "alice",
+        subject: `task ${task.id.slice(0, 8)}`,
+        body: "quel etat?",
+        origin_id: task.id,
+        type: "task-ask",
+        task: {
+          id: task.id,
+          from_box: "alice",
+          to_box: "bob",
+          question: "quel etat?",
+          group_id: null,
+          deadline: null,
+        },
       },
-    });
+      identityA.node_id,
+    );
     expect(getTask(dbB, task.id)?.state).toBe("submitted");
 
     // === LE RESPONDANT repond: le miroir completed + la reply queue par le SWEEP PARESSEUX ===
@@ -589,13 +595,14 @@ describe("P2.5 the cross-host ASK VIA THE REAL WIRE (the mr-review finding: the 
     // du from_box cache etait ici: le test direct handleTaskAsk ne le
     // voyait pas).
     await sweepOutbox(dbA, identityA, () => {});
-    // Le miroir chez B: from_box = node-a/alice (le composite COMPLET).
-    const mirror = dbB.conn.get<{ state: string; from_box: string }>(
-      "SELECT state, from_box FROM tasks WHERE id = ?",
+    // Le miroir chez B: from_box = la boite nue, asker_node = le noeud (0.33.3-B).
+    const mirror = dbB.conn.get<{ state: string; from_box: string; asker_node: string }>(
+      "SELECT state, from_box, asker_node FROM tasks WHERE id = ?",
       [task.id],
     )!;
     expect(mirror.state).toBe("submitted");
-    expect(mirror.from_box).toBe(`${identityA.node_id}/alice`);
+    expect(mirror.from_box).toBe("alice");
+    expect(mirror.asker_node).toBe(identityA.node_id);
     // Le message tache dans la box bob.
     expect(
       dbB.conn.get<{ n: number }>("SELECT COUNT(*) AS n FROM deliveries WHERE to_box = 'bob'")?.n,
@@ -609,7 +616,7 @@ describe("P2.5 the cross-host ASK VIA THE REAL WIRE (the mr-review finding: the 
 });
 
 describe("3.2 (refonte): the task-reply routing prefers the EXPLICIT node (the name-collision safe)", () => {
-  it("the reply routes to the composite node even when a federated row shares the bare box name", () => {
+  it("the reply routes to the asker_node column even when a federated row shares the bare box name", () => {
     const db = openMeshDb(":memory:");
     registerMailbox(db, { name: "bob-remote", session_id: "s-b", now: 1000 });
     // DEUX rows federated pour le meme nom "alice" venu de nodes differents:
@@ -645,11 +652,11 @@ describe("3.2 (refonte): the task-reply routing prefers the EXPLICIT node (the n
       ],
       "node-right",
     );
-    // Le miroir: from_box = le composite node-right/alice.
+    // Le miroir (0.33.3-B): la boite nue + asker_node = le noeud explicite.
     const now = Date.now();
     db.conn.run(
-      `INSERT INTO tasks (id, from_box, to_box, question, state, created_at, updated_at)
-       VALUES ('task-c', 'node-right/alice', 'bob-remote', 'q', 'submitted', ?, ?)`,
+      `INSERT INTO tasks (id, from_box, to_box, question, state, asker_node, created_at, updated_at)
+       VALUES ('task-c', 'alice', 'bob-remote', 'q', 'submitted', 'node-right', ?, ?)`,
       [now, now],
     );
     queueTaskReply(db, "task-c", "reponse", "completed", now);

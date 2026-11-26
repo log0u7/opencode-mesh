@@ -35,7 +35,13 @@ import { startMemorySyncPusher } from "./lib/memory-sync.js";
 import { createDurableStore } from "./lib/persist.js";
 import { createFanout } from "./lib/fanout.js";
 import { createHostCapa } from "./lib/capa.js";
-import { handleTaskAsk, startOutboxSender, sweepOutbox } from "./lib/outbox.js";
+import {
+  handleTaskAsk,
+  startOutboxSender,
+  sweepOutbox,
+  syncRegistryToPeers,
+  type OutboxPayload,
+} from "./lib/outbox.js";
 import { ackEvent, openPeerStream } from "./lib/stream.js";
 import { startWakeLoop, createExecutionTracker, type HostEvent } from "./lib/wake.js";
 import { startSessionLister } from "./lib/sessions.js";
@@ -313,47 +319,58 @@ export const MeshV2 = Plugin.define({
         };
       };
       if (event.type === "registry") return; // the registry rides its own pusher
+      // The spoof gate FIRST (the refonte2-C7): the stream is opened TO an
+      // authenticated peer — its events carry ITS node id; a task event
+      // claiming another sender is dropped (the owner checks below read
+      // the AUTHENTICATED peer id, never the payload header).
+      if (d.from !== undefined && d.from !== eventPeerNodeId) return;
       if (event.type === "task-reply" && d.task?.id) {
         const task = getTask(db, d.task.id);
         if (task) {
-          // The owner check (the refonte2-P3): the event's from must be the
-          // task's owning node (the responder) — the spoof dropped.
-          if (d.from !== task.from_box?.split("/")[0]) return;
+          // The owner check (the 0.33.3-C): the event must come from the
+          // task's TARGET node (the responder) — the column filled at
+          // mesh_ask, never a from_box parse.
+          if (eventPeerNodeId !== task.target_node) return;
           const VALID_STATES = ["working", "input_required", "completed", "failed", "canceled"];
           const state = (d.task.state ?? "completed") as TaskState;
           if (!VALID_STATES.includes(state)) return;
           replyTask(db, d.task.id, task.to_box, d.task.result ?? "", state);
         }
-        return;
+        // The ACK (the 0.33.3-C): the push alone is at-most-once — the
+        // applied origin_id flows back so the sender's row goes sent.
+        return d.origin_id ?? null;
       }
       if (event.type === "task-ask" && d.task?.id) {
-        handleTaskAsk(db, {
-          node_id: d.from ?? "",
-          to_box: d.to ?? "",
-          from_box: d.from_box ?? null,
-          subject: d.subject ?? "",
-          body: d.body ?? "",
-          origin_id: d.origin_id ?? "",
-          type: "task-ask",
-          task: {
-            id: d.task.id,
-            // The asker's remote reference: node/box (the /task-ask
-            // composite — the mirror detection + the reply routing read it).
-            from_box: `${d.from ?? ""}/${d.from_box ?? ""}`,
+        handleTaskAsk(
+          db,
+          {
+            node_id: eventPeerNodeId,
             to_box: d.to ?? "",
-            question: d.body ?? "",
-            group_id: d.task.group_id ?? null,
-            deadline: d.task.deadline ?? null,
-            ...(d.task.result !== undefined ? { result: d.task.result } : {}),
-            state: (d.task.state ?? "completed") as TaskState,
-          },
-        });
-        return;
+            from_box: d.from_box ?? null,
+            subject: d.subject ?? "",
+            body: d.body ?? "",
+            origin_id: d.origin_id ?? "",
+            type: "task-ask",
+            task: {
+              id: d.task.id,
+              from_box: d.from_box ?? null,
+              to_box: d.to ?? "",
+              question: d.body ?? "",
+              group_id: d.task.group_id ?? null,
+              deadline: d.task.deadline ?? null,
+              ...(d.task.result !== undefined ? { result: d.task.result } : {}),
+              state: (d.task.state ?? "completed") as TaskState,
+            },
+          } as OutboxPayload,
+          // The asking NODE from the authenticated stream (the 0.33.3-B).
+          eventPeerNodeId,
+        );
+        // The ACK: idempotent — an already-mirrored ask acks too (the
+        // resend of the same ask must not starve the sender's row).
+        return d.origin_id ?? null;
       }
-      // The SAME validation as /mail (the refonte2-C7): the events arrive
-      // over the stream OPENED TO an authenticated peer — its events carry
-      // ITS node id; anything else is a spoof, dropped.
-      if (d.from !== undefined && d.from !== eventPeerNodeId) return;
+      // The SAME validation as /mail (the refonte2-C7) ran at the top: the
+      // task branches already dropped a spoofed sender.
       // The applied origin_id returns: the stream client ACKs it (the
       // refonte2-P1 — the push alone is at-most-once).
       const applied = deliverMessage(db, {
@@ -426,6 +443,11 @@ export const MeshV2 = Plugin.define({
           },
         );
         client.key = key;
+        // The registry re-push (the 0.33.3-F): a FRESH stream client (the
+        // setup, a reconnect, a re-pair) pushes this node's COMPLETE local
+        // registry to the peer — the post-reboot convergence needs no
+        // drain, the federated rows refresh on the wire.
+        void syncRegistryToPeers(db, identity);
         everClients.set(peer.node_id, client);
         streamClients.set(peer.node_id, client);
       }

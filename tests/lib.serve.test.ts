@@ -878,7 +878,7 @@ describe("the task wire routes (refonte P2.5)", () => {
       "SELECT state, from_box FROM tasks WHERE id = 'task-abc'",
     )!;
     expect(mirror.state).toBe("submitted");
-    expect(mirror.from_box).toBe("peer-1/alice");
+    expect(mirror.from_box).toBe("alice");
     expect(
       db.conn.get<{ n: number }>("SELECT COUNT(*) AS n FROM deliveries WHERE to_box = 'alice'")?.n,
     ).toBe(1);
@@ -909,8 +909,8 @@ describe("the task wire routes (refonte P2.5)", () => {
     expect(unknown.status).toBe(404);
     // Le happy path reply: la row originale appliquee.
     db.conn.run(
-      `INSERT INTO tasks (id, from_box, to_box, question, state, created_at, updated_at)
-       VALUES ('task-xyz', 'alice', 'bob-remote', 'q', 'submitted', 1, 1)`,
+      `INSERT INTO tasks (id, from_box, to_box, question, state, target_node, created_at, updated_at)
+       VALUES ('task-xyz', 'alice', 'bob-remote', 'q', 'submitted', 'peer-1', 1, 1)`,
     );
     const reply = await post(
       url,

@@ -19,7 +19,7 @@ import {
   type SpawnReplayStore,
 } from "./distant-spawn.js";
 import { countRunningSpawnedByPeer } from "./workers.js";
-import { handleTaskAsk, markOutboxSentByOrigin } from "./outbox.js";
+import { handleTaskAsk, markOutboxSentByOrigin, type OutboxPayload } from "./outbox.js";
 import { StreamHub } from "./stream.js";
 import {
   deliverMessage,
@@ -377,27 +377,30 @@ async function handle(
         json(res, 400, { error: "task payload malformed" });
         return;
       }
-      // The asker's remote reference: node/box composite — the replyTask's
-      // mirror detection reads it as non-local, and the reply crosses back
-      // to this node id.
-      const askerBox = `${peer.node_id}/${parsed.from_box ?? ""}`;
-      handleTaskAsk(db, {
-        node_id: peer.node_id,
-        to_box: parsed.task.to_box,
-        from_box: askerBox,
-        subject: `task ${parsed.task.id.slice(0, 8)}`,
-        body: parsed.task.question ?? "",
-        origin_id: parsed.task.id,
-        type: "task-ask",
-        task: {
-          id: parsed.task.id,
-          from_box: askerBox,
+      // The asker's remote reference (the 0.33.3-B): the bare box rides in
+      // from_box, the authenticated peer's node id is the asker_node —
+      // no composite, the columns drive the reply routing.
+      handleTaskAsk(
+        db,
+        {
+          node_id: peer.node_id,
           to_box: parsed.task.to_box,
-          question: parsed.task.question,
-          group_id: parsed.task.group_id ?? null,
-          deadline: parsed.task.deadline ?? null,
-        },
-      });
+          from_box: parsed.from_box ?? null,
+          subject: `task ${parsed.task.id.slice(0, 8)}`,
+          body: parsed.task.question ?? "",
+          origin_id: parsed.task.id,
+          type: "task-ask",
+          task: {
+            id: parsed.task.id,
+            from_box: parsed.from_box ?? null,
+            to_box: parsed.task.to_box,
+            question: parsed.task.question,
+            group_id: parsed.task.group_id ?? null,
+            deadline: parsed.task.deadline ?? null,
+          },
+        } as OutboxPayload,
+        peer.node_id,
+      );
       json(res, 200, { ok: true });
     } catch {
       json(res, 500, { error: "task-ask failed" });
@@ -439,14 +442,10 @@ async function handle(
         json(res, 404, { error: "unknown task" });
         return;
       }
-      // The owner check (the refonte2-P3): the authenticated peer must own
-      // the task's TARGET box (the responder) — a third-party peer cannot
-      // answer someone else's task.
-      // The owner check (the refonte2-P3): the target box may be LOCAL
-      // (this node's own session) or FEDERATED (the remote responder) —
-      // both registries consulted; a third-party node mismatched = 403.
-      const targetMailbox = mailboxByName(db, task.to_box) ?? federatedByName(db, task.to_box);
-      if (targetMailbox?.node_id !== peer.node_id) {
+      // The owner check (the 0.33.3-D): the authenticated peer must be the
+      // task's TARGET node (the responder, filled at mesh_ask) — no box
+      // resolution at reply time, a third-party node mismatched = 403.
+      if ((task.target_node ?? null) !== peer.node_id) {
         json(res, 403, { error: "only the task's owning node may reply" });
         return;
       }
