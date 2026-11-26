@@ -15,7 +15,7 @@ export type MeshDb = {
 
 // Bump when a schema change needs a migration step; the version anchors future
 // migrations that cannot be expressed as idempotent `CREATE ... IF NOT EXISTS`.
-const SCHEMA_VERSION = 17;
+const SCHEMA_VERSION = 18;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS peers (
@@ -171,6 +171,11 @@ function migrate(conn: SqliteConn): void {
     .map((row) => row.name);
   if (!deliveryColumns.includes("flashed_at")) {
     conn.exec("ALTER TABLE deliveries ADD COLUMN flashed_at INTEGER");
+  }
+  // v18: messages.kind — notify (wakes per the wake rules) vs fyi (never
+  // wakes: read at the next drain or flash). Legacy rows read as notify.
+  if (!messageColumns.includes("kind")) {
+    conn.exec("ALTER TABLE messages ADD COLUMN kind TEXT NOT NULL DEFAULT 'notify'");
   }
   // v5: messages.origin_id (cross-host broadcast dedup).
   if (!messageColumns.includes("origin_id")) {

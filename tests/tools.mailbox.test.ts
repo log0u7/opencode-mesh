@@ -535,3 +535,40 @@ describe("mesh_status", () => {
     db.close();
   });
 });
+
+describe("P1.2 (refonte): the send kind defaults by target", () => {
+  it("a DM defaults to notify, a pool to fyi, an explicit fyi DM stays silent", async () => {
+    const { db, call } = setup();
+    await call("mesh_register", { name: "alice" }, "s1");
+    await call("mesh_register", { name: "bob" }, "s2");
+    await call("mesh_join", { pool: "team:x" }, "s1");
+    await call("mesh_join", { pool: "team:x" }, "s2");
+    await call("mesh_send", { to: "bob", subject: "dm", body: "?" }, "s1");
+    await call("mesh_send", { to: "team:x", subject: "pool", body: "!" }, "s1");
+    await call("mesh_send", { to: "bob", subject: "fyi dm", body: "fyi", kind: "fyi" }, "s1");
+    const kinds = db.conn
+      .all<{ subject: string; kind: string; wake: number }>(
+        "SELECT subject, kind, wake FROM messages WHERE subject IN ('dm', 'pool', 'fyi dm')",
+      )
+      .reduce<Record<string, { kind: string; wake: number }>>((acc, r) => {
+        acc[r.subject] = { kind: r.kind, wake: r.wake };
+        return acc;
+      }, {});
+    expect(kinds["dm"]).toEqual({ kind: "notify", wake: 0 });
+    expect(kinds["pool"]).toEqual({ kind: "fyi", wake: 0 });
+    expect(kinds["fyi dm"]).toEqual({ kind: "fyi", wake: 0 });
+  });
+
+  it("an explicit notify on a pool is the deliberate broadcast (it wakes)", async () => {
+    const { db, call } = setup();
+    await call("mesh_register", { name: "alice" }, "s1");
+    await call("mesh_register", { name: "bob" }, "s2");
+    await call("mesh_join", { pool: "team:x" }, "s2");
+    await call("mesh_send", { to: "team:x", subject: "alerte", body: "!", kind: "notify" }, "s1");
+    const row = db.conn.get<{ kind: string; wake: number }>(
+      "SELECT kind, wake FROM messages WHERE subject = 'alerte'",
+    );
+    expect(row?.kind).toBe("notify");
+    expect(row?.wake).toBe(1);
+  });
+});

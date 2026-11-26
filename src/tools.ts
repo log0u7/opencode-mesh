@@ -492,6 +492,11 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
         str("reply_to", "Id this answers, from mesh_send output", false),
         str("box", "Your sending mailbox", false),
         bool("wake", "Wake all recipients (deliberate broadcast). Direct mail always wakes."),
+        str(
+          "kind",
+          "notify (the DM default) wakes per the wake rules; fyi NEVER wakes — read at the next drain or flash. Pools default to fyi.",
+          false,
+        ),
       ],
       execute: async (args, context) => {
         const peer = typeof args.peer === "string" ? args.peer : null;
@@ -499,7 +504,17 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
         if (peer === null && to === null) {
           return "error: mesh_send needs a peer (remote) or a to (mailbox, team:<pool> or all)";
         }
-        const wake = args.wake === true;
+        // P1.2 (refonte): the message kind. DMs default notify (they wake);
+        // pools default fyi (silent — read at the next drain). An explicit
+        // notify on a pool is the deliberate broadcast (wake).
+        const targetIsPool = to !== null && (to === "all" || to.startsWith("team:"));
+        const kind =
+          args.kind === "notify" || args.kind === "fyi"
+            ? args.kind
+            : targetIsPool
+              ? "fyi"
+              : "notify";
+        const wake = args.wake === true || (kind === "notify" && targetIsPool);
         const sessionBoxes = mailboxesBySession(db, sessionID(context));
         const from_box =
           typeof args.box === "string" && args.box.length > 0
@@ -524,6 +539,7 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
             body: String(args.body),
             reply_to: to === null ? null : replyToFor(to),
             wake,
+            kind,
           });
           // Federation: a broadcast with no LOCAL recipients (the sender is
           // often the only member of its team on this node) must still reach

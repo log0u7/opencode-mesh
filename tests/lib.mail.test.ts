@@ -972,3 +972,40 @@ describe("P2 (0.31.0): the registry merge is hardened", () => {
     db.close();
   });
 });
+
+describe("P1.2 (refonte): message kinds — a fyi DM never wakes", () => {
+  it("a DM with kind fyi is never wakeable (the silent DM)", () => {
+    const db = openMeshDb(":memory:");
+    registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
+    deliverMessage(db, {
+      from: "n",
+      from_box: "x",
+      to_box: "a",
+      subject: "fyi only",
+      body: "b",
+      kind: "fyi",
+      created_at: 1000,
+    });
+    const stat = wakeBoxStats(db).find((s) => s.box === "a");
+    // The box holds mail but nothing may interrupt its session: the flash
+    // waits for the next drain (or a later notify mail rides along).
+    expect(stat?.unread).toBe(1);
+    expect(stat?.wakeable).toBe(false);
+    db.close();
+  });
+
+  it("a plain DM stays wakeable (the notify default)", () => {
+    const db = openMeshDb(":memory:");
+    registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
+    deliverMessage(db, {
+      from: "n",
+      from_box: "x",
+      to_box: "a",
+      subject: "s",
+      body: "b",
+      created_at: 1000,
+    });
+    expect(wakeBoxStats(db).find((s) => s.box === "a")?.wakeable).toBe(true);
+    db.close();
+  });
+});

@@ -44,6 +44,9 @@ export type DeliverInput = {
   subject: string;
   body: string;
   reply_to?: string | null;
+  /** notify (default) wakes per the wake rules; fyi NEVER wakes — read at
+   * the next drain or flash (the silent DM). */
+  kind?: "notify" | "fyi";
   /** Cross-host dedup: the origin message's id. When a message with this
    * origin_id already exists locally, the delivery is skipped (the fanout
    * can hand the same broadcast to a node through several paths). */
@@ -361,8 +364,8 @@ export function deliverMessage(db: MeshDb, input: DeliverInput): DeliverResult {
   }
 
   db.conn.run(
-    `INSERT INTO messages (id, origin_id, from_node, from_box, subject, body, reply_to, wake, status, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO messages (id, origin_id, from_node, from_box, subject, body, reply_to, wake, kind, status, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       id,
       input.origin_id ?? id,
@@ -372,6 +375,7 @@ export function deliverMessage(db: MeshDb, input: DeliverInput): DeliverResult {
       input.body,
       input.reply_to ?? null,
       input.wake === true ? 1 : 0,
+      input.kind ?? "notify",
       global ? "unread" : "delivered",
       created_at,
     ],
@@ -741,7 +745,8 @@ export function wakeBoxStats(db: MeshDb): WakeBoxStat[] {
     .all<{ box: string; unread: number; wakeable: number; subject: string }>(
       `SELECT d.to_box AS box,
               COUNT(*) AS unread,
-              MAX(CASE WHEN m.wake = 1
+              MAX(CASE WHEN m.kind = 'fyi' THEN 0
+                        WHEN m.wake = 1
                         OR ((m.origin_id IS NULL OR m.origin_id = m.id)
                             AND (SELECT COUNT(*) FROM deliveries d2 WHERE d2.message_id = m.id) <= 1)
                        THEN 1 ELSE 0 END) AS wakeable,
