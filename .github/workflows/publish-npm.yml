@@ -37,3 +37,28 @@ jobs:
 
       - name: Publish (trusted publishing, OIDC)
         run: pnpm publish --access public --no-git-checks
+
+      # The 0.31.0 incident (2026-11-26): the publish step printed its success
+      # line, the run went green — and the registry LOST the tarball (GET 404
+      # on the official dist URL). A success line is not proof: the job only
+      # passes when the registry actually serves the tarball (the packument
+      # write and the blob can lag or drop independently, so poll both).
+      - name: Verify the registry serves the tarball
+        run: |
+          PKG="$(node -p "require('./package.json').name")"
+          VER="$(node -p "require('./package.json').version")"
+          OK=0
+          for i in $(seq 1 18); do
+            URL="$(npm view "$PKG@$VER" dist.tarball 2>/dev/null || true)"
+            if [ -n "$URL" ] && [ "$(curl -s -o /dev/null -w '%{http_code}' "$URL")" = "200" ]; then
+              echo "verified: $URL"
+              OK=1
+              break
+            fi
+            echo "attempt $i/18: $PKG@$VER not served yet (packument/tarball lag or loss)"
+            sleep 10
+          done
+          if [ "$OK" != "1" ]; then
+            echo "::error::the registry never served $PKG@$VER — the publish must be treated as LOST"
+            exit 1
+          fi
