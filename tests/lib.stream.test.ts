@@ -248,3 +248,58 @@ describe("A2 (refonte2): the TLS pinning on the stream", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 });
+
+describe("A3 (refonte2): the client lifecycle — the reconnect does not multiply", () => {
+  it("3 forced drops: at most ONE stream per node at any instant (the duplicate detector)", {
+    timeout: 15_000,
+  }, async () => {
+    const dir = mkdtempSync(join(tmpdir(), "stream-dup-"));
+    const db = openMeshDb(join(dir, "mesh.db"));
+    registerMailbox(db, { name: "alice", session_id: "s1", now: 1000 });
+    const identityB = loadOrCreateIdentity(join(dir, "id-b"));
+    const {
+      server,
+      port,
+      hub: streamHub,
+    } = await startMeshServer({
+      db,
+      port: 0,
+      tls: false,
+      self: { node_id: "node-a", pk: "", hostname: "a" },
+    });
+    const hub = streamHub as NonNullable<typeof streamHub>;
+    pairWithToken(db, {
+      node_id: identityB.node_id,
+      hostname: "b",
+      fingerprint: "ff00",
+      token: "tok-b",
+      public_key: identityB.public_key,
+    });
+    const client = openPeerStream(
+      {
+        url: `http://127.0.0.1:${port}`,
+        token: "tok-b",
+        from: identityB.node_id,
+        proof: pairingProof(identityB, "tok-b"),
+      },
+      { onEvent: () => {}, onDrop: () => {} },
+    );
+    let maxSeen = 0;
+    for (let round = 0; round < 3; round += 1) {
+      server.closeAllConnections();
+      for (let i = 0; i < 10; i += 1) {
+        await new Promise((r) => setTimeout(r, 60));
+        maxSeen = Math.max(maxSeen, hub.count(identityB.node_id));
+      }
+    }
+    client.stop();
+    hub.stop();
+    server.close();
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+    // ONE client reconnecting alone: jamais 2 streams paralleles pour le
+    // meme node (la classe multiplication du refonte2-A3).
+    expect(maxSeen).toBeLessThanOrEqual(1);
+    expect(maxSeen).toBeGreaterThanOrEqual(1);
+  });
+});

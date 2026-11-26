@@ -94,6 +94,13 @@ export class StreamHub {
     return this.streams.size;
   }
 
+  /** The open streams for ONE node: the duplicate-client detector — more
+   * than 1 means a reconnecting client AND a fresh client coexist (the
+   * refonte2-A3 leak class). */
+  count(nodeId: string): number {
+    return this.streams.get(nodeId)?.size ?? 0;
+  }
+
   stop(): void {
     if (this.heartbeat) clearInterval(this.heartbeat);
     this.heartbeat = undefined;

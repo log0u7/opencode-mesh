@@ -358,30 +358,39 @@ export const MeshV2 = Plugin.define({
         origin_id: d.origin_id ?? null,
       });
     };
+    // The client lifecycle (the refonte2-A3): ONE client per pair EVER —
+    // the client manages its own reconnection; openStreams creates only if
+    // absent AND never created (a dropped client keeps reconnecting alone:
+    // a fresh client on the next tick would multiply the loops on an
+    // unstable link). everClients holds EVERY handle ever created — the
+    // dispose stops them all (the dropped ones are not in the live map).
+    const everClients = new Map<string, { stop(): void }>();
     const streamClients = new Map<string, { stop(): void }>();
     const openStreams = (): void => {
       for (const peer of listPeers(db)) {
-        if (!peer.paired || streamClients.has(peer.node_id)) continue;
+        if (!peer.paired || streamClients.has(peer.node_id) || everClients.has(peer.node_id))
+          continue;
         const conn = resolvePeerTarget(db, peer.node_id);
         if (!conn) continue;
         const token = findSendablePeer(db, peer.node_id)?.token ?? "";
-        streamClients.set(
-          peer.node_id,
-          openPeerStream(
-            {
-              url: conn.url,
-              ...(conn.tls ? { tls: true } : {}),
-              ...(conn.pk !== null ? { pk: conn.pk } : {}),
-              token,
-              from: identity.node_id,
-              proof: pairingProof(identity, token),
-            },
-            {
-              onEvent: dispatch,
-              onDrop: () => streamClients.delete(peer.node_id),
-            },
-          ),
+        const client = openPeerStream(
+          {
+            url: conn.url,
+            ...(conn.tls ? { tls: true } : {}),
+            ...(conn.pk !== null ? { pk: conn.pk } : {}),
+            token,
+            from: identity.node_id,
+            proof: pairingProof(identity, token),
+          },
+          {
+            onEvent: dispatch,
+            // The drop: remove from the LIVE map; the client keeps its own
+            // reconnection loop (openStreams will never duplicate it).
+            onDrop: () => streamClients.delete(peer.node_id),
+          },
         );
+        everClients.set(peer.node_id, client);
+        streamClients.set(peer.node_id, client);
       }
     };
     openStreams();
@@ -536,7 +545,9 @@ export const MeshV2 = Plugin.define({
       wake.stop();
       outboxSender?.stop();
       hub?.stop();
-      for (const s of streamClients.values()) s.stop();
+      // EVERY client ever created stops: the live ones AND the dropped ones
+      // still reconnecting on their own loop.
+      for (const s of everClients.values()) s.stop();
       memorySyncPusher?.stop();
       liveSessions.stop();
       stopAllWorkers(db);
