@@ -619,7 +619,9 @@ export const MeshV2 = Plugin.define({
         };
       },
       // The /mesh inbox slice (0.34.0): the unread deliveries of one mailbox
-      // (or every local mailbox), oldest first, capped at 10 rows.
+      // (or every local mailbox), OLDEST FIRST ACROSS BOXES (the audit round:
+      // the per-box concat let the first boxes hog the cap), capped at 10
+      // rows, the total kept.
       inbox: async (input: unknown) => {
         const box =
           typeof input === "object" && input !== null && "box" in input
@@ -629,14 +631,22 @@ export const MeshV2 = Plugin.define({
           typeof box === "string" && box.length > 0
             ? [box]
             : listLocalOnlyMailboxes(db).map((b) => b.name);
-        const all = boxes.flatMap((name) =>
-          unreadForBox(db, name).map((row) => ({
-            box: name,
+        const all = boxes
+          .flatMap((name) =>
+            unreadForBox(db, name).map((row) => ({
+              box: name,
+              from_box: row.from_box,
+              subject: row.subject,
+              created_at: row.created_at,
+            })),
+          )
+          .sort((a, b) => a.created_at - b.created_at)
+          .map((row) => ({
+            box: row.box,
             from_box: row.from_box,
             subject: row.subject,
             age_s: Math.max(0, Math.round((Date.now() - row.created_at) / 1000)),
-          })),
-        );
+          }));
         return { rows: all.slice(0, 10), total: all.length };
       },
     });

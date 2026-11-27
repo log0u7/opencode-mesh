@@ -108,7 +108,7 @@ export function peerLabel(peer: { node_id: string; hostname: string; address?: s
  * budget+1 chars and clips the marker itself). */
 function truncateAtWord(text: string, budget: number): string {
   if (text.length <= budget) return text;
-  const cut = text.slice(0, Math.max(1, budget - 1));
+  const cut = text.slice(0, Math.max(0, budget - 1));
   const space = cut.lastIndexOf(" ");
   return (space > 0 ? cut.slice(0, space) : cut) + "…";
 }

@@ -1273,4 +1273,19 @@ describe("unreadForBox (the /mesh inbox RPC read, 0.34.0)", () => {
     );
     expect(unreadForBox(db, "a").map((r) => r.subject)).toEqual(["second"]);
   });
+
+  it("orders multi-box reads oldest first ACROSS boxes (the 0.34.0 audit: the /mesh inbox sort rides on this)", () => {
+    const db = openMeshDb(":memory:");
+    registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
+    registerMailbox(db, { name: "b", session_id: "s2", now: 1000 });
+    // Box a: the NEW mail. Box b: the OLD one. A per-box concat would put a's
+    // rows first; the inbox handler sorts by created_at before the cap.
+    deliverMessage(db, { from: "n", to_box: "a", subject: "new-a", body: "b", created_at: 9000 });
+    deliverMessage(db, { from: "n", to_box: "b", subject: "old-b", body: "b", created_at: 2000 });
+    const rows = [
+      ...unreadForBox(db, "a").map((r) => ({ ...r, box: "a" })),
+      ...unreadForBox(db, "b").map((r) => ({ ...r, box: "b" })),
+    ].sort((x, y) => x.created_at - y.created_at);
+    expect(rows.map((r) => r.subject)).toEqual(["old-b", "new-a"]);
+  });
 });
