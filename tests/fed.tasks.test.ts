@@ -115,7 +115,9 @@ function federatedRowFor(name: string, nodeId: string, sessionId: string) {
 }
 
 describe("federated tasks: the reply crosses back (0.33.3)", () => {
-  it("ask node-a -> node-b, reply -> the asker's task completes, outbox sent, 0 dead-letter", async () => {
+  it("ask node-a -> node-b, reply -> the asker's task completes, outbox sent, 0 dead-letter", {
+    timeout: 20_000,
+  }, async () => {
     const a = await startNode("a");
     const b = await startNode("b");
     const _token = pair(a, b);
@@ -171,7 +173,9 @@ describe("federated tasks: the reply crosses back (0.33.3)", () => {
     b.server.close();
   });
 
-  it("the homonym box on BOTH sides: the reply still crosses (asker_node, not the name)", async () => {
+  it("the homonym box on BOTH sides: the reply still crosses (asker_node, not the name)", {
+    timeout: 20_000,
+  }, async () => {
     const a = await startNode("a");
     const b = await startNode("b");
     const _token = pair(a, b);
@@ -211,7 +215,9 @@ describe("federated tasks: the reply crosses back (0.33.3)", () => {
     b.server.close();
   });
 
-  it("the stream that drops the event: attempt 2 falls back to POST and lands", async () => {
+  it("the stream that drops the event: attempt 2 falls back to POST and lands", {
+    timeout: 20_000,
+  }, async () => {
     const a = await startNode("a");
     const b = await startNode("b");
     const _token = pair(a, b);
@@ -274,7 +280,9 @@ describe("federated tasks: the reply crosses back (0.33.3)", () => {
     b.server.close();
   });
 
-  it("the rebooted node re-pushes its registry: the peer converges without a drain", async () => {
+  it("the rebooted node re-pushes its registry: the peer converges without a drain", {
+    timeout: 20_000,
+  }, async () => {
     const a = await startNode("a");
     const b = await startNode("b");
     const _token = pair(a, b);

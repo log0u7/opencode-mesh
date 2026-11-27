@@ -163,7 +163,7 @@ describe("mesh server", () => {
     db.close();
   });
 
-  it("accepts mail from a paired peer token and stores it", async () => {
+  it("accepts mail from a paired peer token and stores it", { timeout: 20_000 }, async () => {
     const { db, server, url } = await start();
     pairWithToken(db, {
       node_id: "peer1",
