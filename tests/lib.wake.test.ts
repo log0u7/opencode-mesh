@@ -149,15 +149,17 @@ describe("createExecutionTracker (the host's real session-status events)", () =>
     await new Promise((r) => setTimeout(r, 200));
     handle.stop();
     // One delivery = one claim; the reminder re-claims at +fatigueTtl. The
-    // invariant is AT LEAST two prompts, each carrying its own generated id.
+    // invariant is AT LEAST two prompts. (0.33.6) The id is DETERMINISTIC:
+    // the SAME unread set hashes to the SAME synthetic id — the transport
+    // retries and the reminders RECONCILE at the host instead of stacking
+    // a fresh panel entry per prompt (the orq ghost-turn class).
     expect(prompt.mock.calls.length).toBeGreaterThanOrEqual(2);
     const ids = prompt.mock.calls.map((c) => (c as unknown[])[2]);
     for (const id of ids) {
       expect(id).toMatch(/^msg_/);
     }
-    // Each prompt gets its OWN id: the server reconciles per prompt, and two
-    // different prompts are two different messages.
-    expect(ids[0]).not.toBe(ids[1]);
+    // The same claimed set -> the same id: the idempotency key holds.
+    expect(new Set(ids).size).toBe(1);
   });
   it("the fatigue cap: the reminders widen then the box goes silent, escalated once (0.33.4)", async () => {
     vi.useFakeTimers();

@@ -444,7 +444,11 @@ export function startWakeLoop(options: WakeOptions): WakeHandle {
           await options.prompt(
             box.session_id,
             preview === "" ? `mesh: ${fresh} unread` : `mesh: ${fresh} unread — "${preview}"`,
-            `msg_${randomUUID()}`,
+            // The DETERMINISTIC id (the 0.33.6, the P7 generalization): the
+            // claimed delivery ids hash — the SAME unread set reconciles to
+            // the SAME synthetic message at the host instead of stacking a
+            // fresh panel entry per reminder (the orq ghost-turn class).
+            `msg_${createHash("sha256").update(claim.ids.join(",")).digest("hex").slice(0, 16)}`,
           );
         } catch (error) {
           // The prompt never fired: RELEASE the claim so the next tick
