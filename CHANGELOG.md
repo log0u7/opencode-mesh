@@ -5,6 +5,26 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- The `/mesh` subcommands: `status` (the rich dialog: node, identity with the
+  hat roles, unread, my pools, fleet, peers, locks, host capa), `pools`,
+  `peers`, `toggle`, `board <pool>` (new `board` RPC: the same read
+  `mesh_board_get` serves) and `inbox [agent]` (new `inbox` RPC: the unread
+  deliveries with subject, sender and age, oldest first, capped at 10 rows).
+  Unknown subcommands answer a usage toast.
+
+### Changed
+
+- The status dialog header reads `Mesh · coordination` (no em dash in the UI
+  strings).
+- `docs/conventions.md`: the convention blocks (todo discipline, session
+  protocol, mesh communication, release ritual, UI grammar) ready to paste
+  into an `AGENTS.md`, linked from the README.
+
+
 ## [0.33.6] - 2026-11-27
 
 ### Fixed

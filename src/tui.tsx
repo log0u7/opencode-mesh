@@ -9,8 +9,11 @@ type Theme = Context["theme"];
 
 import {
   MeshRpc,
+  formatMeshPoolsDialog,
+  formatMeshPeersDialog,
   formatMeshSidebarCollapsed,
   formatMeshSidebarExpanded,
+  formatMeshStatusDialog,
   type MeshSnapshot,
   type SidebarSegment,
   type SidebarTone,
@@ -21,21 +24,30 @@ const REFRESH_MS = 15_000;
 /** quota-style event refresh: debounced immediate refresh after activity. */
 const EVENT_DEBOUNCE_MS = 150;
 
-function dialogBody(theme: Theme, snapshot: MeshSnapshot): JSX.Element {
-  const self = snapshot.hostname.length > 0 ? snapshot.hostname : snapshot.node_id;
-  const peers = snapshot.peers.map((p) => (p.hostname.length > 0 ? p.hostname : p.node_id));
+/** One tone-colored segment row per line (the dialog twin of sidebarBody). */
+function segmentDialog(theme: Theme, lines: SidebarSegment[][]): JSX.Element {
   return (
-    <box gap={1} paddingLeft={2} paddingRight={2} paddingBottom={1}>
-      <text fg={theme.text.base}>
-        <b>Mesh — coordination</b>
-      </text>
-      <text fg={theme.text.muted}>Node: {self}</text>
-      <text fg={theme.text.muted}>
-        Paired peers: {peers.length === 0 ? "none" : peers.join(", ")}
-      </text>
-      <text fg={theme.text.muted}>Active locks: {snapshot.active_locks}</text>
+    <box gap={0} paddingLeft={2} paddingRight={2} paddingBottom={1}>
+      <For each={lines}>
+        {(line) => (
+          <box flexDirection="row" gap={0}>
+            <For each={line}>
+              {(seg) => (
+                <text fg={toneFg(theme, seg.tone)} wrapMode="none">
+                  {seg.tone === "entity" ? <b>{seg.text}</b> : seg.text}
+                </text>
+              )}
+            </For>
+          </box>
+        )}
+      </For>
     </box>
   );
+}
+
+/** A small focused dialog: one bold section title, then segment lines. */
+function sectionDialog(theme: Theme, title: string, lines: SidebarSegment[][]): JSX.Element {
+  return segmentDialog(theme, [[{ text: title, tone: "entity" }], ...lines]);
 }
 
 /** The theme's attention color for the alert glyph: warning or error when the
@@ -191,28 +203,144 @@ export default Plugin.define({
     });
 
     // Keymap layers are disposed with the plugin; no manual disposer here.
+    const MESH_USAGE = "usage: /mesh [status|pools|peers|board <pool>|inbox [agent]|toggle]";
+    const toast = (message: string, variant: "info" | "warning" = "info") =>
+      context.ui.toast.show({ title: "Mesh", message, variant });
+    const unreachable = () => toast("Server unreachable");
+    const show = (body: () => JSX.Element) => {
+      context.ui.dialog.show(body);
+      context.ui.dialog.set({ size: "medium" });
+    };
+    const statusDialog = (snap: MeshSnapshot): JSX.Element =>
+      segmentDialog(theme, [
+        [{ text: "Mesh · coordination", tone: "entity" }],
+        ...formatMeshStatusDialog(snap, { width: 40 }),
+      ]);
+    const dispatch = async (input: string | undefined) => {
+      const words = (input ?? "").trim().split(/\s+/).filter(Boolean);
+      const [cmd, arg] = words;
+      switch (cmd ?? "") {
+        case "":
+        case "status": {
+          await refresh(currentSession);
+          const snap = snapshot();
+          if (!snap) {
+            unreachable();
+            return;
+          }
+          show(() => statusDialog(snap));
+          return;
+        }
+        case "pools": {
+          let snap = snapshot();
+          if (!snap) {
+            await refresh(currentSession);
+            snap = snapshot();
+          }
+          if (!snap) {
+            unreachable();
+            return;
+          }
+          show(() => sectionDialog(theme, "Mesh · pools", formatMeshPoolsDialog(snap)));
+          return;
+        }
+        case "peers": {
+          let snap = snapshot();
+          if (!snap) {
+            await refresh(currentSession);
+            snap = snapshot();
+          }
+          if (!snap) {
+            unreachable();
+            return;
+          }
+          show(() => sectionDialog(theme, "Mesh · peers", formatMeshPeersDialog(snap)));
+          return;
+        }
+        case "board": {
+          if (!arg) {
+            toast("usage: /mesh board <pool>", "warning");
+            return;
+          }
+          try {
+            const result = (await mesh.board({ pool: arg })) as {
+              rows: Array<{ box: string; line: string }>;
+            };
+            show(() =>
+              sectionDialog(
+                theme,
+                `Mesh · board ${arg}`,
+                result.rows.length === 0
+                  ? [[{ text: "(empty board)", tone: "value" }]]
+                  : result.rows.map((row) => [
+                      { text: `${row.box} `, tone: "qualifier" },
+                      { text: row.line, tone: "value" },
+                    ]),
+              ),
+            );
+          } catch {
+            unreachable();
+          }
+          return;
+        }
+        case "inbox": {
+          try {
+            const result = (await mesh.inbox(arg ? { box: arg } : {})) as {
+              rows: Array<{ box: string; from_box: string | null; subject: string; age_s: number }>;
+              total: number;
+            };
+            show(() =>
+              sectionDialog(
+                theme,
+                `Mesh · inbox${arg ? ` ${arg}` : ""}`,
+                result.rows.length === 0
+                  ? [[{ text: "inbox clear", tone: "value" }]]
+                  : ([
+                      ...result.rows.map((row): SidebarSegment[] => [
+                        { text: "● ", tone: "alert" },
+                        { text: row.subject.slice(0, 40), tone: "qualifier" },
+                        { text: ` ${row.from_box ?? "?"} ${row.box}`, tone: "value" },
+                        {
+                          text: ` ${row.age_s < 90 ? `${row.age_s}s` : `${Math.round(row.age_s / 60)}m`} ago`,
+                          tone: "value",
+                        },
+                      ]),
+                      ...(result.total > result.rows.length
+                        ? ([
+                            [
+                              {
+                                text: `+${result.total - result.rows.length} more unread`,
+                                tone: "value",
+                              },
+                            ],
+                          ] as SidebarSegment[][])
+                        : []),
+                    ] as SidebarSegment[][]),
+              ),
+            );
+          } catch {
+            unreachable();
+          }
+          return;
+        }
+        case "toggle":
+          toggleCollapsed();
+          return;
+        default:
+          toast(MESH_USAGE, "warning");
+      }
+    };
     context.keymap.layer(() => ({
       mode: "global",
       commands: [
         {
           id: "mesh.status",
-          title: "Mesh status",
+          title: "Mesh",
           group: "Mesh",
-          slash: { name: "mesh" },
+          slash: { name: "mesh", arguments: true },
           palette: true,
-          run: async () => {
-            await refresh(currentSession);
-            const current = snapshot();
-            if (!current) {
-              context.ui.toast.show({
-                title: "Mesh",
-                message: "Server unreachable",
-                variant: "info",
-              });
-              return;
-            }
-            context.ui.dialog.show(() => dialogBody(theme, current));
-            context.ui.dialog.set({ size: "medium" });
+          run: async (input?: string) => {
+            await dispatch(input);
           },
         },
         {
