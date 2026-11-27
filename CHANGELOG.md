@@ -5,6 +5,23 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.33.6] - 2026-11-27
+
+### Fixed
+
+- The phantom panel entry per reminder (the client surface of the ghost
+  class): the COMPACT wake prompt's synthetic id was random — every reminder
+  of the same unread mail stacked a FRESH entry at the host (the orq
+  10-turn episode's last remaining surface). The compact path now hashes
+  the CLAIMED DELIVERY IDS (the refonte2-P7 generalized): the same unread
+  set reconciles to the same synthetic message, a new mail gets a new id,
+  a partial drain changes the id.
+
+### Added
+
+- tests/wake.fatigue.test.ts: the deterministic compact id (the same set =
+  one synthetic id across the reminders; a new mail = a new id).
+
 ## [0.33.5] - 2026-11-27
 
 ### Fixed

@@ -1031,7 +1031,7 @@ export function claimFlashWithContent(
   now: number,
   staleAfterMs: number,
   maxChars: number,
-): { claimed: number; at: number; content: string | null } {
+): { claimed: number; at: number; content: string | null; ids: string[] } {
   return withTransaction(db, () => {
     // The candidates: never flashed, or flashed and PAST the fatigue mute —
     // the reclaim window doubles per flash (the persisted fatigue, the
@@ -1061,7 +1061,7 @@ export function claimFlashWithContent(
         r.flashed_at === null || now - r.flashed_at >= fatigueWindowMs(staleAfterMs, r.flash_count),
     );
     if (due.length === 0) {
-      return { claimed: 0, at: now, content: null };
+      return { claimed: 0, at: now, content: null, ids: [] };
     }
     // The content: an ordinary mail rides full; a TASK avis rides truncated
     // (the state + the first 400 chars of the result + the full pointer) —
@@ -1093,7 +1093,10 @@ export function claimFlashWithContent(
       );
       claimed += res.changes;
     }
-    return { claimed, at: now, content: fits ? content : null };
+    // The claimed delivery ids ride (the 0.33.6): the compact wake prompt
+    // hashes them — the SAME unread set reconciles to the SAME synthetic
+    // message id at the host (the phantom-panel-entry class).
+    return { claimed, at: now, content: fits ? content : null, ids: due.map((r) => r.id) };
   });
 }
 

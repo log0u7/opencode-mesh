@@ -20,9 +20,9 @@ import { MeshPlugin } from "../src/plugin.js";
 const setup = (hostSessions: string[]) => {
   const db = openMeshDb(":memory:");
   const live = new Set(hostSessions);
-  const prompts: Array<{ sessionID: string; text: string }> = [];
-  const prompt = vi.fn(async (sessionID: string, text: string) => {
-    prompts.push({ sessionID, text });
+  const prompts: Array<{ sessionID: string; text: string; id?: string | undefined }> = [];
+  const prompt = vi.fn(async (sessionID: string, text: string, id?: string) => {
+    prompts.push({ sessionID, text, id });
   });
   return { db, prompt, prompts, sessionKnown: vi.fn((s: string) => live.has(s)) };
 };
@@ -146,6 +146,55 @@ describe("the persisted fatigue (0.33.4-2): 10, 20, 40, 80 then silence, state i
     await new Promise((r) => setTimeout(r, 200));
     handle2.stop();
     expect(prompts.length).toBe(5);
+    db.close();
+  });
+});
+
+describe("the compact-path prompt id (0.33.6): deterministic, the host dedups", () => {
+  it("the reminders of the SAME unread rows reconcile to ONE synthetic id; a new mail gets a NEW id", async () => {
+    const { db, prompt, prompts, sessionKnown } = setup(["s1"]);
+    registerMailbox(db, { name: "bob", session_id: "s1", now: Date.now() });
+    // An OVERSIZED mail: the compact path (the phantom class — the random
+    // id made every reminder a NEW panel entry, the orq 10-turn episode).
+    deliverMessage(db, {
+      from: "x",
+      to_box: "bob",
+      subject: "ping",
+      body: "y".repeat(700),
+      kind: "notify",
+    });
+    const handle = startWakeLoop({
+      db,
+      prompt,
+      sessionKnown,
+      intervalMs: 5,
+      fatigueTtlMs: 40,
+    });
+    await new Promise((r) => setTimeout(r, 700));
+    handle.stop();
+    // 1 initial + reminders: the SAME delivery id hashes to the SAME
+    // synthetic id — the host reconciles instead of stacking entries.
+    expect(prompts.length).toBeGreaterThanOrEqual(2);
+    const ids = prompts.map((p) => p.id);
+    expect(new Set(ids).size).toBe(1);
+    // A FRESH mail lands: a different claimed set -> a different id.
+    deliverMessage(db, {
+      from: "x",
+      to_box: "bob",
+      subject: "ping2",
+      body: "z".repeat(700),
+      kind: "notify",
+    });
+    const handle2 = startWakeLoop({
+      db,
+      prompt,
+      sessionKnown,
+      intervalMs: 5,
+      fatigueTtlMs: 40,
+    });
+    await new Promise((r) => setTimeout(r, 150));
+    handle2.stop();
+    expect(prompts.at(-1)?.id).not.toBe(ids[0]);
     db.close();
   });
 });
