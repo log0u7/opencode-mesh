@@ -117,6 +117,9 @@ export type WakeOptions = {
    * longer ago are re-claimed and the box is reminded. Doubled per mute
    * cycle by the fatigue guard. Default FATIGUE_MUTE_TTL_MS. */
   fatigueTtlMs?: number;
+  /** The prompt ack timeout (0.34.1): the tick races the prompt against it so
+   * a wedged host cannot freeze `ticking` forever. Default 30 s. */
+  promptAckTimeoutMs?: number;
   /** A per-tick hook (the refonte P2.6): the instance's own outbox sweep —
    * the asker's own send fires its WAL watcher, the tick sweeps, and the
    * delivery leaves immediately. */
@@ -386,7 +389,7 @@ export function startWakeLoop(options: WakeOptions): WakeHandle {
             // same synthetic message (the duplicate class), a NEW mail is a
             // NEW id.
             const claimHash = createHash("sha256").update(claim.content).digest("hex").slice(0, 16);
-            await options.prompt(
+            await promptWithAckTimeout(
               box.session_id,
               mailText,
               `msg_${claimHash}`,
@@ -441,7 +444,7 @@ export function startWakeLoop(options: WakeOptions): WakeHandle {
         const preview =
           subject === null ? "" : subject.length > 60 ? `${subject.slice(0, 59)}…` : subject;
         try {
-          await options.prompt(
+          await promptWithAckTimeout(
             box.session_id,
             preview === "" ? `mesh: ${fresh} unread` : `mesh: ${fresh} unread — "${preview}"`,
             // The DETERMINISTIC id (the 0.33.6, the P7 generalization): the
@@ -493,6 +496,34 @@ export function startWakeLoop(options: WakeOptions): WakeHandle {
     } finally {
       ticking = false;
     }
+  };
+
+  // The prompt ack timeout (0.34.1, the wake-dead incident): the tick awaits
+  // options.prompt() — if the host wedges between the flash and the prompt
+  // resolution, `ticking` stays true FOREVER and every later tick returns at
+  // the first line (the loop alive but dead: live DB evidence, the flashed_at
+  // trail stops after 2 prompts, the third mail never claimed, session idle).
+  // The race rejects on the timeout: the existing catch releases the claim
+  // and the backoff re-ticks — the re-claim rebuilds the SAME deterministic
+  // msg id, the host reconciles (the 0.33.6 contract), no duplicate panel.
+  const WAKE_PROMPT_ACK_TIMEOUT_MS = options.promptAckTimeoutMs ?? 30_000;
+  const promptWithAckTimeout: typeof options.prompt = (...args) => {
+    const run = (options.prompt as (...a: unknown[]) => Promise<unknown>)(...args) as Promise<void>;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(
+        () =>
+          reject(
+            new Error(
+              `wake prompt ack timeout (${WAKE_PROMPT_ACK_TIMEOUT_MS}ms — the host wedged)`,
+            ),
+          ),
+        WAKE_PROMPT_ACK_TIMEOUT_MS,
+      );
+    });
+    return Promise.race([run, timeout]).finally(() => {
+      if (timer) clearTimeout(timer);
+    }) as Promise<void>;
   };
 
   // The event-driven wake (0.33 refonte P1.3): the 30s interval is the
