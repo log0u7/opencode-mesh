@@ -574,6 +574,7 @@ async function handle(
     // Addressed mail first: a known box routes to per-box deliveries, an
     // unknown box falls back to the legacy global inbox so remote mail is
     // never lost, and a broadcast with no local members is not an error.
+    const kind: "notify" | "fyi" = parsed.kind === "fyi" ? "fyi" : "notify";
     const result = deliverMessage(db, {
       from: parsed.from,
       from_box: parsed.from_box ?? null,
@@ -582,7 +583,11 @@ async function handle(
       body: parsed.body,
       reply_to: parsed.reply_to ?? null,
       origin_id: parsed.origin_id ?? null,
-      wake: parsed.wake === true,
+      kind,
+      // The addressed DM wakes (0.34.1): POST /mail used to drop the kind and
+      // wake on everything but the deliberate broadcasts, so a cross-host DM
+      // never reached the pool gate as wakeable (the wake-dead incident).
+      wake: parsed.wake === true || addressedNotifyWake(kind, parsed.to ?? null),
     });
     // The BOUNCE (the 0.33.5): an ADDRESSED mail for a box this node does
     // not own is not silently sunk into the legacy global inbox — the
@@ -938,6 +943,18 @@ async function renderMetrics(db: MeshDb, capa?: () => Promise<HostCapa>): Promis
   return `${lines.join("\n")}\n`;
 }
 
+/** An addressed notify wakes its single box: `all` and pool ids (`team:*`)
+ * are broadcasts, they only wake when the sender flags them. */
+export function addressedNotifyWake(kind: string, to: string | null): boolean {
+  return (
+    kind === "notify" &&
+    typeof to === "string" &&
+    to.length > 0 &&
+    to !== "all" &&
+    !to.startsWith("team:")
+  );
+}
+
 function parseMail(raw: string): MailBody | null {
   try {
     const parsed = JSON.parse(raw) as Partial<MailBody>;
@@ -961,6 +978,7 @@ function parseMail(raw: string): MailBody | null {
       ...(typeof parsed.from_box === "string" ? { from_box: parsed.from_box } : {}),
       ...(typeof parsed.reply_to === "string" ? { reply_to: parsed.reply_to } : {}),
       ...(parsed.wake === true ? { wake: true } : {}),
+      ...(typeof parsed.kind === "string" ? { kind: parsed.kind } : {}),
     };
   } catch {
     return null;
@@ -978,6 +996,7 @@ type MailBody = {
   via?: string[];
   origin_id?: string;
   wake?: boolean;
+  kind?: string;
 };
 
 function json(res: ServerResponse, status: number, body: unknown): void {

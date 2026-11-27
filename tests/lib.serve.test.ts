@@ -210,13 +210,36 @@ describe("mesh server", () => {
       token,
     );
     expect(plain.status).toBe(200);
+    // An addressed broadcast ("all") never wakes without the explicit flag.
+    const broadcast = await post(
+      url,
+      "/mail",
+      { subject: "status to all", body: "b", from: "peer1", to: "all" },
+      token,
+    );
+    expect(broadcast.status).toBe(200);
+    // The kind rides: an fyi never wakes, even addressed (0.34.1 — POST /mail
+    // used to drop the kind, the wake-dead incident).
+    const fyi = await post(
+      url,
+      "/mail",
+      { subject: "fyi note", body: "b", from: "peer1", to: "ops", kind: "fyi" },
+      token,
+    );
+    expect(fyi.status).toBe(200);
 
     const wakes = db.conn
-      .all<{ subject: string; wake: number }>(
-        "SELECT subject, wake FROM messages ORDER BY created_at",
+      .all<{ subject: string; wake: number; kind: string }>(
+        "SELECT subject, wake, kind FROM messages ORDER BY created_at",
       )
-      .map((r) => `${r.subject}:${r.wake}`);
-    expect(wakes).toEqual(["r8 go:1", "status:0"]);
+      .map((r) => `${r.subject}:${r.wake}:${r.kind}`);
+    // The addressed DM wakes (0.34.1): notify + a single named box.
+    expect(wakes).toEqual([
+      "r8 go:1:notify",
+      "status:1:notify",
+      "status to all:0:notify",
+      "fyi note:0:fyi",
+    ]);
 
     server.close();
     db.close();

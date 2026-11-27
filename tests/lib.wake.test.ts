@@ -779,17 +779,21 @@ describe("wake tick failures", () => {
 });
 
 describe("token economy (0.16.0)", () => {
-  it("does not wake on fanout mail (origin_id differs from id), even with unread > 0", async () => {
-    const { db, prompt } = setup(["s1"]);
+  it("wakes on a cross-host DM (foreign origin_id, notify, single delivery) - the 0.34.1 incident", async () => {
+    const { db, prompt, prompts } = setup(["s1"]);
     registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
-    // A pool broadcast arrives through the fanout: the local message row keeps
-    // the ORIGIN id (journal.ts `forwarded` semantics), not its own id.
+    // The OLD "direct" rule (origin_id IS NULL OR origin_id = m.id) read a
+    // cross-host DM as a fanout copy: the pool gate skipped the box before
+    // the claim and no wake ever fired (the wake-dead incident, live on
+    // aconitum and ricinus). The gate reads KIND now: a notify to a single
+    // box wakes, whatever its origin_id.
     deliverMessage(db, {
-      from: "n",
+      from: "remote-node",
+      from_box: "sysops-ricinus",
       to_box: "a",
-      subject: "status: pool broadcast",
+      subject: "status: cross-host dm",
       body: "b",
-      origin_id: "origin-1",
+      origin_id: "remote-origin-1",
       created_at: 1000,
     });
     const handle = startWakeLoop({
@@ -802,16 +806,20 @@ describe("token economy (0.16.0)", () => {
     await new Promise((r) => setTimeout(r, 60));
     handle.stop();
 
-    expect(prompt).not.toHaveBeenCalled();
+    expect(prompt).toHaveBeenCalled();
+    expect(prompts[0]?.text).toContain('<mesh-mail kind="notify" subject="status: cross-host dm">');
     db.close();
   });
 
-  it("wakes when a direct mail lands among unread fanout mail", async () => {
-    const { db, prompt, prompts } = setup(["s1"]);
+  it("wakes when a direct mail lands among unread multi-delivery fanout mail", async () => {
+    const { db, prompt, prompts } = setup(["s1", "s2"]);
     registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
+    registerMailbox(db, { name: "b", session_id: "s2", now: 1000 });
+    // A real fanout (MULTI delivery, one origin) piles up unread without
+    // waking: the notify gate reads the delivery shape (0.34.1).
     deliverMessage(db, {
       from: "n",
-      to_box: "a",
+      to_box: "all",
       subject: "status: pool broadcast",
       body: "b",
       origin_id: "origin-1",
@@ -1309,6 +1317,118 @@ describe("P1.1 (refonte): the flash carries the content — one turn instead of 
     // The compact path: claimed (flashed) but NOT read — mesh_inbox carries
     // the body at the next turn.
     expect(unreadBoxCount(db, "a")).toBe(1);
+    db.close();
+  });
+});
+
+describe("the ticking guard: a hung prompt must not freeze the loop (0.34.1, the wake-dead incident)", () => {
+  // The live incident (2026-11-27): the flashed_at trail stops after the 2nd
+  // prompt — the third mail (cross-host, in the box 91 s, session idle, flash
+  // 0) is NEVER claimed. The tick guard is `if (stopped || ticking) return`:
+  // an options.prompt() promise that never resolves leaves `ticking` true
+  // FOREVER — every later tick returns at the first line and the loop turns
+  // dead-alive. The host can die between the flash and the prompt
+  // resolution; the loop must survive it.
+  function seed(db: ReturnType<typeof openMeshDb>, subject: string, at: number): void {
+    registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
+    deliverMessage(db, {
+      from: "n",
+      from_box: "x",
+      to_box: "a",
+      subject,
+      body: "b",
+      created_at: at,
+    });
+  }
+
+  it("the first tick's prompt hangs: the second mail is STILL claimed when the prompt resolves", async () => {
+    const db = openMeshDb(":memory:");
+    seed(db, "first", 1000);
+    let releasePrompt: (value?: unknown) => void = () => {};
+    const prompts: Array<string | undefined> = [];
+    // The host is wedged: the prompt promise hangs until the test releases it.
+    const prompt = vi.fn(
+      (_sessionID: string, _text: string, id?: string) =>
+        new Promise((resolve) => {
+          prompts.push(id);
+          releasePrompt = resolve;
+        }),
+    );
+    const handle = startWakeLoop({
+      db,
+      prompt,
+      sessionKnown: () => true,
+      intervalMs: 20,
+      fatigueTtlMs: 30,
+    });
+    await new Promise((r) => setTimeout(r, 60));
+    expect(prompts.length).toBeGreaterThanOrEqual(1); // the first prompt fired (hung)
+
+    // A new mail lands while the host is wedged.
+    deliverMessage(db, {
+      from: "n",
+      from_box: "x",
+      to_box: "a",
+      subject: "second",
+      body: "b",
+      created_at: 2000,
+    });
+
+    // Release the wedged prompt: the tick finishes, the next tick claims the
+    // second mail.
+    releasePrompt();
+    await new Promise((r) => setTimeout(r, 80));
+
+    const flashed = db.conn
+      .all<{ flash_count: number }>("SELECT flash_count FROM deliveries WHERE to_box = 'a'")
+      .map((r) => r.flash_count);
+    // BOTH mails were flashed: the loop did not freeze after the hung prompt.
+    expect(flashed.filter((n) => n > 0).length).toBeGreaterThanOrEqual(2);
+    expect(prompts.length).toBeGreaterThanOrEqual(2);
+    handle.stop();
+    db.close();
+  });
+
+  it("the prompt hangs FOREVER: the loop still claims later mail (the loop must not die-alive)", async () => {
+    const db = openMeshDb(":memory:");
+    seed(db, "first", 1000);
+    let prompts = 0;
+    // The host never resolves: the promise hangs forever (the 20:13:27 wedge).
+    const prompt = vi.fn(() => {
+      prompts += 1;
+      return new Promise(() => {});
+    });
+    const handle = startWakeLoop({
+      db,
+      prompt,
+      sessionKnown: () => true,
+      intervalMs: 20,
+      fatigueTtlMs: 30,
+      promptAckTimeoutMs: 50,
+    });
+    await new Promise((r) => setTimeout(r, 60));
+    const firstFlashes = prompts; // 1: the first prompt fired and hangs
+
+    // A new mail lands. The loop MUST claim it despite the wedged prompt.
+    deliverMessage(db, {
+      from: "n",
+      from_box: "x",
+      to_box: "a",
+      subject: "second",
+      body: "b",
+      created_at: 2000,
+    });
+    await new Promise((r) => setTimeout(r, 120));
+
+    const flashed = db.conn
+      .all<{ subject: string; flash_count: number }>(
+        "SELECT m.subject AS subject, d.flash_count AS flash_count FROM deliveries d JOIN messages m ON m.id = d.message_id WHERE d.to_box = 'a'",
+      )
+      .reduce((acc, r) => acc.set(r.subject, r.flash_count), new Map<string, number>());
+    // The second mail was flashed: the loop is alive despite the wedged host.
+    expect(flashed.get("second")).toBeGreaterThanOrEqual(1);
+    expect(prompts).toBeGreaterThan(firstFlashes); // the second prompt fired too
+    handle.stop();
     db.close();
   });
 });

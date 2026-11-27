@@ -32,7 +32,7 @@ import { nodeSpawn, stopAllWorkers, type SpawnFn } from "./lib/spawn.js";
 import type { WorktreeClient } from "./lib/worktree.js";
 import { v2WorktreeDomainClient } from "./lib/worktree.js";
 import { reconcileWorkers } from "./lib/workers.js";
-import { startMeshServer } from "./lib/serve.js";
+import { addressedNotifyWake, startMeshServer } from "./lib/serve.js";
 import { nodeTlsMaterial } from "./lib/tls.js";
 import { startMemorySyncPusher } from "./lib/memory-sync.js";
 import { createDurableStore } from "./lib/persist.js";
@@ -313,6 +313,7 @@ export const MeshV2 = Plugin.define({
         reply_to?: string;
         kind?: "notify" | "fyi";
         origin_id?: string;
+        wake?: boolean;
         task?: {
           id: string;
           group_id?: string | null;
@@ -385,6 +386,10 @@ export const MeshV2 = Plugin.define({
         reply_to: d.reply_to ?? null,
         kind: d.kind ?? "notify",
         origin_id: d.origin_id ?? null,
+        // The addressed DM wakes (0.34.1): the stream dispatch dropped the
+        // wake the same way POST /mail did - a cross-host DM never reached
+        // the pool gate as wakeable (the wake-dead incident).
+        wake: d.wake === true || addressedNotifyWake(d.kind ?? "notify", d.to ?? null),
       });
       return applied.ok ? (d.origin_id ?? null) : null;
     };
