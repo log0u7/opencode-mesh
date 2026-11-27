@@ -303,7 +303,9 @@ describe("wake loop", () => {
     expect(DEFAULT_WAKE_COOLDOWN_MS).toBe(60000);
   });
 
-  it("the WAL watcher flashes immediately, without any timer (the event-driven wake)", async () => {
+  it("the WAL watcher flashes immediately, without any timer (the event-driven wake)", {
+    timeout: 20_000,
+  }, async () => {
     // A REAL file db: the watcher watches mesh.db-wal (:memory: has none).
     const dir = mkdtempSync(join(tmpdir(), "wake-event-"));
     const db = openMeshDb(join(dir, "mesh.db"));

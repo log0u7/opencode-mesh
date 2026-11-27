@@ -19,7 +19,12 @@ import {
   type SpawnReplayStore,
 } from "./distant-spawn.js";
 import { countRunningSpawnedByPeer } from "./workers.js";
-import { handleTaskAsk, markOutboxSentByOrigin, type OutboxPayload } from "./outbox.js";
+import {
+  handleTaskAsk,
+  markOutboxSentByOrigin,
+  queueBounce,
+  type OutboxPayload,
+} from "./outbox.js";
 import { StreamHub } from "./stream.js";
 import {
   deliverMessage,
@@ -377,6 +382,22 @@ async function handle(
         json(res, 400, { error: "task payload malformed" });
         return;
       }
+      // The OWNER gate (the 0.33.5): the asked box must be LOCAL here — an
+      // ask routed to the WRONG node never reaches a responder (the mirror
+      // would sink into the legacy global inbox and the ask would die at
+      // the deadline in silence). Bounce instead: the asker learns NOW.
+      if (!mailboxByName(db, parsed.task.to_box)) {
+        queueBounce(db, {
+          nodeId: peer.node_id,
+          toBox: parsed.from_box ?? "",
+          hostname: options.self.hostname,
+          subject: `task ${parsed.task.id.slice(0, 8)}`,
+          body: `la task n'a pas été créée ici — la boîte cible n'est pas locale à ce nœud`,
+          missingBox: parsed.task.to_box,
+        });
+        json(res, 200, { ok: true, bounced: true });
+        return;
+      }
       // The asker's remote reference (the 0.33.3-B): the bare box rides in
       // from_box, the authenticated peer's node id is the asker_node —
       // no composite, the columns drive the reply routing.
@@ -563,6 +584,20 @@ async function handle(
       origin_id: parsed.origin_id ?? null,
       wake: parsed.wake === true,
     });
+    // The BOUNCE (the 0.33.5): an ADDRESSED mail for a box this node does
+    // not own is not silently sunk into the legacy global inbox — the
+    // sender's box gets a bounce (the wrong-peer class: the ack said
+    // "queued" while the mail was invisible to every agent).
+    if (!result.ok && result.error === "unknown_mailbox" && parsed.to && parsed.from_box) {
+      queueBounce(db, {
+        nodeId: mailPeer.node_id,
+        toBox: parsed.from_box,
+        hostname: options.self.hostname,
+        subject: parsed.subject,
+        body: parsed.body,
+        missingBox: parsed.to,
+      });
+    }
     let delivered = 0;
     if (!result.ok && result.error === "unknown_mailbox") {
       receiveMessage(db, {
