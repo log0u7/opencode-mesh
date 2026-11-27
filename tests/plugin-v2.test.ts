@@ -11,7 +11,7 @@ import { openMeshDb } from "../src/lib/db.js";
 import { pairWithToken } from "../src/lib/peers.js";
 import { loadOrCreateIdentity } from "../src/lib/identity.js";
 import { buildTlsMaterial, certPkSpki } from "../src/lib/tls.js";
-import { deliverMessage, registerMailbox } from "../src/lib/mail.js";
+import { deliverMessage, registerMailbox, boardSet } from "../src/lib/mail.js";
 import { MESH_GUIDANCE } from "../src/lib/guidance.js";
 
 const dirs: string[] = [];
@@ -540,5 +540,82 @@ describe("opencode-mesh v2 setup", () => {
     await new Promise((r) => setTimeout(r, 150));
     // The wake loop's timers are dead: unread mail is left unprompted.
     expect(prompts).toHaveLength(0);
+  });
+});
+
+describe("the /mesh board and inbox RPC bridges (0.34.0)", () => {
+  it("inbox: the handler's own sort puts the oldest delivery first ACROSS boxes before the cap", async () => {
+    const dir = tmpDataDir();
+    const db = openMeshDb(join(dir, "mesh.db"));
+    registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
+    registerMailbox(db, { name: "b", session_id: "s2", now: 1000 });
+    // The wake loop claims and consumes unread deliveries of registered
+    // boxes: beyond FATIGUE_MAX_FLASHES it never re-claims, the status stays
+    // 'unread' for the handler (the deterministic bypass). Recent stamps:
+    // the boot housekeeping purges everything older than the TTL.
+    for (let i = 0; i < 12; i++) {
+      // Box a gets the NEWEST mails, box b the OLDEST: a per-box concat
+      // would open on a's rows; the handler must open on b's oldest.
+      const box = i < 10 ? "a" : "b";
+      const ageMs = box === "a" ? i * 1000 : 600_000 - i * 1000;
+      deliverMessage(db, {
+        from: "n",
+        to_box: box,
+        subject: `s-${box}-${i}`,
+        body: "b",
+        created_at: Date.now() - ageMs,
+      });
+    }
+    db.conn.run("UPDATE deliveries SET flash_count = 99");
+    const count = db.conn.get<{ n: number }>(
+      "SELECT COUNT(*) AS n FROM deliveries WHERE status = 'unread'",
+    )!.n;
+    expect(count).toBe(12);
+    db.close();
+    const { ctx, rpcHandlers } = fakeCtx(dir, { options: { wake: false } });
+    const cleanup = await pluginModule.setup(ctx);
+    const dbg = openMeshDb(join(dir, "mesh.db"));
+    console.log(
+      "DBG after setup:",
+      JSON.stringify({
+        deliveries: dbg.conn.all("SELECT to_box, status, flash_count FROM deliveries"),
+        boxes: dbg.conn.all("SELECT name, node_id FROM mailboxes"),
+      }),
+    );
+    dbg.close();
+    const out = (await rpcHandlers.inbox?.({})) as {
+      rows: Array<{ box: string; subject: string; age_s: number }>;
+      total: number;
+    };
+    // The cap holds 10 rows, the total preserves the full count.
+    expect(out?.rows).toHaveLength(10);
+    expect(out?.total).toBe(12);
+    // The handler's sort: the oldest ACROSS boxes opens the view.
+    expect(out?.rows[0]?.subject).toBe("s-b-10");
+    expect(out?.rows[0]?.box).toBe("b");
+    // Ascending created_at throughout (no per-box hogging).
+    const ages = out?.rows.map((r) => r.age_s) ?? [];
+    expect([...ages].sort((x, y) => y - x)).toEqual(ages);
+    await cleanup?.();
+  });
+
+  it("board: pool filter keeps only the boxes carrying the pool, empty pool = no rows", async () => {
+    const dir = tmpDataDir();
+    const db = openMeshDb(join(dir, "mesh.db"));
+    registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
+    registerMailbox(db, { name: "b", session_id: "s2", now: 1000 });
+    boardSet(db, "a", "task", "t1", 2000);
+    boardSet(db, "b", "task", "t2", 2000);
+    db.close();
+    const { ctx, rpcHandlers } = fakeCtx(dir);
+    const cleanup = await pluginModule.setup(ctx);
+    const filtered = (await rpcHandlers.board?.({ pool: "team:x" })) as {
+      rows: Array<{ box: string }>;
+    };
+    // Neither box belongs to team:x (no pools joined): the filter keeps none.
+    expect(filtered?.rows).toHaveLength(0);
+    const all = (await rpcHandlers.board?.({})) as { rows: Array<{ box: string }> };
+    expect(all?.rows.map((r) => r.box).sort()).toEqual(["a", "b"]);
+    await cleanup?.();
   });
 });

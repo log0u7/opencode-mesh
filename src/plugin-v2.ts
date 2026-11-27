@@ -12,10 +12,13 @@ import {
   mailboxByBindKey,
   mailboxByName,
   mailboxesBySession,
+  boardGet,
+  listLocalOnlyMailboxes,
   registerMailbox,
   replyTask,
   type TaskState,
   unreadBoxCount,
+  unreadForBox,
 } from "./lib/mail.js";
 import {
   findSendablePeer,
@@ -601,6 +604,50 @@ export const MeshV2 = Plugin.define({
             : false;
         await sidebarPersist.save({ collapsed });
         return { collapsed };
+      },
+      // The /mesh board slice (0.34.0): the pool board through the same
+      // boardGet read the mesh_board_get tool serves.
+      board: async (input: unknown) => {
+        const pool =
+          typeof input === "object" && input !== null && "pool" in input
+            ? (input as { pool?: unknown }).pool
+            : undefined;
+        return {
+          rows: boardGet(db, typeof pool === "string" && pool.length > 0 ? pool : undefined).map(
+            ({ box, line }) => ({ box, line }),
+          ),
+        };
+      },
+      // The /mesh inbox slice (0.34.0): the unread deliveries of one mailbox
+      // (or every local mailbox), OLDEST FIRST ACROSS BOXES (the audit round:
+      // the per-box concat let the first boxes hog the cap), capped at 10
+      // rows, the total kept.
+      inbox: async (input: unknown) => {
+        const box =
+          typeof input === "object" && input !== null && "box" in input
+            ? (input as { box?: unknown }).box
+            : undefined;
+        const boxes =
+          typeof box === "string" && box.length > 0
+            ? [box]
+            : listLocalOnlyMailboxes(db).map((b) => b.name);
+        const all = boxes
+          .flatMap((name) =>
+            unreadForBox(db, name).map((row) => ({
+              box: name,
+              from_box: row.from_box,
+              subject: row.subject,
+              created_at: row.created_at,
+            })),
+          )
+          .sort((a, b) => a.created_at - b.created_at)
+          .map((row) => ({
+            box: row.box,
+            from_box: row.from_box,
+            subject: row.subject,
+            age_s: Math.max(0, Math.round((Date.now() - row.created_at) / 1000)),
+          }));
+        return { rows: all.slice(0, 10), total: all.length };
       },
     });
 

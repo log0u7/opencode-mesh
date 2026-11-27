@@ -272,6 +272,19 @@ Workers run `opencode run --dir <worktree> --format json` headless with `--auto`
 
 The plugin ships a TUI part (auto-loaded by OpenCode): a toast on load, a `/mesh` slash command, and a sidebar slot. Slash commands and the mesh tools remain the primary interface. The sidebar shows this tab's view of the fleet: legend at [TUI panel](#tui-panel).
 
+`/mesh` reads an optional subcommand (0.34.0):
+
+| Command | View |
+|---|---|
+| `/mesh` | The rich status: node, identity, unread, my pools, fleet, peers, locks, host. |
+| `/mesh pools` | The pools your hats belong to: members and unread per pool. |
+| `/mesh peers` | The paired hosts. |
+| `/mesh board <pool>` | The pool board, one line per box (the `mesh_board_get` read). |
+| `/mesh inbox [agent]` | The unread mail: subject, sender, age; oldest first, capped at 10 rows. |
+| `/mesh toggle` | Collapse or expand the sidebar. |
+
+Unknown subcommands answer with a usage toast.
+
 ### Security model
 
 - The HTTP mesh server binds to `127.0.0.1` by default. Set `"bind": "lan"` in the plugin options to listen on all interfaces for a LAN pool.
@@ -373,8 +386,9 @@ pnpm smoke:dist        # build, then load dist/ under plain Node (no vitest shim
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the workflow, and the [docs/](docs/) folder for
 [configuration](docs/CONFIGURATION.md), [architecture](docs/ARCHITECTURE.md), the
-[organization models](docs/ORGANIZATION.md), the fleet [playbook](docs/PLAYBOOK.md), and the
-wire [protocol](docs/PROTOCOL.md).
+[organization models](docs/ORGANIZATION.md), the fleet [playbook](docs/PLAYBOOK.md), the
+wire [protocol](docs/PROTOCOL.md), and the [convention blocks](docs/conventions.md)
+(todo discipline, session protocol, release ritual) ready to paste into an `AGENTS.md`.
 
 ## License
 

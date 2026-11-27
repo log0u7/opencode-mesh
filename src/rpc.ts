@@ -103,10 +103,12 @@ export function peerLabel(peer: { node_id: string; hostname: string; address?: s
 
 /** Role lines truncate at the last word boundary that fits the budget (panel
  * width minus the ≔ mark): never mid-word — the 0.23.4 complaint. A single
- * word longer than the whole budget has no boundary to cut at: hard cut. */
+ * word longer than the whole budget has no boundary to cut at: hard cut, the
+ * ellipsis riding INSIDE the budget (a cut at the full budget renders
+ * budget+1 chars and clips the marker itself). */
 function truncateAtWord(text: string, budget: number): string {
   if (text.length <= budget) return text;
-  const cut = text.slice(0, budget);
+  const cut = text.slice(0, Math.max(0, budget - 1));
   const space = cut.lastIndexOf(" ");
   return (space > 0 ? cut.slice(0, space) : cut) + "…";
 }
@@ -268,6 +270,160 @@ export function formatMeshSidebarCollapsed(s: MeshSnapshot): SidebarSegment[] {
     );
   }
   return line;
+}
+
+/** The rich /mesh status dialog (0.34.0): the session's view of the mesh, the
+ * same sections as the sidebar plus the host data the sidebar skips. Labels
+ * and separators in value, numbers and ids in qualifier, the unread glyph in
+ * alert. No blank lines: an inapplicable section is omitted (unread at 0, capa
+ * absent). Role lines truncate at the word boundary within the width budget. */
+export function formatMeshStatusDialog(
+  s: MeshSnapshot,
+  opts?: { width?: number },
+): SidebarSegment[][] {
+  const width = opts?.width ?? 40;
+  const line = (label: string, segs: SidebarSegment[]): SidebarSegment[] => [
+    { text: `${label} `, tone: "value" as const },
+    ...segs,
+  ];
+  const lines: SidebarSegment[][] = [];
+  const self = s.hostname.length > 0 ? s.hostname : s.node_id.slice(0, 8);
+  lines.push(
+    line("Node", [
+      { text: self, tone: "qualifier" },
+      { text: " · ", tone: "value" },
+      { text: s.node_id.slice(0, 8), tone: "qualifier" },
+    ]),
+  );
+  if (s.hats.length === 0) {
+    lines.push(line("Identity", [{ text: "not registered: mesh_register", tone: "value" }]));
+  } else {
+    lines.push(
+      line(
+        "Identity",
+        s.hats.map((h, i) => {
+          const name: SidebarSegment = { text: h.name, tone: "qualifier" };
+          return i === 0 ? name : { text: `also ${h.name}`, tone: "value" };
+        }),
+      ),
+    );
+    for (const hat of s.hats) {
+      if (!hat.role) continue;
+      lines.push([
+        { text: "  ≔  ", tone: "qualifier" },
+        { text: truncateAtWord(hat.role, width - 5), tone: "value" },
+      ]);
+    }
+  }
+  const unread = totalUnread(s);
+  if (unread > 0) {
+    lines.push(
+      line("Unread", [
+        { text: "● ", tone: "alert" },
+        { text: `${unread} unread`, tone: "qualifier" },
+      ]),
+    );
+  }
+  const mine = new Set(s.hats.map((h) => h.name));
+  const scores = poolUnread(s);
+  const myPools = Object.keys(s.pools)
+    .filter((pool) => (s.pools[pool] ?? []).some((member) => mine.has(member)))
+    .map((pool) => ({ pool, members: s.pools[pool]?.length ?? 0, unread: scores.get(pool) ?? 0 }))
+    .sort((a, b) => b.unread - a.unread || (a.pool < b.pool ? -1 : a.pool > b.pool ? 1 : 0));
+  for (const row of myPools) {
+    const segs: SidebarSegment[] = [
+      { text: row.pool, tone: "qualifier" },
+      { text: ` (${row.members})`, tone: "value" },
+    ];
+    if (row.unread > 0) {
+      segs.push(
+        { text: " · ", tone: "value" },
+        { text: `${row.unread} unread`, tone: "qualifier" },
+      );
+    }
+    lines.push(line("Pools", segs));
+  }
+  const hosts = 1 + s.peers.length;
+  lines.push(
+    line("Fleet", [
+      { text: `${s.mailboxes.length}`, tone: "qualifier" },
+      { text: ` ${plural("agent", s.mailboxes.length)}`, tone: "value" },
+      { text: " · ", tone: "value" },
+      { text: `${Object.keys(s.pools).length}`, tone: "qualifier" },
+      { text: ` ${plural("pool", Object.keys(s.pools).length)}`, tone: "value" },
+      { text: " · ", tone: "value" },
+      { text: `${hosts}`, tone: "qualifier" },
+      { text: ` ${plural("host", hosts)}`, tone: "value" },
+    ]),
+  );
+  lines.push(
+    line(
+      "Peers",
+      s.peers.length === 0
+        ? [{ text: "none", tone: "value" }]
+        : s.peers.map((p, i) => {
+            const seg: SidebarSegment = { text: peerLabel(p), tone: "qualifier" };
+            return i === 0 ? seg : { text: ` · ${seg.text}`, tone: "value" };
+          }),
+    ),
+  );
+  lines.push(
+    line("Locks", [
+      { text: `${s.active_locks}`, tone: "qualifier" },
+      { text: ` ${plural("lock", s.active_locks)}`, tone: "value" },
+    ]),
+  );
+  if (s.capa) {
+    const hostSegs: SidebarSegment[] = [
+      { text: `${s.capa.cpu.cores}`, tone: "qualifier" },
+      { text: " cores", tone: "value" },
+      { text: " · ", tone: "value" },
+      { text: `${Math.round(s.capa.ram.totalMb / 1024)}`, tone: "qualifier" },
+      { text: " GB", tone: "value" },
+    ];
+    if (s.capa.gpu) {
+      hostSegs.push({ text: " · ", tone: "value" }, { text: s.capa.gpu.model, tone: "qualifier" });
+    }
+    lines.push(line("Host", hostSegs));
+  }
+  return lines;
+}
+
+/** The /mesh pools slice: my pools only, members and unread per pool. */
+export function formatMeshPoolsDialog(s: MeshSnapshot): SidebarSegment[][] {
+  const mine = new Set(s.hats.map((h) => h.name));
+  const scores = poolUnread(s);
+  const pools = Object.keys(s.pools)
+    .filter((pool) => (s.pools[pool] ?? []).some((member) => mine.has(member)))
+    .map((pool) => ({ pool, members: s.pools[pool]?.length ?? 0, unread: scores.get(pool) ?? 0 }))
+    .sort((a, b) => b.unread - a.unread || (a.pool < b.pool ? -1 : a.pool > b.pool ? 1 : 0));
+  if (pools.length === 0) {
+    return [[{ text: "no pool: mesh_join", tone: "value" }]];
+  }
+  return pools.map((row) => {
+    const segs: SidebarSegment[] = [
+      { text: row.pool, tone: "qualifier" },
+      { text: ` (${row.members})`, tone: "value" },
+    ];
+    if (row.unread > 0) {
+      segs.push(
+        { text: " · ", tone: "value" },
+        { text: `${row.unread} unread`, tone: "qualifier" },
+      );
+    }
+    return [{ text: "  ≡  ", tone: "qualifier" }, ...segs];
+  });
+}
+
+/** The /mesh peers slice: hostname@id per paired peer, none when empty. */
+export function formatMeshPeersDialog(s: MeshSnapshot): SidebarSegment[][] {
+  if (s.peers.length === 0) {
+    return [[{ text: "none", tone: "value" }]];
+  }
+  return s.peers.map((peer) => [
+    { text: "  ⇄  ", tone: "qualifier" },
+    { text: peerLabel(peer), tone: "qualifier" },
+  ]);
 }
 
 export const MeshRpc = Rpc.define({
@@ -432,6 +588,62 @@ export const MeshRpc = Rpc.define({
           collapsed: { type: "boolean", description: "Sidebar collapsed state" },
         },
         required: ["collapsed"],
+        additionalProperties: false,
+      },
+    },
+    // The /mesh board slice (0.34.0): the pool board, one line per box.
+    board: {
+      input: {
+        type: "object",
+        properties: { pool: { type: "string", description: "Pool id filter" } },
+        additionalProperties: false,
+      },
+      output: {
+        type: "object",
+        properties: {
+          rows: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: { box: { type: "string" }, line: { type: "string" } },
+              required: ["box", "line"],
+              additionalProperties: false,
+            },
+            description: "One line per box, keys in the fixed BOARD_KEYS order",
+          },
+        },
+        required: ["rows"],
+        additionalProperties: false,
+      },
+    },
+    // The /mesh inbox slice (0.34.0): the unread mail, one row per delivery.
+    inbox: {
+      input: {
+        type: "object",
+        properties: { box: { type: "string", description: "Mailbox name filter" } },
+        additionalProperties: false,
+      },
+      output: {
+        type: "object",
+        properties: {
+          rows: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: {
+                box: { type: "string" },
+                from_box: { type: ["string", "null"] },
+                subject: { type: "string" },
+                age_s: { type: "number" },
+              },
+              required: ["box", "from_box", "subject", "age_s"],
+              additionalProperties: false,
+            },
+            description: "The unread deliveries, oldest first, capped at 10 rows",
+          },
+          total: { type: "number", description: "The full unread count before the cap" },
+        },
+        required: ["rows", "total"],
         additionalProperties: false,
       },
     },

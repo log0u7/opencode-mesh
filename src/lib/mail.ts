@@ -499,6 +499,12 @@ export function inboxRows(db: MeshDb, session_id: string): InboxRow[] {
     .sort((a, b) => a.created_at - b.created_at);
 }
 
+/** The unread deliveries of ONE mailbox, oldest first: the /mesh inbox RPC
+ * (0.34.0). Legacy global rows (no to_box) belong to no box and stay out. */
+export function unreadForBox(db: MeshDb, box: string): InboxRow[] {
+  return deliveryRows(db, box);
+}
+
 /** Which of the session's boxes a delivery belongs to (multi-box labeling). */
 function deliveryBoxName(db: MeshDb, delivery_id: string, boxes: Mailbox[]): string | null {
   if (delivery_id.length === 0) return null;
