@@ -5,6 +5,33 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.34.1] - 2026-11-27
+
+### Fixed
+
+- The cross-host DM never woke (the wake-dead incident, live on two hosts):
+  the pool gate read `origin_id` as the fan-out test, and a DM from another
+  node carries the SENDER'S origin_id while the receiver regenerates a fresh
+  local id, so the rule read every cross-host DM as a fanout copy and the
+  loop skipped the box BEFORE the claim (flash_count 0, no prompt, no
+  bounce). The gate reads KIND and the delivery shape now: a notify to a
+  single box wakes, a multi-delivery fanout does not (unless the sender
+  flagged wake), an fyi never. Both inbound paths were silent partners:
+  POST /mail dropped the kind and never set wake; the stream dispatch set
+  neither. Both carry `kind` and the addressed-notify wake now.
+- A wedged host froze the wake loop alive-but-dead: the tick guard
+  (`ticking`) stayed true forever if the prompt promise never resolved (live
+  DB evidence alongside the incident). The tick races the prompt against an
+  ack timeout (30 s, injectable): the timeout releases the claim and the
+  backoff re-ticks, the re-claim rebuilds the SAME deterministic msg id so
+  the host reconciles (no duplicate panel entry).
+
+### Added
+
+- The `/mesh` slash command carries a description in the prompt completion
+  (the native field the built-ins use): "Mesh /mesh shows the status.
+  Subcommands: pools, peers, board <pool>, inbox [agent], toggle".
+
 ## [0.34.0] - 2026-11-27
 
 ### Added

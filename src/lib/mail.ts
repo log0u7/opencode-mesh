@@ -717,6 +717,13 @@ export type WakeBoxStat = {
  * id). A multi-recipient broadcast or a cross-host fanout without the flag is
  * quiet: channels are quiet by default, the sender flags the mention. Legacy
  * rows (pre-origin_id) count as direct, like every other gate. */
+/** The gate reads KIND and the delivery shape only (0.34.1): a notify to a
+ * single box wakes, a fanout does not (unless the sender set wake explicitly),
+ * an fyi never. The old origin_id test (direct = origin_id IS NULL OR = the
+ * local id) died with the cross-host incident: a DM from another node carries
+ * the SENDER's origin_id while the receiver regenerates a fresh local id, so
+ * the rule read every cross-host DM as a fanout copy and the pool gate
+ * skipped the box before the claim (the wake-dead class, seen live twice). */
 export function wakeBoxStats(db: MeshDb): WakeBoxStat[] {
   return db.conn
     .all<{ box: string; unread: number; wakeable: number; subject: string }>(
@@ -724,7 +731,7 @@ export function wakeBoxStats(db: MeshDb): WakeBoxStat[] {
               COUNT(*) AS unread,
               MAX(CASE WHEN m.kind = 'fyi' THEN 0
                         WHEN m.wake = 1
-                        OR ((m.origin_id IS NULL OR m.origin_id = m.id)
+                        OR (m.kind = 'notify'
                             AND (SELECT COUNT(*) FROM deliveries d2 WHERE d2.message_id = m.id) <= 1)
                        THEN 1 ELSE 0 END) AS wakeable,
               (SELECT m3.subject FROM deliveries d3 JOIN messages m3 ON m3.id = d3.message_id

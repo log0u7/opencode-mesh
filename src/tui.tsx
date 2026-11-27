@@ -336,6 +336,8 @@ export default Plugin.define({
         {
           id: "mesh.status",
           title: "Mesh",
+          description:
+            "Mesh /mesh shows the status. Subcommands: pools, peers, board <pool>, inbox [agent], toggle",
           group: "Mesh",
           slash: { name: "mesh", arguments: true },
           palette: true,

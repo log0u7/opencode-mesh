@@ -779,17 +779,21 @@ describe("wake tick failures", () => {
 });
 
 describe("token economy (0.16.0)", () => {
-  it("does not wake on fanout mail (origin_id differs from id), even with unread > 0", async () => {
-    const { db, prompt } = setup(["s1"]);
+  it("wakes on a cross-host DM (foreign origin_id, notify, single delivery) - the 0.34.1 incident", async () => {
+    const { db, prompt, prompts } = setup(["s1"]);
     registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
-    // A pool broadcast arrives through the fanout: the local message row keeps
-    // the ORIGIN id (journal.ts `forwarded` semantics), not its own id.
+    // The OLD "direct" rule (origin_id IS NULL OR origin_id = m.id) read a
+    // cross-host DM as a fanout copy: the pool gate skipped the box before
+    // the claim and no wake ever fired (the wake-dead incident, live on
+    // aconitum and ricinus). The gate reads KIND now: a notify to a single
+    // box wakes, whatever its origin_id.
     deliverMessage(db, {
-      from: "n",
+      from: "remote-node",
+      from_box: "sysops-ricinus",
       to_box: "a",
-      subject: "status: pool broadcast",
+      subject: "status: cross-host dm",
       body: "b",
-      origin_id: "origin-1",
+      origin_id: "remote-origin-1",
       created_at: 1000,
     });
     const handle = startWakeLoop({
@@ -802,16 +806,20 @@ describe("token economy (0.16.0)", () => {
     await new Promise((r) => setTimeout(r, 60));
     handle.stop();
 
-    expect(prompt).not.toHaveBeenCalled();
+    expect(prompt).toHaveBeenCalled();
+    expect(prompts[0]?.text).toContain('<mesh-mail kind="notify" subject="status: cross-host dm">');
     db.close();
   });
 
-  it("wakes when a direct mail lands among unread fanout mail", async () => {
-    const { db, prompt, prompts } = setup(["s1"]);
+  it("wakes when a direct mail lands among unread multi-delivery fanout mail", async () => {
+    const { db, prompt, prompts } = setup(["s1", "s2"]);
     registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
+    registerMailbox(db, { name: "b", session_id: "s2", now: 1000 });
+    // A real fanout (MULTI delivery, one origin) piles up unread without
+    // waking: the notify gate reads the delivery shape (0.34.1).
     deliverMessage(db, {
       from: "n",
-      to_box: "a",
+      to_box: "all",
       subject: "status: pool broadcast",
       body: "b",
       origin_id: "origin-1",

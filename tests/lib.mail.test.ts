@@ -260,15 +260,19 @@ describe("wake flag (0.17.0 Slack model)", () => {
   it("a cross-host fanout with wake:true wakes despite origin_id != id", () => {
     const db = openMeshDb(":memory:");
     registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
+    registerMailbox(db, { name: "b", session_id: "s2", now: 1000 });
+    // A real fanout (MULTI delivery, one origin): not wakeable — the notify
+    // gate reads the delivery shape (0.34.1), the origin_id test is dead.
     deliverMessage(db, {
       from: "n",
-      to_box: "a",
+      to_box: "all",
       subject: "status: pool broadcast",
       body: "b",
       origin_id: "origin-1",
       created_at: 1000,
     });
     expect(statOf(db, "a")?.wakeable).toBe(false);
+    expect(statOf(db, "b")?.wakeable).toBe(false);
 
     deliverMessage(db, {
       from: "n",
@@ -404,6 +408,70 @@ describe("content dedup at delivery (0.20.0 sender re-send defense)", () => {
   });
 });
 
+describe("wake gates: the cross-host DM must be wakeable (0.34.1, the wake-dead incident)", () => {
+  // The incident: a DM arriving from ANOTHER node carries the SENDER's
+  // origin_id while the receiver regenerated a fresh local id — the old
+  // "direct" rule (origin_id IS NULL OR origin_id = m.id) therefore read it
+  // as a fanout copy and the pool gate skipped the box BEFORE the claim
+  // (flash_count 0, live evidence on aconitum and ricinus, 2026-11-27).
+  // Since P1.2 pool broadcasts default to kind fyi, the origin_id test is
+  // redundant: the gate reads KIND and the single-delivery shape only.
+  it("a cross-host DM (foreign origin_id, kind notify) IS wakeable", () => {
+    const db = openMeshDb(":memory:");
+    registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
+    deliverMessage(db, {
+      from: "remote-node",
+      from_box: "sysops-ricinus",
+      to_box: "a",
+      subject: "cross-host dm",
+      body: "b",
+      origin_id: "remote-msg-id",
+      kind: "notify",
+      created_at: 1000,
+    });
+    expect(statOf(db, "a")?.wakeable).toBe(true);
+    db.close();
+  });
+
+  it("a cross-host fyi is still NOT wakeable", () => {
+    const db = openMeshDb(":memory:");
+    registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
+    deliverMessage(db, {
+      from: "remote-node",
+      to_box: "a",
+      subject: "fyi",
+      body: "b",
+      origin_id: "remote-msg-id",
+      kind: "fyi",
+      created_at: 1000,
+    });
+    expect(statOf(db, "a")?.wakeable).toBe(false);
+    db.close();
+  });
+
+  it("a local fanout copy (foreign origin_id, kind notify, MULTI delivery) is NOT wakeable", () => {
+    const db = openMeshDb(":memory:");
+    registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
+    registerMailbox(db, { name: "b", session_id: "s2", now: 1000 });
+    const delivered = deliverMessage(db, {
+      from: "n",
+      to_box: "all",
+      subject: "pool broadcast",
+      body: "b",
+      origin_id: "origin-1",
+      kind: "notify",
+      created_at: 1000,
+    });
+    if (!delivered.ok) {
+      throw new Error("the broadcast should deliver");
+    }
+    expect(delivered.recipients.length).toBeGreaterThanOrEqual(2);
+    const stats = wakeBoxStats(db).filter((s) => s.box === "a" || s.box === "b");
+    for (const stat of stats) expect(stat.wakeable).toBe(false);
+    db.close();
+  });
+});
+
 describe("wake gates (0.16.0 token economy)", () => {
   it("wakeBoxStats: wakeable true for a direct mail, false for a fanout", () => {
     const db = openMeshDb(":memory:");
@@ -413,12 +481,16 @@ describe("wake gates (0.16.0 token economy)", () => {
     db.close();
   });
 
-  it("wakeBoxStats: fanout (origin_id differs from id) is not direct", () => {
+  it("wakeBoxStats: a real fanout (origin_id differs from id, MULTI delivery) is not direct", () => {
     const db = openMeshDb(":memory:");
     registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
+    registerMailbox(db, { name: "b", session_id: "s2", now: 1000 });
+    // The origin_id test is DEAD (0.34.1): a single-delivery copy with a
+    // foreign origin_id is exactly the cross-host DM shape, which MUST wake.
+    // The fanout that never wakes = the MULTI-delivery broadcast.
     deliverMessage(db, {
       from: "n",
-      to_box: "a",
+      to_box: "all",
       subject: "pool",
       body: "b",
       origin_id: "origin-1",
