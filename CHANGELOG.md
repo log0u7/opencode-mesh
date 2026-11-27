@@ -5,6 +5,27 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.33.5] - 2026-11-27
+
+### Fixed
+
+- The wrong-peer silent loss (caught live: orq's DMs to blogger sent with
+  the WRONG peer were acked "queued" while the mail sank into the legacy
+  global inbox nobody drains): a node that receives mail for a box it does
+  not own BOUNCES to the sender's box ("undeliverable: la boîte 'X' n'existe
+  pas sur ce nœud — vérifie le peer du destinataire"). The legacy fallback
+  stays as the last resort.
+- The task-ask OWNER gate: an ask routed to a node that does not own the
+  target box creates NO mirror (the mirror used to sink invisibly and the
+  ask died at the deadline in silence — the 0.33.0-era expired-asks class)
+  and bounces the asker immediately.
+
+### Added
+
+- tests/bounce.test.ts: the two-node regressions (the wrong-peer mail bounce
+  crossing back, the task-ask owner gate with no mirror, the known-box
+  normal flow unchanged).
+
 ## [0.33.4] - 2026-11-26
 
 ### Fixed

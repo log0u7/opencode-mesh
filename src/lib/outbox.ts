@@ -78,6 +78,38 @@ export function registerOutboxNudge(nudge: () => void): () => void {
 
 /** Queue a remote delivery: the row lands, the caller answers "queued", the
  * sender is nudged. */
+/** The undeliverable-mail bounce (the 0.33.5): a node that receives mail
+ * (or a task) for a box it does not own queues a bounce back to the
+ * SENDER's box — the ack alone lied ("queued" while the mail sank into the
+ * legacy global inbox nobody drains: the orq->blogger wrong-peer loss). */
+export function queueBounce(
+  db: MeshDb,
+  input: {
+    nodeId: string;
+    toBox: string;
+    hostname: string;
+    subject: string;
+    body: string;
+    missingBox: string;
+  },
+): string {
+  return queueOutbox(
+    db,
+    {
+      node_id: input.nodeId,
+      to_box: input.toBox,
+      from_box: "mesh-mailer",
+      subject: `bounce: ${input.subject.slice(0, 80)}`,
+      body:
+        `undeliverable: la boîte '${input.missingBox}' n'existe pas sur ce nœud (${input.hostname}) — ` +
+        `vérifie le peer du destinataire (même hôte: pas de peer). Original: ${input.subject} — ${input.body.slice(0, 200)}`,
+      origin_id: `bounce:${randomUUID()}`,
+      type: "mail",
+    } as OutboxPayload,
+    Date.now(),
+  ).id;
+}
+
 export function queueOutbox(db: MeshDb, payload: OutboxPayload, now: number): OutboxRow {
   const id = randomUUID();
   db.conn.run(
