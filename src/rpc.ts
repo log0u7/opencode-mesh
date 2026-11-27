@@ -103,10 +103,12 @@ export function peerLabel(peer: { node_id: string; hostname: string; address?: s
 
 /** Role lines truncate at the last word boundary that fits the budget (panel
  * width minus the ≔ mark): never mid-word — the 0.23.4 complaint. A single
- * word longer than the whole budget has no boundary to cut at: hard cut. */
+ * word longer than the whole budget has no boundary to cut at: hard cut, the
+ * ellipsis riding INSIDE the budget (a cut at the full budget renders
+ * budget+1 chars and clips the marker itself). */
 function truncateAtWord(text: string, budget: number): string {
   if (text.length <= budget) return text;
-  const cut = text.slice(0, budget);
+  const cut = text.slice(0, Math.max(1, budget - 1));
   const space = cut.lastIndexOf(" ");
   return (space > 0 ? cut.slice(0, space) : cut) + "…";
 }
@@ -360,10 +362,7 @@ export function formatMeshStatusDialog(
       s.peers.length === 0
         ? [{ text: "none", tone: "value" }]
         : s.peers.map((p, i) => {
-            const seg: SidebarSegment = {
-              text: `${p.hostname}@${p.node_id.slice(0, 8)}`,
-              tone: "qualifier",
-            };
+            const seg: SidebarSegment = { text: peerLabel(p), tone: "qualifier" };
             return i === 0 ? seg : { text: ` · ${seg.text}`, tone: "value" };
           }),
     ),

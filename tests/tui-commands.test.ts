@@ -73,6 +73,16 @@ describe("formatMeshStatusDialog", () => {
     expect(role?.trimEnd()).toMatch(/…$/);
   });
 
+  it("keeps a single-word role inside the budget: the ellipsis never clips (0.34.0 review)", () => {
+    const lines = formatMeshStatusDialog(
+      snapshot({ hats: [{ name: "orq", role: "r".repeat(45), unread: 0 }] }),
+      { width: 40 },
+    ).map(render);
+    const role = lines.find((l) => l.trimStart().startsWith("≔"));
+    expect(role?.length).toBeLessThanOrEqual(40);
+    expect(role?.trimEnd()).toMatch(/…$/);
+  });
+
   it("renders the host section from capa when provided", () => {
     const lines = formatMeshStatusDialog(
       snapshot({

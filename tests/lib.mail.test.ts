@@ -9,6 +9,7 @@ import {
   replyTask,
   sweepTasks,
   inboxRead,
+  unreadForBox,
   joinPool,
   receiveMessage,
   registerMailbox,
@@ -1253,5 +1254,23 @@ describe("D (refonte2): the retention purges the delivered history", () => {
       db.conn.get<{ n: number }>("SELECT COUNT(*) AS n FROM tasks WHERE id = 't-open'")!.n,
     ).toBe(1);
     db.close();
+  });
+});
+
+describe("unreadForBox (the /mesh inbox RPC read, 0.34.0)", () => {
+  it("returns the unread deliveries of one box only, oldest first", () => {
+    const db = openMeshDb(":memory:");
+    registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
+    registerMailbox(db, { name: "b", session_id: "s2", now: 1000 });
+    deliverMessage(db, { from: "n", to_box: "a", subject: "first", body: "b", created_at: 2000 });
+    deliverMessage(db, { from: "n", to_box: "a", subject: "second", body: "b", created_at: 3000 });
+    deliverMessage(db, { from: "n", to_box: "b", subject: "other", body: "b", created_at: 4000 });
+    const rows = unreadForBox(db, "a");
+    expect(rows.map((r) => r.subject)).toEqual(["first", "second"]);
+    // A read delivery leaves the unread read.
+    db.conn.run(
+      "UPDATE deliveries SET status = 'read' WHERE message_id = (SELECT id FROM messages WHERE subject = 'first')",
+    );
+    expect(unreadForBox(db, "a").map((r) => r.subject)).toEqual(["second"]);
   });
 });

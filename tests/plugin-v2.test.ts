@@ -11,7 +11,7 @@ import { openMeshDb } from "../src/lib/db.js";
 import { pairWithToken } from "../src/lib/peers.js";
 import { loadOrCreateIdentity } from "../src/lib/identity.js";
 import { buildTlsMaterial, certPkSpki } from "../src/lib/tls.js";
-import { deliverMessage, registerMailbox } from "../src/lib/mail.js";
+import { deliverMessage, registerMailbox, boardSet } from "../src/lib/mail.js";
 import { MESH_GUIDANCE } from "../src/lib/guidance.js";
 
 const dirs: string[] = [];
@@ -540,5 +540,27 @@ describe("opencode-mesh v2 setup", () => {
     await new Promise((r) => setTimeout(r, 150));
     // The wake loop's timers are dead: unread mail is left unprompted.
     expect(prompts).toHaveLength(0);
+  });
+});
+
+describe("the /mesh board RPC bridge (0.34.0)", () => {
+  it("board: pool filter keeps only the boxes carrying the pool, empty pool = no rows", async () => {
+    const dir = tmpDataDir();
+    const db = openMeshDb(join(dir, "mesh.db"));
+    registerMailbox(db, { name: "a", session_id: "s1", now: 1000 });
+    registerMailbox(db, { name: "b", session_id: "s2", now: 1000 });
+    boardSet(db, "a", "task", "t1", 2000);
+    boardSet(db, "b", "task", "t2", 2000);
+    db.close();
+    const { ctx, rpcHandlers } = fakeCtx(dir);
+    const cleanup = await pluginModule.setup(ctx);
+    const filtered = (await rpcHandlers.board?.({ pool: "team:x" })) as {
+      rows: Array<{ box: string }>;
+    };
+    // Neither box belongs to team:x (no pools joined): the filter keeps none.
+    expect(filtered?.rows).toHaveLength(0);
+    const all = (await rpcHandlers.board?.({})) as { rows: Array<{ box: string }> };
+    expect(all?.rows.map((r) => r.box).sort()).toEqual(["a", "b"]);
+    await cleanup?.();
   });
 });
