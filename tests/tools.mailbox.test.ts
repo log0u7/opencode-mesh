@@ -672,6 +672,10 @@ describe("the asker's channel through the mesh_reply TOOL (0.34.3, the T7-replay
       [taskId],
     );
     expect(task?.state).toBe("working");
-    expect(task?.result).toContain("the input: go");
+    // 0.34.6: the asker's input lands in tasks.input — the responder's
+    // result stays intact (the audit point b).
+    expect(task?.result).toContain("waiting on input");
+    const input = db.conn.get<{ input: string }>("SELECT input FROM tasks WHERE id = ?", [taskId]);
+    expect(input?.input).toContain("the input: go");
   });
 });

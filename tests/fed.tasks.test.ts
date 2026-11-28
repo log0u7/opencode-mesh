@@ -22,6 +22,7 @@ import {
   syncRegistryToPeers,
 } from "../src/lib/outbox.js";
 import { pairWithToken } from "../src/lib/peers.js";
+import { sweepOutbox, queueTaskInput } from "../src/lib/outbox.js";
 import { addressingOptions } from "../src/options.js";
 import { startMeshServer } from "../src/lib/serve.js";
 
@@ -325,7 +326,13 @@ describe("the cross-host kind propagation (0.34.2, the T2 incident)", () => {
       "INSERT INTO mailboxes (name, session_id, node_id, last_seen, created_at) VALUES ('bob', 'sb1', ?, ?, ?)",
       [b.identity.node_id, Date.now(), Date.now()],
     );
+    // The insert MUST be visible (the federated resolution rides it).
+    expect(federatedByName(a.db, "bob")?.node_id).toBe(b.identity.node_id);
     registerMailbox(b.db, { name: "bob", session_id: "sb1", now: Date.now() });
+    console.log(
+      "DBG after regB:",
+      JSON.stringify(a.db.conn.get("SELECT name, node_id FROM mailboxes WHERE name = 'bob'")),
+    );
 
     // The sender's kind=fyi must SURVIVE the queueOutbox payload: the T2
     // incident proved it died there (the receiver read kind=notify and the
@@ -392,6 +399,100 @@ describe("the cross-host kind propagation (0.34.2, the T2 incident)", () => {
     );
     const bobStat = stats.find((s) => s.box === "bob");
     expect(bobStat?.wakeable ?? 0).toBe(0); // the fyi never wakes
+    a.server.close();
+    b.server.close();
+  });
+});
+
+describe("the cross-host task-input channel (0.34.6, the T7-replay full scenario)", () => {
+  it("the asker's feed crosses the wire: the mirror resumes working, the task completes past its deadline", {
+    timeout: 30_000,
+  }, async () => {
+    const a = await startNode("a"); // the ASKER
+    const b = await startNode("b"); // the RESPONDER
+    pair(a, b);
+    registerMailbox(a.db, { name: "orq", session_id: "s-asker", now: Date.now() });
+    registerMailbox(b.db, { name: "bob", session_id: "sb1", now: Date.now() });
+    // The federated row on a: the task-ask routing resolves the target node
+    // through it (federatedByName).
+    a.db.conn.run(
+      "INSERT INTO mailboxes (name, session_id, node_id, last_seen, created_at) VALUES ('bob', 'sb1', ?, ?, ?)",
+      [b.identity.node_id, Date.now(), Date.now()],
+    );
+
+    // 1. The ask (the source row on a, the deadline t+600).
+    const task = askTask(a.db, {
+      from_box: "orq",
+      to_box: "bob",
+      question: "the T7 task",
+      deadline: Date.now() + 600_000,
+    });
+    queueTaskAsk(a.db, task, Date.now());
+    await sweepOutbox(a.db, a.identity, () => {});
+    const mirror0 = b.db.conn.get<{ state: string; asker_node: string | null }>(
+      "SELECT state, asker_node FROM tasks WHERE id = ?",
+      [task.id],
+    );
+    expect(mirror0?.state).toBe("submitted");
+    expect(mirror0?.asker_node).toBe(a.identity.node_id);
+
+    // 2. The responder pauses: the deadline pauses (deadline_left stored).
+    expect(replyTask(b.db, task.id, "bob", "waiting on the asker", "input_required").ok).toBe(true);
+    const paused = b.db.conn.get<{
+      state: string;
+      deadline: number | null;
+      deadline_left: number | null;
+    }>("SELECT state, deadline, deadline_left FROM tasks WHERE id = ?", [task.id]);
+    expect(paused?.state).toBe("input_required");
+    expect(paused?.deadline).toBeNull();
+    expect(paused?.deadline_left).toBeGreaterThan(0);
+    // The pause crosses back: the asker's row reads input_required too.
+    queueTaskReply(b.db, task.id, "waiting on the asker", "input_required", Date.now());
+    await sweepOutbox(b.db, b.identity, () => {});
+    expect(
+      a.db.conn.get<{ state: string }>("SELECT state FROM tasks WHERE id = ?", [task.id])?.state,
+    ).toBe("input_required");
+
+    // 3. The ASKER feeds: the local row resumes (deadline = now + remaining)
+    // AND the task-input crosses to the responder's node.
+    expect(replyTask(a.db, task.id, "orq", "the input: go", "working").ok).toBe(true);
+    const resumed = a.db.conn.get<{ state: string; deadline: number | null }>(
+      "SELECT state, deadline FROM tasks WHERE id = ?",
+      [task.id],
+    );
+    expect(resumed?.state).toBe("working");
+    expect(resumed?.deadline).toBeGreaterThan(Date.now());
+    // The cross queue = the TOOL layer's job (the replyTask returns the
+    // cross flag, the tool queues): the test reproduces the tool's part.
+    queueTaskInput(a.db, { ...task, input: "the input: go" }, Date.now());
+    await sweepOutbox(a.db, a.identity, () => {});
+    const mirrorResumed = b.db.conn.get<{
+      state: string;
+      input: string | null;
+      deadline: number | null;
+    }>("SELECT state, input, deadline FROM tasks WHERE id = ?", [task.id]);
+    expect(mirrorResumed?.state).toBe("working");
+    expect(mirrorResumed?.input).toBe("the input: go");
+    expect(mirrorResumed?.deadline).toBeGreaterThan(Date.now());
+
+    // 4. The responder completes PAST the original deadline: the task
+    // survives and the completion crosses back.
+    expect(replyTask(b.db, task.id, "bob", "done", "completed").ok).toBe(true);
+    queueTaskReply(b.db, task.id, "done", "completed", Date.now());
+    await sweepOutbox(b.db, b.identity, () => {});
+    for (let i = 0; i < 20; i++) {
+      await new Promise((r) => setTimeout(r, 250));
+      const st = a.db.conn.get<{ state: string }>("SELECT state FROM tasks WHERE id = ?", [
+        task.id,
+      ])?.state;
+      if (st === "completed") break;
+    }
+    expect(
+      a.db.conn.get<{ state: string; result: string }>(
+        "SELECT state, result FROM tasks WHERE id = ?",
+        [task.id],
+      ),
+    ).toMatchObject({ state: "completed", result: "done" });
     a.server.close();
     b.server.close();
   });

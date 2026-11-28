@@ -496,7 +496,12 @@ export async function postTaskWire(target: {
     task?: unknown;
   };
 }): Promise<string> {
-  const endpoint = target.payload.type === "task-ask" ? "/task-ask" : "/task-reply";
+  const endpoint =
+    target.payload.type === "task-ask"
+      ? "/task-ask"
+      : target.payload.type === "task-input"
+        ? "/task-input"
+        : "/task-reply";
   const headers = {
     "content-type": "application/json",
     authorization: `Bearer ${target.token}`,

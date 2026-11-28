@@ -379,7 +379,11 @@ export async function deliverOutboxRow(
   if (!conn) {
     return "no known address";
   }
-  if (payload.type === "task-ask" || payload.type === "task-reply") {
+  if (
+    payload.type === "task-ask" ||
+    payload.type === "task-reply" ||
+    payload.type === "task-input"
+  ) {
     const ok = await postTaskWire({
       url: conn.url,
       ...(conn.tls ? { tls: true } : {}),
@@ -458,7 +462,7 @@ export function sweepOutbox(
  * outbox row, the terminal state comes back through the same channel. The
  * ASKER'S node is the source of truth; the responder's node holds a MIRROR
  * row (the SAME id) so its mesh_reply works locally. */
-export type OutboxType = "mail" | "task-ask" | "task-reply";
+export type OutboxType = "mail" | "task-ask" | "task-reply" | "task-input";
 
 /** The asker's side: queue the task ask to the responder's node. */
 export function queueTaskAsk(
@@ -495,6 +499,76 @@ export function queueTaskAsk(
     now,
   );
   return row.id;
+}
+
+/** The ASKER'S side (0.34.6, the input channel): the asker feeds an input on
+ * a paused (input_required) task — the payload crosses to the RESPONDER'S
+ * node (the mirror row lives there), the ack is the origin_id. */
+export function queueTaskInput(
+  db: MeshDb,
+  task: {
+    id: string;
+    from_box: string | null;
+    to_box: string;
+    input: string;
+    target_node: string | null;
+  },
+  now: number,
+): string {
+  const row = queueOutbox(
+    db,
+    {
+      node_id: task.target_node ?? "",
+      to_box: task.to_box,
+      from_box: task.from_box,
+      subject: `task ${task.id.slice(0, 8)}`,
+      body: task.input,
+      origin_id: task.id,
+      type: "task-input",
+      task: {
+        id: task.id,
+        from_box: task.from_box,
+        to_box: task.to_box,
+        result: task.input,
+        state: "working",
+      },
+    } as OutboxPayload,
+    now,
+  );
+  return row.id;
+}
+
+/** The responder's side (POST /task-input): apply the asker's input to the
+ * MIRROR row — input_required -> working, the paused deadline resumes. An
+ * idempotent apply: a second input on a working/terminal task is a no-op
+ * (the dedup by state — the ack returned anyway). */
+export function handleTaskInput(db: MeshDb, payload: OutboxPayload): void {
+  const t = payload.task;
+  if (!t?.id) return;
+  const task = db.conn.get<{ state: string; deadline_left: number | null }>(
+    "SELECT state, deadline_left FROM tasks WHERE id = ?",
+    [t.id],
+  );
+  if (!task || task.state !== "input_required") return;
+  const now = Date.now();
+  const resumed = task.deadline_left === null ? null : now + task.deadline_left;
+  db.conn.run(
+    "UPDATE tasks SET input = ?, state = 'working', updated_at = ?, deadline = ?, deadline_left = NULL WHERE id = ?",
+    [t.result ?? "", now, resumed, t.id],
+  );
+  // The avis to the responder (the local box): the asker's input arrived,
+  // the task is back in working — the responder must NOT be woken by the
+  // input itself (it is mid-work): the avis rides kind notify but the task
+  // flash is the wake — the deadline resumed, the next flash will carry it.
+  deliverMessage(db, {
+    from: payload.from_box ?? "mesh-tasks",
+    from_box: payload.from_box ?? null,
+    to_box: t.to_box,
+    subject: `task ${t.id.slice(0, 8)} resumed working`,
+    body: `asker input: ${t.result ?? ""}\n(task ${t.id.slice(0, 8)}, deadline resumed)`,
+    kind: "notify",
+    task_id: t.id,
+  });
 }
 
 /** The responder's side (POST /task-ask): create the MIRROR row (the same

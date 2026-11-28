@@ -21,6 +21,7 @@ import {
 import { countRunningSpawnedByPeer } from "./workers.js";
 import {
   handleTaskAsk,
+  handleTaskInput,
   markOutboxSentByOrigin,
   queueBounce,
   type OutboxPayload,
@@ -425,6 +426,55 @@ async function handle(
       json(res, 200, { ok: true });
     } catch {
       json(res, 500, { error: "task-ask failed" });
+    }
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/task-input") {
+    // The asker's feed crosses to the RESPONDER'S node (0.34.6): the auth =
+    // the pairing like /task-reply, the check = the peer must be the task's
+    // ASKER node (the feed = the asker's prerogative — the T14 mirror of the
+    // owner check). The apply = the mirror row: input_required -> working,
+    // the paused deadline resumes.
+    const body = await readBody(req, 256 * 1024);
+    if ("error" in body) {
+      json(res, body.error === "too_large" ? 413 : 400, { error: "body too large" });
+      return;
+    }
+    const from = String(req.headers["x-mesh-sender"] ?? "");
+    const proof = String(req.headers["x-mesh-proof"] ?? "");
+    const peer = authenticate(db, req, from, proof);
+    if (!peer) {
+      json(res, 401, { error: "unauthorized" });
+      return;
+    }
+    try {
+      const parsed = JSON.parse(body.body) as {
+        task?: { id?: string; result?: string };
+        origin_id?: string;
+      };
+      if (!parsed.task?.id) {
+        json(res, 400, { error: "task payload malformed" });
+        return;
+      }
+      const task = getTask(db, parsed.task.id);
+      if (!task) {
+        json(res, 404, { error: "unknown task" });
+        return;
+      }
+      // The ASKER check: only the task's asking node feeds an input (the
+      // mirror of the /task-reply owner check — the channels are disjoint).
+      if ((task.asker_node ?? null) !== peer.node_id) {
+        json(res, 403, { error: "only the task's asking node may feed an input" });
+        return;
+      }
+      handleTaskInput(db, {
+        type: "task-input",
+        task: { id: parsed.task.id, result: parsed.task.result ?? "" },
+      } as never);
+      json(res, 200, { ok: true });
+    } catch {
+      json(res, 500, { error: "task-input failed" });
     }
     return;
   }
