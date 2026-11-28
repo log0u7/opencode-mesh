@@ -22,6 +22,7 @@ import {
   syncRegistryToPeers,
 } from "../src/lib/outbox.js";
 import { pairWithToken } from "../src/lib/peers.js";
+import { addressingOptions } from "../src/options.js";
 import { startMeshServer } from "../src/lib/serve.js";
 
 let dir: string;
@@ -303,6 +304,94 @@ describe("federated tasks: the reply crosses back (0.33.3)", () => {
 
     expect(federatedByName(a.db, "bob")?.session_id).toBe("sb-new");
     expect(localRegistryRows(b.db).length).toBeGreaterThanOrEqual(1);
+    a.server.close();
+    b.server.close();
+  });
+});
+
+describe("the cross-host kind propagation (0.34.2, the T2 incident)", () => {
+  it("a fyi DM to a federated box keeps kind=fyi through the outbox and does NOT wake the receiving box", {
+    timeout: 20_000,
+  }, async () => {
+    const a = await startNode("a");
+    const b = await startNode("b");
+    pair(a, b);
+
+    // a: the SENDER's side. bob = a FEDERATED box (node b, no local session):
+    // mesh_send falls into the fédéré queueOutbox path (tools.ts:543).
+    // The federated row: session_id = the OWNER's session on the REMOTE node
+    // (the registry-sync semantics — the session id rides, NOT NULL).
+    a.db.conn.run(
+      "INSERT INTO mailboxes (name, session_id, node_id, last_seen, created_at) VALUES ('bob', 'sb1', ?, ?, ?)",
+      [b.identity.node_id, Date.now(), Date.now()],
+    );
+    registerMailbox(b.db, { name: "bob", session_id: "sb1", now: Date.now() });
+
+    // The sender's kind=fyi must SURVIVE the queueOutbox payload: the T2
+    // incident proved it died there (the receiver read kind=notify and the
+    // fyi WOKE the remote box).
+    const spec = (await import("../src/tools.js")).buildToolSpecs({
+      db: a.db,
+      identity: a.identity,
+      dataDir: dir,
+      serverAddress: "127.0.0.1",
+      port: 0,
+      bindKey: "t2",
+      fanout: { fanout: async () => [] },
+      worktreeClient: {
+        worktree: {
+          create: async () => ({ data: { name: "wt", directory: "/tmp/wt" } }),
+          remove: async () => ({ data: true }),
+        },
+      },
+      spawnFn: () => ({ pid: -1, kill: async () => {} }) as never,
+      addressing: addressingOptions({}),
+    });
+    const send = spec.find((s) => s.name === "mesh_send");
+    expect(send).toBeDefined();
+    const out = String(
+      await send?.execute(
+        { to: "bob", subject: "[T2] fyi cross-host", body: "quiet note", kind: "fyi" },
+        { sessionID: "sa1" },
+      ),
+    );
+    expect(out).toContain("queued:");
+    const outboxId = out.match(/queued: ([a-f0-9-]+)/)?.[1] ?? "";
+    const payload = JSON.parse(
+      a.db.conn.get<{ payload: string }>("SELECT payload FROM outbox WHERE id LIKE ?", [
+        `${outboxId}%`,
+      ])?.payload ?? "{}",
+    ) as { kind?: string; wake?: boolean };
+    // RED today: the federated payload drops the kind (defaults notify).
+    console.log("DBG payload:", JSON.stringify(payload).slice(0, 200));
+    expect(payload.kind).toBe("fyi");
+
+    // The receiver side: no background sender exists in this harness — the
+    // sweep runs manually (the delivery is the outbox's job).
+    const { sweepOutbox } = await import("../src/lib/outbox.js");
+    const swept = await sweepOutbox(a.db, a.identity, () => {});
+    console.log("DBG swept:", JSON.stringify(swept));
+    console.log(
+      "DBG b deliveries:",
+      JSON.stringify(b.db.conn.all("SELECT d.to_box, d.status, d.flash_count FROM deliveries d")),
+    );
+    console.log(
+      "DBG b messages:",
+      JSON.stringify(b.db.conn.all("SELECT subject, kind, status FROM messages")).slice(0, 300),
+    );
+    console.log(
+      "DBG a outbox:",
+      JSON.stringify(a.db.conn.all("SELECT state, attempts, last_error FROM outbox")),
+    );
+    const got = b.db.conn.get<{ kind: string; wake: number }>(
+      "SELECT m.kind AS kind, m.wake AS wake FROM deliveries d JOIN messages m ON m.id = d.message_id WHERE d.to_box = 'bob'",
+    );
+    expect(got?.kind).toBe("fyi");
+    const stats = b.db.conn.all<{ box: string; wakeable: number }>(
+      "SELECT d.to_box AS box, MAX(CASE WHEN m.kind='fyi' THEN 0 WHEN m.wake=1 OR (m.kind='notify' AND (SELECT COUNT(*) FROM deliveries d2 WHERE d2.message_id=m.id) <= 1) THEN 1 ELSE 0 END) AS wakeable FROM deliveries d JOIN messages m ON m.id=d.message_id WHERE d.status='unread' GROUP BY d.to_box",
+    );
+    const bobStat = stats.find((s) => s.box === "bob");
+    expect(bobStat?.wakeable ?? 0).toBe(0); // the fyi never wakes
     a.server.close();
     b.server.close();
   });

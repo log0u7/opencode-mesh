@@ -5,6 +5,31 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.34.2] - 2026-11-28
+
+### Fixed
+
+- The cross-host `kind` never survived the trip (the T2 incident, judged
+  FAIL on the live suite): a `fyi` DM to a federated box queued the outbox
+  payload WITHOUT the kind, the wire `sendMail` dropped it again, so the
+  receiver read `notify` and the fyi WOKE the remote box (the exact
+  inversion of the contract). The kind and the wake flag ride all three
+  legs now: the federated `queueOutbox` payload, the `SendTarget` wire, the
+  `POST /mail` body.
+
+### Fixed
+
+- The deadline sweeper killed a task in `input_required` (the T7 incident):
+  the state means "waiting on a human" — the deadline measured silence, it
+  does not execute, and the late answer was refused dead-born ("the task is
+  already failed"). Only `submitted`/`working` expire now.
+
+### Added
+
+- The `/mesh` slash description in the prompt completion: "Mesh /mesh shows
+  the status. Subcommands: pools, peers, board <pool>, inbox [agent],
+  toggle".
+
 ## [0.34.1] - 2026-11-27
 
 ### Fixed

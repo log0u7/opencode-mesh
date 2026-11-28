@@ -18,6 +18,10 @@ export type SendTarget = {
   via?: string[];
   /** Origin message id (cross-host broadcast dedup). */
   origin_id?: string;
+  /** The message kind rides the wire (0.34.2): fyi must NOT wake on the
+   * remote node — the dropped kind made every cross-host fyi a notify (the
+   * T2 incident). */
+  kind?: "notify" | "fyi";
   /** Deliberate broadcast: wake every recipient on the peer (Slack model,
    * 0.17.0). Direct mail always wakes; the flag only matters for
    * pool/all broadcasts. */
@@ -63,6 +67,7 @@ export async function sendMail(target: SendTarget): Promise<SendResult> {
     ...(target.via !== undefined ? { via: target.via } : {}),
     ...(target.origin_id !== undefined ? { origin_id: target.origin_id } : {}),
     ...(target.wake === true ? { wake: true } : {}),
+    ...(target.kind !== undefined ? { kind: target.kind } : {}),
     ...(target.proof !== undefined ? { proof: target.proof } : {}),
   });
   const headers = {

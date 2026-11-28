@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 
 import {
@@ -1359,5 +1360,49 @@ describe("unreadForBox (the /mesh inbox RPC read, 0.34.0)", () => {
       ...unreadForBox(db, "b").map((r) => ({ ...r, box: "b" })),
     ].sort((x, y) => x.created_at - y.created_at);
     expect(rows.map((r) => r.subject)).toEqual(["old-b", "new-a"]);
+  });
+});
+
+describe("the deadline sweeper respects input_required (0.34.2, the T7 incident)", () => {
+  // The T7 live incident: the deadline killed a task while the responder was
+  // in input_required — an answer that arrives later is refused dead-born
+  // ("the task is already failed"). The state means "waiting on a human":
+  // the deadline measures silence, it does not execute.
+  it("the sweeper does NOT fail a task in input_required past its deadline", () => {
+    const db = openMeshDb(":memory:");
+    registerMailbox(db, { name: "orq", session_id: "s1", now: 1000 });
+    registerMailbox(db, { name: "xhost", session_id: "s2", now: 1000 });
+    const id = randomUUID();
+    db.conn.run(
+      `INSERT INTO tasks (id, from_box, to_box, question, state, created_at, updated_at, deadline, target_node)
+       VALUES (?, 'orq', 'xhost', 'q', 'input_required', 1000, 1000, 2000, 'node-x')`,
+      [id],
+    );
+    const swept = sweepTasks(db, 3000); // well past the deadline
+    const task = db.conn.get<{ state: string; result: string }>(
+      "SELECT state, result FROM tasks WHERE id = ?",
+      [id],
+    );
+    expect(task?.state).toBe("input_required"); // untouched
+    expect(swept).toBe(0);
+    db.close();
+  });
+
+  it("the sweeper still fails submitted/working tasks past the deadline (the unchanged rule)", () => {
+    const db = openMeshDb(":memory:");
+    registerMailbox(db, { name: "orq", session_id: "s1", now: 1000 });
+    registerMailbox(db, { name: "xhost", session_id: "s2", now: 1000 });
+    for (const state of ["submitted", "working"]) {
+      const id = randomUUID();
+      db.conn.run(
+        `INSERT INTO tasks (id, from_box, to_box, question, state, created_at, updated_at, deadline, target_node)
+         VALUES (?, 'orq', 'xhost', 'q', ?, 1000, 1000, 2000, 'node-x')`,
+        [id, state],
+      );
+    }
+    sweepTasks(db, 3000);
+    const states = db.conn.all<{ state: string }>("SELECT state FROM tasks").map((r) => r.state);
+    for (const s of states) expect(s).toBe("failed");
+    db.close();
   });
 });
