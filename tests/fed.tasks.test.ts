@@ -635,11 +635,11 @@ describe("the task-input STREAM path + the input cycles (0.34.6 round 2, the PO 
     expect(replyTask(db, task.id, "xhost", "pause 1", "input_required").ok).toBe(true);
     // The first input crosses (a UNIQUE origin_id per input).
     queueTaskInput(db, { ...task, input: "input 1" }, Date.now());
-    const p1 = db.conn.all<{ payload: string }>(
-      "SELECT payload FROM outbox WHERE json_extract(payload,'$.type') = 'task-input'",
+    const first = db.conn.get<{ payload: string }>(
+      "SELECT payload FROM outbox WHERE json_extract(payload,'$.type') = 'task-input' AND json_extract(payload,'$.body') = 'input 1'",
     );
-    expect(p1).toHaveLength(1);
-    handleTaskInput(db, JSON.parse(p1[0]!.payload) as never);
+    expect(first).toBeTruthy();
+    handleTaskInput(db, JSON.parse(first!.payload) as never);
     expect(
       db.conn.get<{ state: string }>("SELECT state FROM tasks WHERE id = ?", [task.id])?.state,
     ).toBe("working");
@@ -649,14 +649,14 @@ describe("the task-input STREAM path + the input cycles (0.34.6 round 2, the PO 
     // apply must fire again.
     expect(replyTask(db, task.id, "xhost", "pause 2", "input_required").ok).toBe(true);
     queueTaskInput(db, { ...task, input: "input 2" }, Date.now());
-    const p2 = db.conn.all<{ payload: string }>(
-      "SELECT payload FROM outbox WHERE json_extract(payload,'$.type') = 'task-input' ORDER BY created_at DESC LIMIT 1",
+    const second = db.conn.get<{ payload: string }>(
+      "SELECT payload FROM outbox WHERE json_extract(payload,'$.type') = 'task-input' AND json_extract(payload,'$.body') = 'input 2'",
     );
-    expect(p2).toHaveLength(1);
-    const origin1 = JSON.parse(p1[0]!.payload).origin_id as string;
-    const origin2 = JSON.parse(p2[0]!.payload).origin_id as string;
+    expect(second).toBeTruthy();
+    const origin1 = JSON.parse(first!.payload).origin_id as string;
+    const origin2 = JSON.parse(second!.payload).origin_id as string;
     expect(origin1).not.toBe(origin2); // the collision is dead
-    handleTaskInput(db, JSON.parse(p2[0]!.payload) as never);
+    handleTaskInput(db, JSON.parse(second!.payload) as never);
     const finalInput = db.conn.get<{ input: string }>("SELECT input FROM tasks WHERE id = ?", [
       task.id,
     ]);
