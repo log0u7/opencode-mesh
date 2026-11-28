@@ -64,7 +64,7 @@ describe("mesh database schema", () => {
       legacy.close();
 
       const db = openMeshDb(file);
-      expect(db.conn.get<{ user_version: number }>("PRAGMA user_version")?.user_version).toBe(26);
+      expect(db.conn.get<{ user_version: number }>("PRAGMA user_version")?.user_version).toBe(27);
       const names = db.conn
         .all<{ name: string }>("SELECT name FROM sqlite_master WHERE type = 'index'")
         .map((row) => row.name);
@@ -89,7 +89,7 @@ describe("mesh database schema", () => {
       v1.close();
 
       const db = openMeshDb(file);
-      expect(db.conn.get<{ user_version: number }>("PRAGMA user_version")?.user_version).toBe(26);
+      expect(db.conn.get<{ user_version: number }>("PRAGMA user_version")?.user_version).toBe(27);
       const columns = db.conn
         .all<{ name: string }>("PRAGMA table_info(peers)")
         .map((row) => row.name);
@@ -101,7 +101,7 @@ describe("mesh database schema", () => {
       // migration pass, no version churn.
       const reopened = openMeshDb(file);
       expect(reopened.conn.get<{ user_version: number }>("PRAGMA user_version")?.user_version).toBe(
-        26,
+        27,
       );
       reopened.close();
     } finally {
@@ -157,7 +157,7 @@ describe("mesh database schema", () => {
       v8.close();
 
       const db = openMeshDb(file);
-      expect(db.conn.get<{ user_version: number }>("PRAGMA user_version")?.user_version).toBe(26);
+      expect(db.conn.get<{ user_version: number }>("PRAGMA user_version")?.user_version).toBe(27);
       const columns = db.conn
         .all<{ name: string }>("PRAGMA table_info(messages)")
         .map((row) => row.name);
@@ -188,7 +188,7 @@ describe("mesh database schema", () => {
       v13.close();
 
       const db = openMeshDb(file);
-      expect(db.conn.get<{ user_version: number }>("PRAGMA user_version")?.user_version).toBe(26);
+      expect(db.conn.get<{ user_version: number }>("PRAGMA user_version")?.user_version).toBe(27);
       const columns = db.conn
         .all<{ name: string }>("PRAGMA table_info(workers)")
         .map((row) => row.name);
@@ -319,5 +319,29 @@ describe("openMeshDb: in-memory reopen", () => {
     expect(db.conn.inTransaction()).toBe(false);
     expect(db.conn.get<{ n: number }>("SELECT COUNT(*) AS n FROM messages")?.n).toBe(1);
     db.close();
+  });
+});
+
+describe("the schema bump gates the deadline_left migration (0.34.4, the T7-replay blocker)", () => {
+  it("a pre-0.34.3 database (user_version >= old, tasks WITHOUT deadline_left) gets the column at open", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mesh-mig-"));
+    try {
+      // Shape the db AS 0.34.1 LEFT IT: the tasks table WITHOUT deadline_left,
+      // the user_version at the old schema level.
+      const pre = openMeshDb(join(dir, "mesh.db"));
+      pre.conn.exec("PRAGMA user_version = 26");
+      pre.conn.exec("ALTER TABLE tasks DROP COLUMN deadline_left");
+      pre.close();
+
+      const db = openMeshDb(join(dir, "mesh.db"));
+      const cols = db.conn.all<{ name: string }>("PRAGMA table_info(tasks)").map((r) => r.name);
+      // RED on main: the user_version gate skipped the migration entirely.
+      expect(cols).toContain("deadline_left");
+      const v = db.conn.get<{ user_version: number }>("PRAGMA user_version")?.user_version;
+      expect(v).toBeGreaterThanOrEqual(27);
+      db.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
