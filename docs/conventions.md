@@ -8,10 +8,13 @@ copy what a host needs, drop the rest. Rules are one line, one example each.
 ```markdown
 - Todo list = single truth for "where are we": read before acting, update the moment state shifts.
 - Every item opens with an epic tag: `[MESH]`, `[MEMORY]`, `[DOCS]`. One tag, CAPS, short.
-- Item = one outcome + exact state: `[MESH] 0.11.0 TLS - builder DER + pinning - in flight`. Not `TLS stuff`.
-- WIP = 1. Waiting on someone = `pending - BLOCKED on <what>`. Backlog = one `[BACKLOG]` item.
+- Item = one outcome + exact state, remaining work only, not a theme: `[<project>:<epic>] @owner <what remains> ; <blocker / deadline>`. ~140 chars, detail to memory. One chained step = one item.
+- Blocked = `pending - BLOCKED[<owner>:<what>]` (owner: OPER / ORQ / mailbox / env). Backlog = one `[BACKLOG]` item, not scattered pendings. Prune every round.
+- Passive watch = one item with explicit cadence: `[<me>:<lane>] watch X - 0 hits (check 24h)`.
+- % never in item; ETA only hard calendar deadline.
 - Done = verified outcome, never a claim. Tick `completed` the moment the step passes, never in batch.
 - Todo live at every pass: add on arrival, `in_progress` at start, `completed` at finish. Refresh the board BEFORE working.
+- Convention FROZEN: changes only by PO decision. History lives in transcripts + memory.
 ```
 
 ## Session protocol
