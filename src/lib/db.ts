@@ -15,7 +15,11 @@ export type MeshDb = {
 
 // Bump when a schema change needs a migration step; the version anchors future
 // migrations that cannot be expressed as idempotent `CREATE ... IF NOT EXISTS`.
-const SCHEMA_VERSION = 26;
+// 0.34.4: 27 — the deadline_left migration (shipped in 0.34.3 WITHOUT the
+// bump: every database already at 26 skipped the whole migrate block at
+// boot, the column never landed, and mesh_reply's input_required pause died
+// on "no such column" — the T7-replay blocker, live on ricinus).
+const SCHEMA_VERSION = 27;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS peers (
