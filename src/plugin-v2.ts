@@ -39,6 +39,7 @@ import { createDurableStore } from "./lib/persist.js";
 import { createFanout } from "./lib/fanout.js";
 import { createHostCapa } from "./lib/capa.js";
 import {
+  handleStreamEvent,
   handleTaskAsk,
   handleTaskInput,
   startOutboxSender,
@@ -304,111 +305,8 @@ export const MeshV2 = Plugin.define({
     // picked up without the asking agent ever knowing).
     // The stream client + the hub (refonte 3.1): the SSE streams per peer —
     // the receive side never polls; the outbox pushes over the open streams.
-    const dispatch = (eventPeerNodeId: string) => (event: { type: string; data: unknown }) => {
-      const d = event.data as {
-        from?: string;
-        from_box?: string;
-        to?: string;
-        subject?: string;
-        body?: string;
-        reply_to?: string;
-        kind?: "notify" | "fyi";
-        origin_id?: string;
-        wake?: boolean;
-        task?: {
-          id: string;
-          group_id?: string | null;
-          deadline?: number | null;
-          result?: string;
-          state?: string;
-        };
-      };
-      if (event.type === "registry") return; // the registry rides its own pusher
-      // The spoof gate FIRST (the refonte2-C7): the stream is opened TO an
-      // authenticated peer — its events carry ITS node id; a task event
-      // claiming another sender is dropped (the owner checks below read
-      // the AUTHENTICATED peer id, never the payload header).
-      if (d.from !== undefined && d.from !== eventPeerNodeId) return;
-      if (event.type === "task-reply" && d.task?.id) {
-        const task = getTask(db, d.task.id);
-        if (task) {
-          // The owner check (the 0.33.3-C): the event must come from the
-          // task's TARGET node (the responder) — the column filled at
-          // mesh_ask, never a from_box parse.
-          if (eventPeerNodeId !== task.target_node) return;
-          const VALID_STATES = ["working", "input_required", "completed", "failed", "canceled"];
-          const state = (d.task.state ?? "completed") as TaskState;
-          if (!VALID_STATES.includes(state)) return;
-          replyTask(db, d.task.id, task.to_box, d.task.result ?? "", state);
-        }
-        // The ACK (the 0.33.3-C): the push alone is at-most-once — the
-        // applied origin_id flows back so the sender's row goes sent.
-        return d.origin_id ?? null;
-      }
-      // The task-input stream dispatch (0.34.6, the PO audit round 2): the
-      // event MUST be handled HERE and acked — the old fall-through landed
-      // in the mail branch (the input became a plain DM, the mirror stayed
-      // paused, the ack swallowed the outbox row: the POST fallback never
-      // ran). The check = the ASKER node (the feed = the asker's
-      // prerogative — the stream mirror of the /task-input owner check).
-      if (event.type === "task-input" && d.task?.id) {
-        const task = getTask(db, d.task.id);
-        if (!task || (task.asker_node ?? null) !== eventPeerNodeId) return;
-        handleTaskInput(db, {
-          type: "task-input",
-          task: { id: d.task.id, result: d.task.result ?? "", state: "working" },
-        } as never);
-        return d.origin_id ?? null;
-      }
-      if (event.type === "task-ask" && d.task?.id) {
-        handleTaskAsk(
-          db,
-          {
-            node_id: eventPeerNodeId,
-            to_box: d.to ?? "",
-            from_box: d.from_box ?? null,
-            subject: d.subject ?? "",
-            body: d.body ?? "",
-            origin_id: d.origin_id ?? "",
-            type: "task-ask",
-            task: {
-              id: d.task.id,
-              from_box: d.from_box ?? null,
-              to_box: d.to ?? "",
-              question: d.body ?? "",
-              group_id: d.task.group_id ?? null,
-              deadline: d.task.deadline ?? null,
-              ...(d.task.result !== undefined ? { result: d.task.result } : {}),
-              state: (d.task.state ?? "completed") as TaskState,
-            },
-          } as OutboxPayload,
-          // The asking NODE from the authenticated stream (the 0.33.3-B).
-          eventPeerNodeId,
-        );
-        // The ACK: idempotent — an already-mirrored ask acks too (the
-        // resend of the same ask must not starve the sender's row).
-        return d.origin_id ?? null;
-      }
-      // The SAME validation as /mail (the refonte2-C7) ran at the top: the
-      // task branches already dropped a spoofed sender.
-      // The applied origin_id returns: the stream client ACKs it (the
-      // refonte2-P1 — the push alone is at-most-once).
-      const applied = deliverMessage(db, {
-        from: d.from ?? "",
-        from_box: d.from_box ?? null,
-        to_box: d.to ?? null,
-        subject: d.subject ?? "",
-        body: d.body ?? "",
-        reply_to: d.reply_to ?? null,
-        kind: d.kind ?? "notify",
-        origin_id: d.origin_id ?? null,
-        // The addressed DM wakes (0.34.1): the stream dispatch dropped the
-        // wake the same way POST /mail did - a cross-host DM never reached
-        // the pool gate as wakeable (the wake-dead incident).
-        wake: d.wake === true || addressedNotifyWake(d.kind ?? "notify", d.to ?? null),
-      });
-      return applied.ok ? (d.origin_id ?? null) : null;
-    };
+    const dispatch = (eventPeerNodeId: string) => (event: { type: string; data: unknown }) =>
+      handleStreamEvent(db, eventPeerNodeId, event);
     // The client lifecycle (the refonte2-A3): ONE client per pair EVER —
     // the client manages its own reconnection; openStreams creates only if
     // absent AND never created (a dropped client keeps reconnecting alone:

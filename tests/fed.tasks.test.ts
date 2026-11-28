@@ -25,7 +25,7 @@ import { pairWithToken } from "../src/lib/peers.js";
 import {
   sweepOutbox,
   queueTaskInput,
-  handleTaskInput,
+  handleStreamEvent,
   markOutboxSentByOrigin,
 } from "../src/lib/outbox.js";
 import { addressingOptions } from "../src/options.js";
@@ -632,6 +632,12 @@ describe("the task-input STREAM path + the input cycles (0.34.6 round 2, the PO 
     registerMailbox(db, { name: "orq", session_id: "s1", now: Date.now() });
     registerMailbox(db, { name: "xhost", session_id: "s2", now: Date.now() });
     const task = askTask(db, { from_box: "orq", to_box: "xhost", question: "the task" });
+    // The cross-host shape: the mirror row carries the asking NODE (the
+    // dispatch gate reads it) + the target node (the queueTaskInput routes
+    // by it).
+    db.conn.run("UPDATE tasks SET target_node = 'node-x', asker_node = 'node-a' WHERE id = ?", [
+      task.id,
+    ]);
     expect(replyTask(db, task.id, "xhost", "pause 1", "input_required").ok).toBe(true);
     // The first input crosses (a UNIQUE origin_id per input).
     queueTaskInput(db, { ...task, input: "input 1" }, Date.now());
@@ -639,7 +645,9 @@ describe("the task-input STREAM path + the input cycles (0.34.6 round 2, the PO 
       "SELECT payload FROM outbox WHERE json_extract(payload,'$.type') = 'task-input' AND json_extract(payload,'$.body') = 'input 1'",
     );
     expect(first).toBeTruthy();
-    handleTaskInput(db, JSON.parse(first!.payload) as never);
+    expect(
+      handleStreamEvent(db, "node-a", { type: "task-input", data: JSON.parse(first!.payload) }),
+    ).toBe(JSON.parse(first!.payload).origin_id);
     expect(
       db.conn.get<{ state: string }>("SELECT state FROM tasks WHERE id = ?", [task.id])?.state,
     ).toBe("working");
@@ -656,7 +664,9 @@ describe("the task-input STREAM path + the input cycles (0.34.6 round 2, the PO 
     const origin1 = JSON.parse(first!.payload).origin_id as string;
     const origin2 = JSON.parse(second!.payload).origin_id as string;
     expect(origin1).not.toBe(origin2); // the collision is dead
-    handleTaskInput(db, JSON.parse(second!.payload) as never);
+    expect(
+      handleStreamEvent(db, "node-a", { type: "task-input", data: JSON.parse(second!.payload) }),
+    ).toBe(JSON.parse(second!.payload).origin_id);
     const finalInput = db.conn.get<{ input: string }>("SELECT input FROM tasks WHERE id = ?", [
       task.id,
     ]);
@@ -683,5 +693,160 @@ describe("the task-input STREAM path + the input cycles (0.34.6 round 2, the PO 
     expect(
       db.conn.get<{ state: string }>("SELECT state FROM outbox WHERE id = ?", [rows[1]!.id])?.state,
     ).toBe("sent");
+  });
+});
+
+describe("the task-input stream strip (0.34.7, the mr-reviewer BLOCK round)", () => {
+  // The reviewer's BLOCK: the stream push spread stripped payload.task for
+  // task-input - the receiver dispatch gate (d.task?.id) failed, the event
+  // fell into the mail branch (a plain DM), the ack marked the row SENT and
+  // the POST fallback (the only path applying handleTaskInput) never ran.
+  // The mirror stayed paused to the 24h cap. The prod primary path (the
+  // stream open most of the time).
+
+  it("(a+b) the stream push carries data.task for task-input AND dispatching the captured event through the receiver resumes the mirror - STREAM ONLY", () => {
+    // The SENDER side: the spread under test. A minimal wire invocation of
+    // deliverOutboxRow with a paired peer + an open hub.
+    const sender = openMeshDb(":memory:");
+    const senderDir = mkdtempSync(join(tmpdir(), "t7x-s-"));
+    const identity = loadOrCreateIdentity(senderDir);
+    registerMailbox(sender, { name: "orq", session_id: "s1", now: Date.now() });
+    pairWithToken(sender, {
+      node_id: "node-b",
+      hostname: "b",
+      fingerprint: "fb",
+      token: "tok-b",
+      addresses: ["127.0.0.1:1"], // unreachable: the stream hub is the path
+    });
+    sender.conn.run("UPDATE peers SET tls=0 WHERE node_id='node-b'");
+
+    const pushed: Array<{ type: string; data: Record<string, unknown> }> = [];
+    const hub = {
+      isOpen: (nodeId: string) => nodeId === "node-b",
+      push: (_nodeId: string, event: unknown) => {
+        pushed.push(event as { type: string; data: Record<string, unknown> });
+        return 1; // accepted: "streamed" (un-acked)
+      },
+    };
+    const rowId = queueTaskInput(
+      sender,
+      {
+        id: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+        from_box: "orq",
+        to_box: "bob",
+        input: "stream input: go",
+        target_node: "node-b",
+      },
+      Date.now(),
+    );
+    void rowId;
+    // The sender's stream attempt (attempts 0, the hub open - the prod
+    // primary path).
+    void deliverOutboxRow(
+      sender,
+      identity,
+      () => {},
+      hub,
+      {
+        node_id: "node-b",
+        to_box: "bob",
+        from_box: "orq",
+        subject: "task aaaaaaaa",
+        body: "stream input: go",
+        origin_id: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee:input:test",
+        type: "task-input",
+        task: {
+          id: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+          result: "stream input: go",
+          state: "working",
+        },
+      } as never,
+      0,
+    );
+
+    // (b) The spread assertion: data.task present in the stream push.
+    const ti = pushed.find((p) => p.type === "task-input");
+    expect(ti).toBeDefined();
+    expect(ti!.data.task).toMatchObject({
+      id: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+      result: "stream input: go",
+    });
+    // NO plain-mail event (the old fall-through's trace).
+    expect(pushed.every((p) => p.type !== "mail")).toBe(true);
+
+    // (a) The RECEIVER dispatch: the captured event runs through the same
+    // consumer the stream client runs — the task-input branch (the fix).
+    const receiver = openMeshDb(":memory:");
+    registerMailbox(receiver, { name: "bob", session_id: "s2", now: Date.now() });
+    receiver.conn.run(
+      `INSERT INTO tasks (id, from_box, to_box, question, state, created_at, updated_at, deadline, deadline_left, target_node, asker_node)
+       VALUES ('aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', 'orq', 'xhost', 'q', 'input_required', 1000, 1000, NULL, 400000, 'node-x', ?)`,
+      [String(ti!.data.from)],
+    );
+    // The consumer: the same shape the plugin-v2 dispatch reads (the d =
+    // event.data, the eventPeerNodeId = the authenticated sender node). The
+    // task's asker_node = node-a = the sender here.
+    const d = ti!.data as {
+      from?: string;
+      task?: { id?: string; result?: string };
+      origin_id?: string;
+    };
+    // The spoof gate reads d.from (the authenticated peer id on the wire):
+    // the sender's identity node id = the asker node here.
+    const eventPeerNodeId = String(ti!.data.from);
+    const task = receiver.conn.get<{ asker_node: string | null }>(
+      "SELECT asker_node FROM tasks WHERE id = ?",
+      [d.task!.id],
+    );
+    // The dispatch gate: the asker node check + the apply (the REAL
+    // handleStreamEvent — the seam).
+    expect(task?.asker_node).toBe(eventPeerNodeId); // the gate passes
+    expect(
+      handleStreamEvent(receiver, eventPeerNodeId, {
+        type: "task-input",
+        data: d as unknown as Record<string, unknown>,
+      }),
+    ).toBe(d.origin_id);
+    const mirror = receiver.conn.get<{
+      state: string;
+      input: string | null;
+      deadline: number | null;
+    }>("SELECT state, input, deadline FROM tasks WHERE id = ?", [d.task!.id]);
+    expect(mirror?.state).toBe("working");
+    expect(mirror?.input).toBe("stream input: go");
+    expect(mirror?.deadline).toBeGreaterThan(Date.now()); // the deadline resumed
+    // NO plain DM created at the responder (the old fall-through's trace).
+    const dms = receiver.conn.get<{ n: number }>(
+      "SELECT COUNT(*) AS n FROM deliveries d JOIN messages m ON m.id = d.message_id WHERE d.to_box = 'bob' AND m.subject = 'task aaaaaaaa'",
+    )?.n;
+    expect(dms ?? 0).toBe(0);
+    rmSync(senderDir, { recursive: true, force: true });
+  });
+
+  it("(c) a task-input on an asker_node MISMATCH is refused by the REAL dispatch - return null, no ack, no apply", () => {
+    const receiver = openMeshDb(":memory:");
+    registerMailbox(receiver, { name: "bob", session_id: "s2", now: Date.now() });
+    receiver.conn.run(
+      `INSERT INTO tasks (id, from_box, to_box, question, state, created_at, updated_at, deadline, deadline_left, target_node, asker_node)
+       VALUES ('aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', 'orq', 'xhost', 'q', 'input_required', 1000, 1000, NULL, 400000, 'node-x', 'node-a')`,
+    );
+    // The spoofing sender = NOT the asker node: the REAL dispatch returns
+    // null (no ack -> the sender's row retries to the dead-letter at cap),
+    // nothing applies.
+    const ack = handleStreamEvent(receiver, "node-evil", {
+      type: "task-input",
+      data: {
+        from: "node-evil",
+        task: { id: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", result: "spoofed" },
+        origin_id: "spoof-1",
+      },
+    });
+    expect(ack).toBeNull();
+    // The row unchanged (no apply).
+    expect(
+      receiver.conn.get<{ state: string }>("SELECT state FROM tasks WHERE id = ?", [
+        "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+      ])?.state,
+    ).toBe("input_required");
   });
 });
