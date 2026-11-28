@@ -1164,6 +1164,9 @@ export type TaskRow = {
   created_at: number;
   updated_at: number;
   deadline: number | null;
+  /** The PAUSED remaining (0.34.3): stored at input_required, consumed on the
+   * asker's resume. NULL = not paused. */
+  deadline_left: number | null;
 };
 
 function rowToTask(row: Record<string, unknown>): TaskRow {
@@ -1238,6 +1241,7 @@ export function askTask(
     created_at: now,
     updated_at: now,
     deadline: input.deadline ?? null,
+    deadline_left: null,
   };
 }
 
@@ -1277,13 +1281,14 @@ export function replyTask(
   replyingBox: string,
   result: string,
   state: TaskState = "completed",
+  now?: number,
 ): { ok: boolean; error?: string; notified: boolean; cross?: boolean } {
   // BEGIN IMMEDIATE (the refonte2-C1): the concurrent replies to the same
   // group serialize — two simultaneous last-replies cannot both fire the
   // digest (the duplicate class); the sweep racing a reply serializes too.
   db.conn.exec("BEGIN IMMEDIATE");
   try {
-    const out = replyTaskInner(db, taskId, replyingBox, result, state);
+    const out = replyTaskInner(db, taskId, replyingBox, result, state, now);
     db.conn.exec("COMMIT");
     return out;
   } catch (error) {
@@ -1300,20 +1305,64 @@ function replyTaskInner(
   replyingBox: string,
   result: string,
   state: TaskState = "completed",
+  now?: number,
 ): { ok: boolean; error?: string; notified: boolean; cross?: boolean } {
   const task = getTask(db, taskId);
   if (!task) return { ok: false, error: "unknown task", notified: false };
-  if (task.to_box !== replyingBox)
-    return { ok: false, error: "only the task's target mailbox may reply", notified: false };
   if (["completed", "failed", "canceled"].includes(task.state))
     return { ok: false, error: `the task is already ${task.state}`, notified: false };
-  const now = Date.now();
-  db.conn.run("UPDATE tasks SET result = ?, state = ?, updated_at = ? WHERE id = ?", [
-    result,
-    state,
-    now,
-    taskId,
-  ]);
+  const ts = now ?? Date.now();
+  // The ASKER'S channel (0.34.3, the T7 real scenario): the task's asker
+  // (from_box) feeds an input — the task resumes WORKING and the paused
+  // deadline resumes (now + the stored remaining). The asker cannot set the
+  // state: an input is an input, not a verdict.
+  if (task.from_box === replyingBox && task.to_box !== replyingBox) {
+    if (task.state === "input_required") {
+      const resumed = task.deadline_left === null ? null : ts + task.deadline_left;
+      db.conn.run(
+        "UPDATE tasks SET result = ?, state = 'working', updated_at = ?, deadline = ?, deadline_left = NULL WHERE id = ?",
+        [result, ts, resumed, taskId],
+      );
+      // The responder must see the input: the avis rides the same task-mail
+      // machinery (from the task's target box, back to... no: TO the
+      // responder — the task's target session reads its own box).
+      deliverMessage(db, {
+        from: task.from_box,
+        to_box: task.to_box,
+        subject: `task ${task.id.slice(0, 8)} resumed working`,
+        body: `asker input: ${result}\n(task ${task.id.slice(0, 8)}, deadline resumed)`,
+        kind: "notify",
+        task_id: task.id,
+      });
+      return { ok: true, notified: true };
+    }
+    // An asker feed on a working/submitted task = an attached note, no state
+    // change (the deadline untouched).
+    db.conn.run("UPDATE tasks SET result = ?, updated_at = ? WHERE id = ?", [result, ts, taskId]);
+    return { ok: true, notified: false };
+  }
+  if (task.to_box !== replyingBox)
+    return { ok: false, error: "only the task's target mailbox may reply", notified: false };
+  // The PAUSE (0.34.3): input_required stores the remaining deadline and
+  // clears it (a NULL deadline = no-expiry for the sweeper) — a late answer
+  // must not be refused dead-born because the wall clock ran out while the
+  // task waited on a human.
+  let storedState = state;
+  let pausedLeft: number | null = null;
+  if (state === "input_required") {
+    pausedLeft = task.deadline === null ? task.deadline_left : task.deadline - ts;
+    db.conn.run(
+      "UPDATE tasks SET result = ?, state = ?, updated_at = ?, deadline = NULL, deadline_left = ? WHERE id = ?",
+      [result, state, ts, pausedLeft, taskId],
+    );
+  } else {
+    db.conn.run("UPDATE tasks SET result = ?, state = ?, updated_at = ? WHERE id = ?", [
+      result,
+      storedState,
+      ts,
+      taskId,
+    ]);
+  }
   // The asker notification: terminal states always; input_required too (a
   // pause is a deliberate answer the asker must see). "working" never wakes.
   // The asker notification: terminal states always; input_required too (a
@@ -1352,7 +1401,7 @@ function replyTaskInner(
       });
       return { ok: true, notified: true };
     }
-    db.conn.run("UPDATE tasks SET group_notified_at = ? WHERE group_id = ?", [now, task.group_id]);
+    db.conn.run("UPDATE tasks SET group_notified_at = ? WHERE group_id = ?", [ts, task.group_id]);
   }
   const body = task.group_id
     ? `The group is answered:\n${groupDigest(db, task.group_id)}`
@@ -1378,6 +1427,18 @@ export function sweepTasks(db: MeshDb, now: number): number {
   // serialization kills the double-digest / double-notification class.
   db.conn.exec("BEGIN IMMEDIATE");
   try {
+    // The input_required cap (0.34.3): a paused task whose asker never
+    // answers must not live forever — the retention only touches terminal
+    // states, the cap IS the purge. 24h of human silence = failed.
+    const capped = db.conn.all<{ id: string }>(
+      `SELECT id FROM tasks WHERE state = 'input_required' AND updated_at < ?`,
+      [now - 24 * 3600_000],
+    );
+    for (const row of capped) {
+      const task = getTask(db, row.id);
+      if (!task) continue;
+      replyTaskInner(db, row.id, task.to_box, "input_required expired (24h cap)", "failed");
+    }
     // The input_required rule (0.34.2, the T7 incident): a task where the
     // responder set input_required = waiting on a HUMAN — the deadline
     // measures silence, it does not execute. Only submitted/working expire;

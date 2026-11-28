@@ -5,6 +5,28 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.34.3] - 2026-11-28
+
+### Fixed
+
+- The deadline PAUSES at `input_required` and RESUMES on the asker's input
+  (the 0.34.2 rule was only half of the T7 scenario): the pause stores the
+  remaining time in the new `tasks.deadline_left` column and clears the
+  deadline; the asker's `mesh_reply` feeds the input, resumes the task
+  WORKING and restores `deadline = now + remaining`. The already-past
+  original deadline can no longer kill a freshly resumed task. The asker's
+  channel is the fix's counterpart: a task's asker (from_box) can now reply
+  — the input attaches to the task (no more off-task DM), the responder
+  gets the avis.
+- The fanout rides the kind: a pool fyi crossed the wire as notify (no wake
+  either way, but the stored kind was wrong on the receiving node).
+
+### Added
+
+- The `input_required` cap: a paused task whose asker never answers fails
+  at the sweep after 24h (the retention only touches terminal states — the
+  cap IS the purge for the never-resumed pauses).
+
 ## [0.34.2] - 2026-11-28
 
 ### Fixed

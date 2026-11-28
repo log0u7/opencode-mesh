@@ -269,6 +269,13 @@ function migrate(conn: SqliteConn): void {
   if (!taskColumns.includes("group_notified_at")) {
     conn.exec("ALTER TABLE tasks ADD COLUMN group_notified_at INTEGER");
   }
+  // 0.34.3: tasks.deadline_left — the deadline PAUSED while the task waits on
+  // a human (input_required), resumed when it returns to working. A NULL
+  // deadline reads as no-expiry to the sweeper: the pause stores the remaining
+  // time and clears the deadline in one UPDATE.
+  if (!taskColumns.includes("deadline_left")) {
+    conn.exec("ALTER TABLE tasks ADD COLUMN deadline_left INTEGER");
+  }
   // v25: tasks.target_node + tasks.asker_node (the 0.33.3): the cross-node
   // task routing stops parsing the "node/box" composite — target_node is
   // the node owning to_box (filled at mesh_ask), asker_node is the asking
