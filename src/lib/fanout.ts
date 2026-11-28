@@ -29,6 +29,9 @@ export type FanoutInput = {
   via?: string[] | null;
   /** Deliberate broadcast: the recipient wakes its members (0.17.0). */
   wake?: boolean;
+  /** The message kind rides the fanout (0.34.2): a pool fyi crossed as
+   * notify — the stored kind was wrong on the receiving node. */
+  kind?: "notify" | "fyi";
 };
 
 export type Fanout = {
@@ -125,6 +128,10 @@ export function createFanout(options: FanoutOptions): Fanout {
           body: input.body,
           origin_id: input.origin_id,
           ...(input.wake === true ? { wake: true } : {}),
+          // The kind rides the fanout too (0.34.2): a pool fyi crossed the
+          // wire as notify — no wake either way (the addressed rule), but the
+          // stored kind was wrong on the receiving node.
+          ...(input.kind !== undefined ? { kind: input.kind } : {}),
           via: [...visited],
         });
         if (result === "ok") {

@@ -1406,3 +1406,98 @@ describe("the deadline sweeper respects input_required (0.34.2, the T7 incident)
     db.close();
   });
 });
+
+describe("the deadline pause/resume + the asker's input channel (0.34.3, the T7 real scenario)", () => {
+  // The T7 LIVE scenario the 0.34.2 fix only half-covered: the responder
+  // pauses (input_required) BEFORE the deadline, the asker feeds an input
+  // LATER, the responder resumes — the old rule let the ALREADY-PASSED
+  // deadline kill the resumed task (a fresh working state swept at the next
+  // tick). The deadline must PAUSE at input_required and RESUME on the
+  // asker's input.
+  const DB = (): ReturnType<typeof openMeshDb> => {
+    const db = openMeshDb(":memory:");
+    registerMailbox(db, { name: "orq", session_id: "s1", now: 1000 });
+    registerMailbox(db, { name: "xhost", session_id: "s2", now: 1000 });
+    return db;
+  };
+  const insert = (
+    db: ReturnType<typeof openMeshDb>,
+    state: string,
+    created: number,
+    deadline: number | null,
+  ): string => {
+    const id = randomUUID();
+    db.conn.run(
+      `INSERT INTO tasks (id, from_box, to_box, question, state, created_at, updated_at, deadline, target_node)
+       VALUES (?, 'orq', 'xhost', 'q', ?, ?, ?, ?, 'node-x')`,
+      [id, state, created, created, deadline],
+    );
+    return id;
+  };
+
+  it("the asker's reply (from_box) pauses->feeds->resumes: input_required stores the remaining deadline, working restores it", () => {
+    const db = DB();
+    const id = insert(db, "working", 0, 120_000); // deadline t+120
+    // t+30: the responder pauses — the remaining 90 s must be STORED and the
+    // deadline cleared (the sweeper must not see an expiry).
+    expect(
+      replyTask(db, id, "xhost", "need input: which file?", "input_required", 30_000).notified,
+    ).toBe(true);
+    const paused = db.conn.get<{ deadline: number | null; deadline_left: number | null }>(
+      "SELECT deadline, deadline_left FROM tasks WHERE id = ?",
+      [id],
+    );
+    expect(paused?.deadline).toBeNull();
+    expect(paused?.deadline_left).toBe(90_000);
+    // t+180 (well past the original deadline): still alive.
+    sweepTasks(db, 180_000);
+    expect(
+      db.conn.get<{ state: string }>("SELECT state FROM tasks WHERE id = ?", [id])?.state,
+    ).toBe("input_required");
+    // t+200: the asker feeds the input — the task resumes working and the
+    // deadline resumes at (now + remaining) = 200_000 + 90_000.
+    const fed = replyTask(db, id, "orq", "the file is src/main.ts", "working", 200_000);
+    expect(fed.ok).toBe(true);
+    const resumed = db.conn.get<{
+      state: string;
+      deadline: number | null;
+      deadline_left: number | null;
+    }>("SELECT state, deadline, deadline_left FROM tasks WHERE id = ?", [id]);
+    expect(resumed?.state).toBe("working");
+    expect(resumed?.deadline).toBe(290_000);
+    expect(resumed?.deadline_left).toBeNull();
+    // The old (already-past) deadline must NOT kill the resumed task.
+    sweepTasks(db, 280_000);
+    expect(
+      db.conn.get<{ state: string }>("SELECT state FROM tasks WHERE id = ?", [id])?.state,
+    ).toBe("working");
+    db.close();
+  });
+
+  it("input_required older than 24h fails at the sweep (the cap)", () => {
+    const db = DB();
+    const id = insert(db, "input_required", 0, 0); // paused, no deadline
+    db.conn.run("UPDATE tasks SET updated_at = ? WHERE id = ?", [1000, id]);
+    sweepTasks(db, 1000 + 25 * 3600_000); // past the 24h cap
+    const task = db.conn.get<{ state: string; result: string }>(
+      "SELECT state, result FROM tasks WHERE id = ?",
+      [id],
+    );
+    expect(task?.state).toBe("failed");
+    expect(task?.result).toContain("input_required expired");
+    db.close();
+  });
+
+  it("the responder's reply still works after an asker resume (the normal completion path)", () => {
+    const db = DB();
+    const id = insert(db, "input_required", 0, null as unknown as number);
+    // paused shape: deadline cleared, remaining stored
+    db.conn.run("UPDATE tasks SET deadline = NULL, deadline_left = 50_000 WHERE id = ?", [id]);
+    const done = replyTask(db, id, "xhost", "the answer", "completed", 10_000);
+    expect(done.ok).toBe(true);
+    expect(
+      db.conn.get<{ state: string }>("SELECT state FROM tasks WHERE id = ?", [id])?.state,
+    ).toBe("completed");
+    db.close();
+  });
+});
