@@ -550,6 +550,12 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
                     subject: String(args.subject),
                     body: String(args.body),
                     reply_to: replyToFor(federated.name),
+                    // The kind and the wake flag ride (0.34.2, the T2
+                    // incident): the federated payload dropped them — the
+                    // receiver read kind=notify and an fyi WOKE the remote
+                    // box.
+                    kind,
+                    wake,
                     origin_id: randomUUID(),
                   },
                   Date.now(),

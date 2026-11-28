@@ -1378,8 +1378,12 @@ export function sweepTasks(db: MeshDb, now: number): number {
   // serialization kills the double-digest / double-notification class.
   db.conn.exec("BEGIN IMMEDIATE");
   try {
+    // The input_required rule (0.34.2, the T7 incident): a task where the
+    // responder set input_required = waiting on a HUMAN — the deadline
+    // measures silence, it does not execute. Only submitted/working expire;
+    // a late answer to an input_required task must not be refused dead-born.
     const expired = db.conn.all<{ id: string }>(
-      `SELECT id FROM tasks WHERE deadline IS NOT NULL AND deadline < ? AND state IN ('submitted','working','input_required')`,
+      `SELECT id FROM tasks WHERE deadline IS NOT NULL AND deadline < ? AND state IN ('submitted','working')`,
       [now],
     );
     for (const row of expired) {

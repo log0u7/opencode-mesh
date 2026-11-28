@@ -31,6 +31,10 @@ export type OutboxPayload = {
   body: string;
   reply_to?: string | null;
   kind?: "notify" | "fyi";
+  /** Deliberate broadcast wake (0.17.0): the flag rides the payload so the
+   * remote receiver's gate sees it (the 0.34.2: the federated path dropped
+   * both fields — an fyi crossed the wire as notify and woke). */
+  wake?: boolean;
   /** The delivery dedup (effectively-once): the sender carries origin_id —
    * a retried delivery collapses at the receiver. */
   origin_id: string;
@@ -400,6 +404,11 @@ export async function deliverOutboxRow(
     ...(payload.from_box ? { from_box: payload.from_box } : {}),
     ...(payload.reply_to ? { reply_to: payload.reply_to } : {}),
     origin_id: payload.origin_id,
+    // The kind rides the wire (0.34.2): the dropped kind made every
+    // cross-host fyi arrive as notify and wake the remote box (the T2
+    // incident).
+    ...(payload.kind ? { kind: payload.kind } : {}),
+    ...(payload.wake ? { wake: true } : {}),
   });
   if (sent === "unreachable") rebrowse();
   return sent === "ok" ? null : sent;
