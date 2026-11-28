@@ -5,6 +5,31 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.34.6] - 2026-11-28
+
+### Fixed
+
+- The cross-host kind never survived the trip (the T2 incident, judged FAIL
+  on the live suite): a fyi DM to a federated box queued the outbox payload
+  WITHOUT the kind, and the wire sendMail dropped it again - the receiver
+  read notify and the fyi WOKE the remote box. The kind and the wake flag
+  ride all three legs: the federated queueOutbox payload, the SendTarget
+  wire, the POST /mail body.
+- The asker's input channel hardened (the PO audit): the refusal outside
+  input_required, the input in the new tasks.input column (never the
+  responder's result), the 24h cap on the pause entry, the task-input wire
+  to the responder's mirror (the outbox type + the POST /task-input
+  endpoint + the stream dispatch BEFORE the mail branch + a UNIQUE
+  origin_id per input - the collision with task-ask made the second cycle
+  silent and the acks collide).
+
+### Added
+
+- The generic N-1 migration test in CI: a database at user_version N-1
+  without the latest columns gains EVERY current column at boot. The
+  SCHEMA_VERSION is exported - the version assertions are RELATIVE (the
+  bumps never break the tests again).
+
 ## [0.34.5] - 2026-11-28
 
 ### Fixed
