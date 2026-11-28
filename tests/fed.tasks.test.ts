@@ -25,7 +25,7 @@ import { pairWithToken } from "../src/lib/peers.js";
 import {
   sweepOutbox,
   queueTaskInput,
-  handleTaskInput,
+  handleStreamEvent,
   markOutboxSentByOrigin,
 } from "../src/lib/outbox.js";
 import { addressingOptions } from "../src/options.js";
@@ -632,6 +632,12 @@ describe("the task-input STREAM path + the input cycles (0.34.6 round 2, the PO 
     registerMailbox(db, { name: "orq", session_id: "s1", now: Date.now() });
     registerMailbox(db, { name: "xhost", session_id: "s2", now: Date.now() });
     const task = askTask(db, { from_box: "orq", to_box: "xhost", question: "the task" });
+    // The cross-host shape: the mirror row carries the asking NODE (the
+    // dispatch gate reads it) + the target node (the queueTaskInput routes
+    // by it).
+    db.conn.run("UPDATE tasks SET target_node = 'node-x', asker_node = 'node-a' WHERE id = ?", [
+      task.id,
+    ]);
     expect(replyTask(db, task.id, "xhost", "pause 1", "input_required").ok).toBe(true);
     // The first input crosses (a UNIQUE origin_id per input).
     queueTaskInput(db, { ...task, input: "input 1" }, Date.now());
@@ -639,7 +645,9 @@ describe("the task-input STREAM path + the input cycles (0.34.6 round 2, the PO 
       "SELECT payload FROM outbox WHERE json_extract(payload,'$.type') = 'task-input' AND json_extract(payload,'$.body') = 'input 1'",
     );
     expect(first).toBeTruthy();
-    handleTaskInput(db, JSON.parse(first!.payload) as never);
+    expect(
+      handleStreamEvent(db, "node-a", { type: "task-input", data: JSON.parse(first!.payload) }),
+    ).toBe(JSON.parse(first!.payload).origin_id);
     expect(
       db.conn.get<{ state: string }>("SELECT state FROM tasks WHERE id = ?", [task.id])?.state,
     ).toBe("working");
@@ -656,7 +664,9 @@ describe("the task-input STREAM path + the input cycles (0.34.6 round 2, the PO 
     const origin1 = JSON.parse(first!.payload).origin_id as string;
     const origin2 = JSON.parse(second!.payload).origin_id as string;
     expect(origin1).not.toBe(origin2); // the collision is dead
-    handleTaskInput(db, JSON.parse(second!.payload) as never);
+    expect(
+      handleStreamEvent(db, "node-a", { type: "task-input", data: JSON.parse(second!.payload) }),
+    ).toBe(JSON.parse(second!.payload).origin_id);
     const finalInput = db.conn.get<{ input: string }>("SELECT input FROM tasks WHERE id = ?", [
       task.id,
     ]);
@@ -770,7 +780,8 @@ describe("the task-input stream strip (0.34.7, the mr-reviewer BLOCK round)", ()
     registerMailbox(receiver, { name: "bob", session_id: "s2", now: Date.now() });
     receiver.conn.run(
       `INSERT INTO tasks (id, from_box, to_box, question, state, created_at, updated_at, deadline, deadline_left, target_node, asker_node)
-       VALUES ('aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', 'orq', 'xhost', 'q', 'input_required', 1000, 1000, NULL, 400000, 'node-x', 'node-a')`,
+       VALUES ('aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', 'orq', 'xhost', 'q', 'input_required', 1000, 1000, NULL, 400000, 'node-x', ?)`,
+      [String(ti!.data.from)],
     );
     // The consumer: the same shape the plugin-v2 dispatch reads (the d =
     // event.data, the eventPeerNodeId = the authenticated sender node). The
@@ -780,17 +791,22 @@ describe("the task-input stream strip (0.34.7, the mr-reviewer BLOCK round)", ()
       task?: { id?: string; result?: string };
       origin_id?: string;
     };
-    const eventPeerNodeId = "node-a"; // the sender = the asker node
+    // The spoof gate reads d.from (the authenticated peer id on the wire):
+    // the sender's identity node id = the asker node here.
+    const eventPeerNodeId = String(ti!.data.from);
     const task = receiver.conn.get<{ asker_node: string | null }>(
       "SELECT asker_node FROM tasks WHERE id = ?",
       [d.task!.id],
     );
-    // The dispatch gate: the asker node check + the apply.
+    // The dispatch gate: the asker node check + the apply (the REAL
+    // handleStreamEvent — the seam).
     expect(task?.asker_node).toBe(eventPeerNodeId); // the gate passes
-    handleTaskInput(receiver, {
-      type: "task-input",
-      task: { id: d.task!.id, result: d.task!.result ?? "" },
-    } as never);
+    expect(
+      handleStreamEvent(receiver, eventPeerNodeId, {
+        type: "task-input",
+        data: d as unknown as Record<string, unknown>,
+      }),
+    ).toBe(d.origin_id);
     const mirror = receiver.conn.get<{
       state: string;
       input: string | null;
