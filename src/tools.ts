@@ -763,9 +763,14 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
         }
         task = getTask(db, taskId);
         if (!task) return "error: unknown task";
-        const replyingBox = sessionBoxes.find((b) => b === task.to_box);
+        // The channel resolution (0.34.3): the TARGET box replies (the
+        // verdict) OR the task's ASKER box feeds (the input channel — its
+        // reply resumes an input_required task working, never terminal).
+        const replyingBox =
+          sessionBoxes.find((b) => b === task.to_box) ??
+          sessionBoxes.find((b) => b === task.from_box);
         if (!replyingBox)
-          return "error: only the task's target mailbox may reply — run mesh_register with that box";
+          return "error: only the task's target mailbox or its asker may reply — run mesh_register with one of those boxes";
         const res = replyTask(db, taskId, replyingBox, String(args.result ?? ""), state);
         if (!res.ok) return `error: ${res.error}`;
         // The MIRROR reply (refonte P2.5): the asker is on another node —

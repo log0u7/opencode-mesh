@@ -640,3 +640,38 @@ describe("D (refonte2): the board shows the age", () => {
     db.close();
   });
 });
+
+describe("the asker's channel through the mesh_reply TOOL (0.34.3, the T7-replay blocker)", () => {
+  it("the asker's box feeds an input_required task: resumed working, no error", async () => {
+    const { db, call } = setup();
+    registerMailbox(db, { name: "orq", session_id: "s-asker", now: Date.now() });
+    registerMailbox(db, { name: "worker", session_id: "s-worker", now: Date.now() });
+    const ask = await call(
+      "mesh_ask",
+      { to: "worker", question: "the task", deadline: Date.now() + 600_000 },
+      "s-asker",
+    );
+    const taskId = (JSON.parse(ask) as { task_id: string }).task_id;
+    expect(taskId).toBeTruthy();
+    // The responder pauses.
+    await call(
+      "mesh_reply",
+      { task_id: taskId, state: "input_required", result: "waiting on input" },
+      "s-worker",
+    );
+    // The ASKER feeds: the old tool gate refused every non-target box.
+    const out = await call(
+      "mesh_reply",
+      { task_id: taskId, state: "working", result: "the input: go" },
+      "s-asker",
+    );
+    console.log("DBG asker feed out:", JSON.stringify(out));
+    expect(out).not.toContain("error:");
+    const task = db.conn.get<{ state: string; result: string }>(
+      "SELECT state, result FROM tasks WHERE id = ?",
+      [taskId],
+    );
+    expect(task?.state).toBe("working");
+    expect(task?.result).toContain("the input: go");
+  });
+});

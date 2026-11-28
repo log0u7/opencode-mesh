@@ -5,6 +5,18 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.34.5] - 2026-11-28
+
+### Fixed
+
+- The asker's channel through the TOOL (the T7-replay live blocker): the
+  `mesh_reply` tool gate refused every box but the target BEFORE the
+  replyTaskInner channels could run - the live feed died at the tool with
+  "only the task's target mailbox may reply" (the asker IS registered, just
+  not the target). The gate resolves BOTH boxes now: the target (the
+  verdict) and the asker (the feed: resumes an `input_required` task
+  working, an attached note on a working task - never a terminal state).
+
 ## [0.34.4] - 2026-11-28
 
 ### Fixed
