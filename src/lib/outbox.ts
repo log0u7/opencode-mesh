@@ -523,7 +523,12 @@ export function queueTaskInput(
       from_box: task.from_box,
       subject: `task ${task.id.slice(0, 8)}`,
       body: task.input,
-      origin_id: task.id,
+      // A UNIQUE origin_id PER INPUT (0.34.6 round 2, the PO audit): the
+      // task.id collided with the task-ask row (the same id) — one ack
+      // marked BOTH, and the deliverMessage dedup swallowed every SECOND
+      // input on the same task (the second input_required -> input cycle
+      // was silently lost).
+      origin_id: `${task.id}:input:${randomUUID()}`,
       type: "task-input",
       task: {
         id: task.id,

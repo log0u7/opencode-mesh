@@ -40,6 +40,7 @@ import { createFanout } from "./lib/fanout.js";
 import { createHostCapa } from "./lib/capa.js";
 import {
   handleTaskAsk,
+  handleTaskInput,
   startOutboxSender,
   sweepOutbox,
   syncRegistryToPeers,
@@ -342,6 +343,21 @@ export const MeshV2 = Plugin.define({
         }
         // The ACK (the 0.33.3-C): the push alone is at-most-once — the
         // applied origin_id flows back so the sender's row goes sent.
+        return d.origin_id ?? null;
+      }
+      // The task-input stream dispatch (0.34.6, the PO audit round 2): the
+      // event MUST be handled HERE and acked — the old fall-through landed
+      // in the mail branch (the input became a plain DM, the mirror stayed
+      // paused, the ack swallowed the outbox row: the POST fallback never
+      // ran). The check = the ASKER node (the feed = the asker's
+      // prerogative — the stream mirror of the /task-input owner check).
+      if (event.type === "task-input" && d.task?.id) {
+        const task = getTask(db, d.task.id);
+        if (!task || (task.asker_node ?? null) !== eventPeerNodeId) return;
+        handleTaskInput(db, {
+          type: "task-input",
+          task: { id: d.task.id, result: d.task.result ?? "", state: "working" },
+        } as never);
         return d.origin_id ?? null;
       }
       if (event.type === "task-ask" && d.task?.id) {

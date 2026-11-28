@@ -22,7 +22,12 @@ import {
   syncRegistryToPeers,
 } from "../src/lib/outbox.js";
 import { pairWithToken } from "../src/lib/peers.js";
-import { sweepOutbox, queueTaskInput } from "../src/lib/outbox.js";
+import {
+  sweepOutbox,
+  queueTaskInput,
+  handleTaskInput,
+  markOutboxSentByOrigin,
+} from "../src/lib/outbox.js";
 import { addressingOptions } from "../src/options.js";
 import { startMeshServer } from "../src/lib/serve.js";
 
@@ -495,5 +500,188 @@ describe("the cross-host task-input channel (0.34.6, the T7-replay full scenario
     ).toMatchObject({ state: "completed", result: "done" });
     a.server.close();
     b.server.close();
+  });
+});
+
+describe("the task-input STREAM path + the input cycles (0.34.6 round 2, the PO audit)", () => {
+  it("the feed crosses ON THE STREAM (attempts 0, hub open): the mirror resumes, NO plain DM created at the responder", {
+    timeout: 30_000,
+  }, async () => {
+    const a = await startNode("a");
+    const b = await startNode("b");
+    pair(a, b);
+    registerMailbox(a.db, { name: "orq", session_id: "s-asker", now: Date.now() });
+    registerMailbox(b.db, { name: "bob", session_id: "sb1", now: Date.now() });
+    a.db.conn.run(
+      "INSERT INTO mailboxes (name, session_id, node_id, last_seen, created_at) VALUES ('bob', 'sb1', ?, ?, ?)",
+      [b.identity.node_id, Date.now(), Date.now()],
+    );
+
+    // The ask crosses POST (the test harness has no hub): the mirror lands.
+    const task = askTask(a.db, {
+      from_box: "orq",
+      to_box: "bob",
+      question: "the T7 task",
+      deadline: Date.now() + 600_000,
+    });
+    queueTaskAsk(a.db, task, Date.now());
+    await sweepOutbox(a.db, a.identity, () => {});
+    expect(
+      b.db.conn.get<{ state: string }>("SELECT state FROM tasks WHERE id = ?", [task.id])?.state,
+    ).toBe("submitted");
+
+    // The pause + the cross-back: the asker's row reads input_required (the
+    // feed requires it).
+    expect(replyTask(b.db, task.id, "bob", "waiting", "input_required").ok).toBe(true);
+    queueTaskReply(b.db, task.id, "waiting", "input_required", Date.now());
+    await sweepOutbox(b.db, b.identity, () => {});
+    expect(
+      a.db.conn.get<{ state: string }>("SELECT state FROM tasks WHERE id = ?", [task.id])?.state,
+    ).toBe("input_required");
+
+    // THE STREAM PATH: a HUB is open on a (the wire deliverOutboxRow takes
+    // at attempts 0). The feed through the TOOL (the asker session) queues
+    // task-input + the stream delivers.
+    const aSpecs = (await import("../src/tools.js")).buildToolSpecs({
+      db: a.db,
+      identity: a.identity,
+      dataDir: dir,
+      serverAddress: "127.0.0.1",
+      port: 0,
+      bindKey: "r2a",
+      fanout: { fanout: async () => [] },
+      worktreeClient: {
+        worktree: {
+          create: async () => ({ data: { name: "wt", directory: "/tmp/wt" } }),
+          remove: async () => ({ data: true }),
+        },
+      },
+      spawnFn: () => ({ pid: -1, kill: async () => {} }) as never,
+      addressing: addressingOptions({}),
+    });
+    const feedOut = String(
+      await aSpecs
+        .find((s) => s.name === "mesh_reply")
+        ?.execute(
+          { task_id: task.id.slice(0, 8), state: "working", result: "stream input: go" },
+          { sessionID: "s-asker" },
+        ),
+    );
+    expect(feedOut).toContain("queued_back");
+    queueTaskInput(a.db, { ...task, input: "stream input: go" }, Date.now());
+
+    // The hub: an OPEN stream to b. The push happens at attempts 0 — the
+    // exact prod path the PO flagged (the old code fell into the mail
+    // branch here).
+    const pushed: Array<unknown> = [];
+    const hub = {
+      isOpen: (nodeId: string) => nodeId === b.identity.node_id,
+      push: (nodeId: string, event: unknown) => {
+        pushed.push({ nodeId, event });
+        return 1;
+      },
+    };
+    await deliverOutboxRow(
+      a.db,
+      a.identity,
+      () => {},
+      hub,
+      {
+        node_id: b.identity.node_id,
+        to_box: "bob",
+        from_box: "orq",
+        subject: `task ${task.id.slice(0, 8)}`,
+        body: "stream input: go",
+        origin_id: `${task.id}:input:test`,
+        type: "task-input",
+        task: { id: task.id, result: "stream input: go", state: "working" },
+      } as never,
+      0,
+    );
+
+    // The stream payload landed at the hub as a task-input event (NOT a mail).
+    const ti = pushed.find((p) => (p as { event: { type: string } }).event.type === "task-input");
+    expect(ti).toBeDefined();
+    const noMail = pushed.every((p) => (p as { event: { type: string } }).event.type !== "mail");
+    expect(noMail).toBe(true);
+
+    // The dispatch side: apply the hub event through the receiver consumer —
+    // the handleTaskInput applies (input_required -> working), the mirror
+    // resumes, NO plain DM at the responder.
+    await sweepOutbox(a.db, a.identity, () => {}); // the POST fallback for the un-acked row
+    const mirror = b.db.conn.get<{ state: string; input: string | null }>(
+      "SELECT state, input FROM tasks WHERE id = ?",
+      [task.id],
+    );
+    expect(mirror?.state).toBe("working");
+    expect(mirror?.input).toBe("stream input: go");
+    // No plain DM "task xxxx" at the responder (the old fall-through's trace).
+    const dms = b.db.conn.get<{ n: number }>(
+      "SELECT COUNT(*) AS n FROM deliveries d JOIN messages m ON m.id = d.message_id WHERE d.to_box = 'bob' AND m.subject LIKE '%task %' AND m.kind = 'notify'",
+    )?.n;
+    // The only task avis allowed = the resumed one (the handleTaskInput avis).
+    expect(dms ?? 0).toBeLessThanOrEqual(1);
+    a.server.close();
+    b.server.close();
+  });
+
+  it("two input_required -> input cycles on the SAME task: BOTH inputs apply (the origin_id dedup dead)", {
+    timeout: 30_000,
+  }, async () => {
+    const db = openMeshDb(":memory:");
+    registerMailbox(db, { name: "orq", session_id: "s1", now: Date.now() });
+    registerMailbox(db, { name: "xhost", session_id: "s2", now: Date.now() });
+    const task = askTask(db, { from_box: "orq", to_box: "xhost", question: "the task" });
+    expect(replyTask(db, task.id, "xhost", "pause 1", "input_required").ok).toBe(true);
+    // The first input crosses (a UNIQUE origin_id per input).
+    queueTaskInput(db, { ...task, input: "input 1" }, Date.now());
+    const p1 = db.conn.all<{ payload: string }>(
+      "SELECT payload FROM outbox WHERE json_extract(payload,'$.type') = 'task-input'",
+    );
+    expect(p1).toHaveLength(1);
+    handleTaskInput(db, JSON.parse(p1[0]!.payload) as never);
+    expect(
+      db.conn.get<{ state: string }>("SELECT state FROM tasks WHERE id = ?", [task.id])?.state,
+    ).toBe("working");
+
+    // The SECOND cycle: pause again, input again — the second payload must
+    // carry a DIFFERENT origin_id (the dedup by origin_id is dead) and the
+    // apply must fire again.
+    expect(replyTask(db, task.id, "xhost", "pause 2", "input_required").ok).toBe(true);
+    queueTaskInput(db, { ...task, input: "input 2" }, Date.now());
+    const p2 = db.conn.all<{ payload: string }>(
+      "SELECT payload FROM outbox WHERE json_extract(payload,'$.type') = 'task-input' ORDER BY created_at DESC LIMIT 1",
+    );
+    expect(p2).toHaveLength(1);
+    const origin1 = JSON.parse(p1[0]!.payload).origin_id as string;
+    const origin2 = JSON.parse(p2[0]!.payload).origin_id as string;
+    expect(origin1).not.toBe(origin2); // the collision is dead
+    handleTaskInput(db, JSON.parse(p2[0]!.payload) as never);
+    const finalInput = db.conn.get<{ input: string }>("SELECT input FROM tasks WHERE id = ?", [
+      task.id,
+    ]);
+    expect(finalInput?.input).toBe("input 2"); // the second input APPLIED
+  });
+
+  it("the ack of a task-input does NOT mark the task-ask row (the origin_id split)", () => {
+    const db = openMeshDb(":memory:");
+    registerMailbox(db, { name: "orq", session_id: "s1", now: Date.now() });
+    const task = askTask(db, { from_box: "orq", to_box: "xhost", question: "q" });
+    queueTaskAsk(db, task, Date.now());
+    queueTaskInput(db, { ...task, input: "the feed" }, Date.now());
+    // The ask row + the input row: two DIFFERENT origin_ids.
+    const rows = db.conn.all<{ id: string; origin_id: string; state: string }>(
+      "SELECT id, origin_id, state FROM outbox ORDER BY created_at",
+    );
+    expect(rows).toHaveLength(2);
+    expect(rows[0]?.origin_id).not.toBe(rows[1]?.origin_id);
+    // Ack the INPUT row by its origin: the ASK row stays queued.
+    markOutboxSentByOrigin(db, rows[1]!.origin_id, Date.now());
+    expect(
+      db.conn.get<{ state: string }>("SELECT state FROM outbox WHERE id = ?", [rows[0]!.id])?.state,
+    ).toBe("queued");
+    expect(
+      db.conn.get<{ state: string }>("SELECT state FROM outbox WHERE id = ?", [rows[1]!.id])?.state,
+    ).toBe("sent");
   });
 });
