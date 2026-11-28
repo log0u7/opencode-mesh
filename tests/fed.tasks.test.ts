@@ -823,29 +823,30 @@ describe("the task-input stream strip (0.34.7, the mr-reviewer BLOCK round)", ()
     rmSync(senderDir, { recursive: true, force: true });
   });
 
-  it("(c) a task-input on an asker_node MISMATCH is refused at the dispatch - no ack, no apply", () => {
+  it("(c) a task-input on an asker_node MISMATCH is refused by the REAL dispatch - return null, no ack, no apply", () => {
     const receiver = openMeshDb(":memory:");
     registerMailbox(receiver, { name: "bob", session_id: "s2", now: Date.now() });
     receiver.conn.run(
       `INSERT INTO tasks (id, from_box, to_box, question, state, created_at, updated_at, deadline, deadline_left, target_node, asker_node)
        VALUES ('aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', 'orq', 'xhost', 'q', 'input_required', 1000, 1000, NULL, 400000, 'node-x', 'node-a')`,
     );
-    // The spoofing sender = NOT the asker node.
-    const d = {
-      from: "node-evil",
-      task: { id: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", result: "spoofed" },
-      origin_id: "spoof-1",
-    };
-    const eventPeerNodeId = "node-evil";
-    const task = receiver.conn.get<{ asker_node: string | null }>(
-      "SELECT asker_node FROM tasks WHERE id = ?",
-      [d.task.id],
-    );
-    expect(task?.asker_node).not.toBe(eventPeerNodeId); // the gate FAILS: return = no ack
+    // The spoofing sender = NOT the asker node: the REAL dispatch returns
+    // null (no ack -> the sender's row retries to the dead-letter at cap),
+    // nothing applies.
+    const ack = handleStreamEvent(receiver, "node-evil", {
+      type: "task-input",
+      data: {
+        from: "node-evil",
+        task: { id: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", result: "spoofed" },
+        origin_id: "spoof-1",
+      },
+    });
+    expect(ack).toBeNull();
     // The row unchanged (no apply).
     expect(
-      receiver.conn.get<{ state: string }>("SELECT state FROM tasks WHERE id = ?", [d.task.id])
-        ?.state,
+      receiver.conn.get<{ state: string }>("SELECT state FROM tasks WHERE id = ?", [
+        "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+      ])?.state,
     ).toBe("input_required");
   });
 });
