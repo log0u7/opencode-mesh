@@ -1309,37 +1309,44 @@ function replyTaskInner(
 ): { ok: boolean; error?: string; notified: boolean; cross?: boolean } {
   const task = getTask(db, taskId);
   if (!task) return { ok: false, error: "unknown task", notified: false };
-  if (["completed", "failed", "canceled"].includes(task.state))
-    return { ok: false, error: `the task is already ${task.state}`, notified: false };
   const ts = now ?? Date.now();
-  // The ASKER'S channel (0.34.3, the T7 real scenario): the task's asker
-  // (from_box) feeds an input — the task resumes WORKING and the paused
-  // deadline resumes (now + the stored remaining). The asker cannot set the
-  // state: an input is an input, not a verdict.
+  // The ASKER'S channel (0.34.6, the PO audit): the task's asker
+  // (from_box) feeds an input — ONLY on an input_required task (the audit
+  // point a: the old else branch let the asker silently overwrite the
+  // result of a COMPLETED task). The input lands in tasks.input, never in
+  // result (the responder's answer stays intact). The task resumes WORKING
+  // and the paused deadline resumes (now + the stored remaining).
   if (task.from_box === replyingBox && task.to_box !== replyingBox) {
-    if (task.state === "input_required") {
-      const resumed = task.deadline_left === null ? null : ts + task.deadline_left;
-      db.conn.run(
-        "UPDATE tasks SET result = ?, state = 'working', updated_at = ?, deadline = ?, deadline_left = NULL WHERE id = ?",
-        [result, ts, resumed, taskId],
-      );
-      // The responder must see the input: the avis rides the same task-mail
-      // machinery (from the task's target box, back to... no: TO the
-      // responder — the task's target session reads its own box).
-      deliverMessage(db, {
-        from: task.from_box,
-        to_box: task.to_box,
-        subject: `task ${task.id.slice(0, 8)} resumed working`,
-        body: `asker input: ${result}\n(task ${task.id.slice(0, 8)}, deadline resumed)`,
-        kind: "notify",
-        task_id: task.id,
-      });
-      return { ok: true, notified: true };
+    if (task.state !== "input_required")
+      return {
+        ok: false,
+        error: "the asker may only answer an input_required task",
+        notified: false,
+      };
+    const resumed = task.deadline_left === null ? null : ts + task.deadline_left;
+    db.conn.run(
+      "UPDATE tasks SET input = ?, state = 'working', updated_at = ?, deadline = ?, deadline_left = NULL WHERE id = ?",
+      [result, ts, resumed, taskId],
+    );
+    if (task.target_node != null) {
+      // The CROSS-HOST feed (0.34.6): the responder's mirror row lives on the
+      // target node — the input crosses through the outbox (the TOOL layer
+      // queues task-input, the cross-flag pattern of the mirror reply). The
+      // local row resumes NOW (the source of truth = the asker's node), the
+      // mirror resumes on the wire application.
+      return { ok: true, notified: true, cross: true };
     }
-    // An asker feed on a working/submitted task = an attached note, no state
-    // change (the deadline untouched).
-    db.conn.run("UPDATE tasks SET result = ?, updated_at = ? WHERE id = ?", [result, ts, taskId]);
-    return { ok: true, notified: false };
+    // The local feed: the avis rides the same task-mail machinery (the
+    // task's target session reads its own box).
+    deliverMessage(db, {
+      from: task.from_box,
+      to_box: task.to_box,
+      subject: `task ${task.id.slice(0, 8)} resumed working`,
+      body: `asker input: ${result}\n(task ${task.id.slice(0, 8)}, deadline resumed)`,
+      kind: "notify",
+      task_id: task.id,
+    });
+    return { ok: true, notified: true };
   }
   if (task.to_box !== replyingBox)
     return { ok: false, error: "only the task's target mailbox may reply", notified: false };
@@ -1347,6 +1354,10 @@ function replyTaskInner(
   // clears it (a NULL deadline = no-expiry for the sweeper) — a late answer
   // must not be refused dead-born because the wall clock ran out while the
   // task waited on a human.
+  // The terminal check rides the RESPONDER path only (the asker's refusal
+  // message came first above — the channels are disjoint by from/to box).
+  if (["completed", "failed", "canceled"].includes(task.state))
+    return { ok: false, error: `the task is already ${task.state}`, notified: false };
   let storedState = state;
   let pausedLeft: number | null = null;
   if (state === "input_required") {

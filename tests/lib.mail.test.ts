@@ -1501,3 +1501,77 @@ describe("the deadline pause/resume + the asker's input channel (0.34.3, the T7 
     db.close();
   });
 });
+
+describe("the asker's input channel - hardened (0.34.6, the PO audit)", () => {
+  const DB = (): ReturnType<typeof openMeshDb> => {
+    const db = openMeshDb(":memory:");
+    registerMailbox(db, { name: "orq", session_id: "s1", now: 1000 });
+    registerMailbox(db, { name: "xhost", session_id: "s2", now: 1000 });
+    return db;
+  };
+  const insert = (
+    db: ReturnType<typeof openMeshDb>,
+    state: string,
+    created: number,
+    deadline: number | null,
+  ): string => {
+    const id = randomUUID();
+    db.conn.run(
+      `INSERT INTO tasks (id, from_box, to_box, question, state, created_at, updated_at, deadline, target_node)
+       VALUES (?, 'orq', 'xhost', 'q', ?, ?, ?, ?, 'node-x')`,
+      [id, state, created, created, deadline],
+    );
+    return id;
+  };
+
+  it("(a) the asker's reply on a NON-input_required task is REFUSED, result intact", () => {
+    const db = DB();
+    const id = insert(db, "completed", 0, null);
+    db.conn.run("UPDATE tasks SET result = 'the original answer' WHERE id = ?", [id]);
+    const out = replyTask(db, id, "orq", "a late input", "working", 5_000);
+    expect(out.ok).toBe(false);
+    expect(out.error).toContain("the asker may only answer an input_required task");
+    const task = db.conn.get<{ result: string; state: string }>(
+      "SELECT result, state FROM tasks WHERE id = ?",
+      [id],
+    );
+    expect(task?.result).toBe("the original answer"); // untouched
+    expect(task?.state).toBe("completed");
+    db.close();
+  });
+
+  it("(b) the asker's input lands in tasks.input, NEVER in result", () => {
+    const db = DB();
+    const id = insert(db, "working", 0, 120_000);
+    expect(replyTask(db, id, "xhost", "the answer v1", "input_required", 30_000).ok).toBe(true);
+    const fed = replyTask(db, id, "orq", "the asker input", "working", 40_000);
+    expect(fed.ok).toBe(true);
+    const task = db.conn.get<{ input: string | null; result: string }>(
+      "SELECT input, result FROM tasks WHERE id = ?",
+      [id],
+    );
+    expect(task?.input).toBe("the asker input");
+    expect(task?.result).toBe("the answer v1"); // the responder's answer intact
+    db.close();
+  });
+
+  it("(d) the 24h cap reads the PAUSE ENTRY (updated_at frozen during the silence)", () => {
+    const db = DB();
+    const id = insert(db, "working", 0, null);
+    expect(replyTask(db, id, "xhost", "need input", "input_required", 100_000).ok).toBe(true);
+    // 23h59 later: still alive (the updated_at = the pause entry).
+    sweepTasks(db, 100_000 + 23 * 3600_000 + 59 * 60_000);
+    expect(
+      db.conn.get<{ state: string }>("SELECT state FROM tasks WHERE id = ?", [id])?.state,
+    ).toBe("input_required");
+    // 24h01 later: failed by the cap.
+    sweepTasks(db, 100_000 + 24 * 3600_000 + 60_000);
+    const task = db.conn.get<{ state: string; result: string }>(
+      "SELECT state, result FROM tasks WHERE id = ?",
+      [id],
+    );
+    expect(task?.state).toBe("failed");
+    expect(task?.result).toContain("input_required expired");
+    db.close();
+  });
+});

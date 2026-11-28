@@ -4,7 +4,7 @@ import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-import { openMeshDb } from "../src/lib/db.js";
+import { openMeshDb, SCHEMA_VERSION } from "../src/lib/db.js";
 import { openSqlite } from "../src/lib/sqlite.js";
 
 // The pre-versioning schema: tables only, no indexes, user_version left at 0.
@@ -64,7 +64,9 @@ describe("mesh database schema", () => {
       legacy.close();
 
       const db = openMeshDb(file);
-      expect(db.conn.get<{ user_version: number }>("PRAGMA user_version")?.user_version).toBe(27);
+      expect(db.conn.get<{ user_version: number }>("PRAGMA user_version")?.user_version).toBe(
+        SCHEMA_VERSION,
+      );
       const names = db.conn
         .all<{ name: string }>("SELECT name FROM sqlite_master WHERE type = 'index'")
         .map((row) => row.name);
@@ -89,7 +91,9 @@ describe("mesh database schema", () => {
       v1.close();
 
       const db = openMeshDb(file);
-      expect(db.conn.get<{ user_version: number }>("PRAGMA user_version")?.user_version).toBe(27);
+      expect(db.conn.get<{ user_version: number }>("PRAGMA user_version")?.user_version).toBe(
+        SCHEMA_VERSION,
+      );
       const columns = db.conn
         .all<{ name: string }>("PRAGMA table_info(peers)")
         .map((row) => row.name);
@@ -101,7 +105,7 @@ describe("mesh database schema", () => {
       // migration pass, no version churn.
       const reopened = openMeshDb(file);
       expect(reopened.conn.get<{ user_version: number }>("PRAGMA user_version")?.user_version).toBe(
-        27,
+        SCHEMA_VERSION,
       );
       reopened.close();
     } finally {
@@ -157,7 +161,9 @@ describe("mesh database schema", () => {
       v8.close();
 
       const db = openMeshDb(file);
-      expect(db.conn.get<{ user_version: number }>("PRAGMA user_version")?.user_version).toBe(27);
+      expect(db.conn.get<{ user_version: number }>("PRAGMA user_version")?.user_version).toBe(
+        SCHEMA_VERSION,
+      );
       const columns = db.conn
         .all<{ name: string }>("PRAGMA table_info(messages)")
         .map((row) => row.name);
@@ -188,7 +194,9 @@ describe("mesh database schema", () => {
       v13.close();
 
       const db = openMeshDb(file);
-      expect(db.conn.get<{ user_version: number }>("PRAGMA user_version")?.user_version).toBe(27);
+      expect(db.conn.get<{ user_version: number }>("PRAGMA user_version")?.user_version).toBe(
+        SCHEMA_VERSION,
+      );
       const columns = db.conn
         .all<{ name: string }>("PRAGMA table_info(workers)")
         .map((row) => row.name);
@@ -340,6 +348,42 @@ describe("the schema bump gates the deadline_left migration (0.34.4, the T7-repl
       const v = db.conn.get<{ user_version: number }>("PRAGMA user_version")?.user_version;
       expect(v).toBeGreaterThanOrEqual(27);
       db.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("the generic migration gate (0.34.6, the PO audit point e)", () => {
+  it("a database at schema N-1 gains EVERY current column at boot (no version-dur blind spot)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mesh-mig-n1-"));
+    try {
+      // Shape N-1: boot at the CURRENT schema, then regress the user_version
+      // to N-1 and DROP the columns the latest migration added — the exact
+      // state of a database created by the PREVIOUS release.
+      const db = openMeshDb(join(dir, "mesh.db"));
+      db.conn.exec("PRAGMA user_version = 27");
+      db.conn.exec("ALTER TABLE tasks DROP COLUMN deadline_left");
+      db.conn.exec("ALTER TABLE tasks DROP COLUMN input");
+      db.close();
+
+      const booted = openMeshDb(join(dir, "mesh.db"));
+      const cols = booted.conn.all<{ name: string }>("PRAGMA table_info(tasks)").map((r) => r.name);
+      // The FULL current column set must be present after the boot — the
+      // migration gate must not skip a single one.
+      for (const col of [
+        "deadline_left",
+        "input",
+        "group_notified_at",
+        "target_node",
+        "asker_node",
+      ]) {
+        expect(cols, `column ${col} missing after boot`).toContain(col);
+      }
+      expect(booted.conn.get<{ user_version: number }>("PRAGMA user_version")?.user_version).toBe(
+        SCHEMA_VERSION,
+      );
+      booted.close();
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

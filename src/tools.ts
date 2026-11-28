@@ -9,7 +9,7 @@ import { buildOfferBlob, parseOfferBlob } from "./lib/offer-blob.js";
 import { listOwnAddresses, type AddressOptions } from "./lib/providers.js";
 import { pluginVersion } from "./lib/version.js";
 import { pairingProof, type NodeIdentity } from "./lib/identity.js";
-import { queueOutbox, queueTaskAsk, queueTaskReply } from "./lib/outbox.js";
+import { queueOutbox, queueTaskAsk, queueTaskInput, queueTaskReply } from "./lib/outbox.js";
 import { BOARD_KEYS, boardGet, boardSet, type BoardKey } from "./lib/mail.js";
 import {
   deliverMessage,
@@ -774,9 +774,16 @@ export function buildToolSpecs(mesh: MeshContext): ToolSpec[] {
         const res = replyTask(db, taskId, replyingBox, String(args.result ?? ""), state);
         if (!res.ok) return `error: ${res.error}`;
         // The MIRROR reply (refonte P2.5): the asker is on another node —
-        // the reply crosses back through the outbox.
+        // the reply crosses back through the outbox. The channel by ROLE
+        // (0.34.6): the TARGET box queues task-reply (the verdict crosses
+        // back), the ASKER box queues task-input (the feed crosses forward —
+        // the mirror resumes on the wire application).
         if (res.cross) {
-          queueTaskReply(db, taskId, String(args.result ?? ""), state, Date.now());
+          if (replyingBox === task.to_box) {
+            queueTaskReply(db, taskId, String(args.result ?? ""), state, Date.now());
+          } else {
+            queueTaskInput(db, { ...task, input: String(args.result ?? "") }, Date.now());
+          }
           return JSON.stringify({ task_id: taskId.slice(0, 8), state, queued_back: true });
         }
         return JSON.stringify({ task_id: taskId.slice(0, 8), state, notified: res.notified });

@@ -19,7 +19,7 @@ export type MeshDb = {
 // bump: every database already at 26 skipped the whole migrate block at
 // boot, the column never landed, and mesh_reply's input_required pause died
 // on "no such column" — the T7-replay blocker, live on ricinus).
-const SCHEMA_VERSION = 27;
+export const SCHEMA_VERSION = 28;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS peers (
@@ -279,6 +279,12 @@ function migrate(conn: SqliteConn): void {
   // time and clears the deadline in one UPDATE.
   if (!taskColumns.includes("deadline_left")) {
     conn.exec("ALTER TABLE tasks ADD COLUMN deadline_left INTEGER");
+  }
+  // 0.34.6: tasks.input — the ASKER's input lands HERE, never in result (the
+  // audit: the feed overwrote the responder's answer). The task resumes on
+  // the asker's reply; the input column is the asker's trace.
+  if (!taskColumns.includes("input")) {
+    conn.exec("ALTER TABLE tasks ADD COLUMN input TEXT");
   }
   // v25: tasks.target_node + tasks.asker_node (the 0.33.3): the cross-node
   // task routing stops parsing the "node/box" composite — target_node is
