@@ -350,7 +350,9 @@ export async function deliverOutboxRow(
         reply_to: payload.reply_to,
         kind: payload.kind ?? "notify",
         origin_id: payload.origin_id,
-        ...(payload.type === "task-ask" || payload.type === "task-reply"
+        ...(payload.type === "task-ask" ||
+        payload.type === "task-reply" ||
+        payload.type === "task-input"
           ? { task: payload.task }
           : {}),
       },
